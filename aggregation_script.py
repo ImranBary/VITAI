@@ -2,8 +2,6 @@
 
 import pandas as pd
 import numpy as np
-from sklearn.impute import KNNImputer
-from sklearn.preprocessing import FunctionTransformer
 from datetime import datetime
 
 # ------------------------------
@@ -16,9 +14,9 @@ patients = pd.read_csv(r"D:\DataGen\synthea\output\csv\patients.csv", usecols=[
     'HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME'
 ])
 
-# Convert BIRTHDATE and DEATHDATE to datetime
-patients['BIRTHDATE'] = pd.to_datetime(patients['BIRTHDATE'])
-patients['DEATHDATE'] = pd.to_datetime(patients['DEATHDATE'])
+# Convert BIRTHDATE and DEATHDATE to datetime without timezone
+patients['BIRTHDATE'] = pd.to_datetime(patients['BIRTHDATE']).dt.tz_localize(None)
+patients['DEATHDATE'] = pd.to_datetime(patients['DEATHDATE']).dt.tz_localize(None)
 
 # Calculate Age
 current_date = datetime.now()
@@ -36,7 +34,7 @@ patients.drop(columns=['BIRTHDATE', 'DEATHDATE'], inplace=True)
 # ------------------------------
 
 # Load Conditions Data
-conditions = pd.read_csv(r"D:\DataGen\synthea\output\csv/conditions.csv", usecols=['PATIENT', 'DESCRIPTION', 'START', 'STOP'])
+conditions = pd.read_csv(r"D:\DataGen\synthea\output\csv\conditions.csv", usecols=['PATIENT', 'DESCRIPTION', 'START', 'STOP'])
 
 # Convert START and STOP to datetime without timezone
 conditions['START'] = pd.to_datetime(conditions['START']).dt.tz_localize(None)
@@ -72,7 +70,7 @@ for name, keyword in condition_descriptions.items():
 # ------------------------------
 
 # Load Medications Data
-medications = pd.read_csv(r"D:\DataGen\synthea\output\csv/medications.csv", usecols=['PATIENT', 'DESCRIPTION', 'START', 'STOP'])
+medications = pd.read_csv(r"D:\DataGen\synthea\output\csv\medications.csv", usecols=['PATIENT', 'DESCRIPTION', 'START', 'STOP'])
 
 # Convert START and STOP to datetime without timezone
 medications['START'] = pd.to_datetime(medications['START']).dt.tz_localize(None)
@@ -108,7 +106,7 @@ for name, keyword in medication_descriptions.items():
 # ------------------------------
 
 # Load Observations Data
-observations = pd.read_csv(r"D:\DataGen\synthea\output\csv/observations.csv", usecols=[
+observations = pd.read_csv(r"D:\DataGen\synthea\output\csv\observations.csv", usecols=[
     'PATIENT', 'DATE', 'DESCRIPTION', 'VALUE', 'UNITS'
 ])
 
@@ -140,7 +138,7 @@ vitals_agg = vitals.groupby(['PATIENT', 'DESCRIPTION']).agg({
 # Flatten MultiIndex columns
 vitals_agg.columns = ['PATIENT', 'DESCRIPTION', 'mean', 'std', 'min', 'max', 'last_value', 'last_date']
 
-# Ensure 'last_date' is timezone-naive before calculating 'days_since_last'
+# Ensure 'last_date' is timezone-naive
 vitals_agg['last_date'] = vitals_agg['last_date'].dt.tz_localize(None)
 
 # Calculate days since last observation
@@ -154,7 +152,6 @@ vitals_pivot.columns = ['_'.join(col).strip() for col in vitals_pivot.columns.va
 
 # Reset index
 vitals_pivot.reset_index(inplace=True)
-
 
 # ------------------------------
 # 5. Aggregate Procedures
@@ -192,16 +189,40 @@ for name, keyword in procedure_descriptions.items():
     ).astype(int)
 
 # ------------------------------
-# 6. Aggregate Imaging Studies
+# 6. Aggregate Allergies
+# ------------------------------
+
+# Load Allergies Data
+allergies = pd.read_csv(r"D:\DataGen\synthea\output\csv\allergies.csv", usecols=['PATIENT', 'DESCRIPTION'])
+
+# Count of allergies per patient
+allergy_counts = allergies.groupby('PATIENT').size().reset_index(name='num_allergies')
+
+# Allergies to search for
+allergy_descriptions = {
+    'penicillin_allergy': 'penicillin',
+    'peanut_allergy': 'peanut'
+}
+
+# Create binary flags for allergies
+for name, keyword in allergy_descriptions.items():
+    patients[name] = patients['Id'].isin(
+        allergies.loc[
+            allergies['DESCRIPTION'].str.contains(keyword, case=False, na=False), 'PATIENT'
+        ]
+    ).astype(int)
+
+# ------------------------------
+# 7. Aggregate Imaging Studies
 # ------------------------------
 
 # Load Imaging Studies Data
-imaging_studies = pd.read_csv(r"D:\DataGen\synthea\output\csv/imaging_studies.csv", usecols=[
+imaging_studies = pd.read_csv(r"D:\DataGen\synthea\output\csv\imaging_studies.csv", usecols=[
     'PATIENT', 'DATE', 'MODALITY_CODE'
 ])
 
-# Convert DATE to datetime
-imaging_studies['DATE'] = pd.to_datetime(imaging_studies['DATE'])
+# Convert DATE to datetime without timezone
+imaging_studies['DATE'] = pd.to_datetime(imaging_studies['DATE']).dt.tz_localize(None)
 
 # Count of imaging studies per patient
 imaging_counts = imaging_studies.groupby('PATIENT').size().reset_index(name='num_imaging_studies')
@@ -224,15 +245,15 @@ modality_codes = {
 modalities.rename(columns=modality_codes, inplace=True)
 
 # ------------------------------
-# 7. Aggregate Encounters
+# 8. Aggregate Encounters
 # ------------------------------
 
 # Load Encounters Data
-encounters = pd.read_csv(r"D:\DataGen\synthea\output\csv/encounters.csv", usecols=['PATIENT', 'ENCOUNTERCLASS', 'START', 'STOP'])
+encounters = pd.read_csv(r"D:\DataGen\synthea\output\csv\encounters.csv", usecols=['PATIENT', 'ENCOUNTERCLASS', 'START', 'STOP'])
 
-# Convert START and STOP to datetime
-encounters['START'] = pd.to_datetime(encounters['START'])
-encounters['STOP'] = pd.to_datetime(encounters['STOP'])
+# Convert START and STOP to datetime without timezone
+encounters['START'] = pd.to_datetime(encounters['START']).dt.tz_localize(None)
+encounters['STOP'] = pd.to_datetime(encounters['STOP']).dt.tz_localize(None)
 
 # Calculate duration of encounters
 encounters['DURATION_DAYS'] = (encounters['STOP'] - encounters['START']).dt.days
@@ -249,7 +270,7 @@ encounter_types = encounters.groupby(['PATIENT', 'ENCOUNTERCLASS']).size().unsta
 encounter_types.reset_index(inplace=True)
 
 # ------------------------------
-# 8. Merge All Data
+# 9. Merge All Data
 # ------------------------------
 
 # Start with patients DataFrame
@@ -285,14 +306,19 @@ merged_df['num_medications'] = merged_df['num_medications'].fillna(0).astype(int
 merged_df['total_medication_duration'] = merged_df['total_medication_duration'].fillna(0)
 merged_df.drop(columns=['PATIENT'], inplace=True)
 
-# Merge procedure counts
+# Merge procedure counts and duration
 merged_df = merged_df.merge(
     procedure_counts,
     how='left',
     left_on='Id',
     right_on='PATIENT'
+).merge(
+    procedure_duration,
+    how='left',
+    on='PATIENT'
 )
 merged_df['num_procedures'] = merged_df['num_procedures'].fillna(0).astype(int)
+merged_df['total_procedure_duration'] = merged_df['total_procedure_duration'].fillna(0)
 merged_df.drop(columns=['PATIENT'], inplace=True)
 
 # Merge allergy counts
@@ -388,9 +414,9 @@ final_columns = [
     'Id', 'AGE', 'DECEASED', 'GENDER', 'RACE', 'ETHNICITY',
     'HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME',
     'num_conditions', 'total_condition_duration', 'num_medications', 'total_medication_duration',
-    'num_procedures', 'num_allergies', 'num_imaging_studies', 'num_encounters', 'total_encounter_duration',
+    'num_procedures', 'total_procedure_duration', 'num_allergies', 'num_imaging_studies', 'num_encounters', 'total_encounter_duration',
     'age_years', 'num_conditions_per_year', 'num_medications_per_year', 'num_encounters_per_year'
-] + counts_cols + [col + '_log' for col in counts_cols] + additional_columns + list(merged_df.columns[merged_df.columns.str.contains('ENCOUNTERCLASS')]) + list(merged_df.columns[merged_df.columns.str.contains('MODALITY_CODE')]) + list(vitals_pivot.columns[1:])
+] + counts_cols + [col + '_log' for col in counts_cols] + additional_columns + list(encounter_types.columns[1:]) + list(modalities.columns[1:]) + list(vitals_pivot.columns[1:])
 
 final_columns = [col for col in final_columns if col in merged_df.columns]
 

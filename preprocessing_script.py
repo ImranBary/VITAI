@@ -2,7 +2,7 @@
 
 import pandas as pd
 import numpy as np
-from sklearn.impute import KNNImputer
+from sklearn.impute import SimpleImputer  # Using SimpleImputer for speed
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import VarianceThreshold
 
@@ -17,24 +17,51 @@ combined_df = pd.read_csv('aggregated_patient_data_improved.csv')
 structured_data = combined_df.drop(columns=['Id']).copy()
 
 # ------------------------------
-# 2. Handle Missing Values
+# 2. Handle Date Columns
+# ------------------------------
+
+# Identify columns containing 'last_date'
+date_cols = [col for col in structured_data.columns if 'last_date' in col]
+
+# Option 1: Drop the date columns
+# structured_data.drop(columns=date_cols, inplace=True)
+
+# Option 2: Convert date columns to numeric format (e.g., days since a reference date)
+# For this example, we'll convert dates to days since '1970-01-01'
+
+for col in date_cols:
+    # Convert to datetime
+    structured_data[col] = pd.to_datetime(structured_data[col], errors='coerce')
+    # Replace NaT with the current date to avoid NaNs
+    structured_data[col] = structured_data[col].fillna(pd.to_datetime('today'))
+    # Convert to days since 1970-01-01
+    structured_data[col] = (structured_data[col] - pd.Timestamp('1970-01-01')).dt.total_seconds() / (24 * 3600)
+
+# ------------------------------
+# 3. Handle Missing Values
 # ------------------------------
 
 # Identify numerical columns
-num_cols = structured_data.select_dtypes(include=['float64', 'int64']).columns.tolist()
+num_cols = structured_data.select_dtypes(include=[np.number]).columns.tolist()
 
-# Initialize KNN Imputer
-knn_imputer = KNNImputer(n_neighbors=5)
+# Remove columns with more than 50% missing values
+threshold = len(structured_data) * 0.5
+cols_to_drop = [col for col in num_cols if structured_data[col].isnull().sum() > threshold]
+structured_data.drop(columns=cols_to_drop, inplace=True)
+num_cols = [col for col in num_cols if col not in cols_to_drop]
 
 # Impute missing values
-structured_data[num_cols] = knn_imputer.fit_transform(structured_data[num_cols])
+imputer = SimpleImputer(strategy='mean')
+X_imputed = imputer.fit_transform(structured_data[num_cols])
 
-# Add missingness indicators (if desired)
-# for col in num_cols:
-#     structured_data[col + '_missing'] = structured_data[col].isnull().astype(int)
+# Convert back to DataFrame with proper columns and index
+X_imputed_df = pd.DataFrame(X_imputed, columns=num_cols, index=structured_data.index)
+
+# Assign back to structured_data
+structured_data[num_cols] = X_imputed_df
 
 # ------------------------------
-# 3. Encode Categorical Variables
+# 4. Encode Categorical Variables
 # ------------------------------
 
 # Identify categorical columns
@@ -43,7 +70,6 @@ cat_cols = ['GENDER', 'RACE', 'ETHNICITY']
 # Fill missing categorical values with 'Unknown'
 structured_data[cat_cols] = structured_data[cat_cols].fillna('Unknown')
 
-# Reconsider encoding strategy
 # Frequency Encoding for categorical variables
 for col in cat_cols:
     freq_encoding = structured_data[col].value_counts(normalize=True)
@@ -53,20 +79,31 @@ for col in cat_cols:
 structured_data.drop(columns=cat_cols, inplace=True)
 
 # ------------------------------
-# 4. Feature Scaling
+# 5. Ensure All Features Are Numeric
 # ------------------------------
 
-# Define features to scale (excluding frequency encoded columns)
-features_to_scale = num_cols + [col for col in structured_data.columns if '_freq_enc' in col]
+# Identify non-numeric columns
+non_numeric_cols = structured_data.select_dtypes(exclude=[np.number]).columns.tolist()
+
+if non_numeric_cols:
+    print(f"Non-numeric columns found and will be dropped: {non_numeric_cols}")
+    structured_data.drop(columns=non_numeric_cols, inplace=True)
+
+# Update num_cols to include new numeric features
+num_cols = structured_data.columns.tolist()
+
+# ------------------------------
+# 6. Feature Scaling
+# ------------------------------
 
 # Initialize scaler
 scaler = StandardScaler()
 
 # Scale features
-structured_data[features_to_scale] = scaler.fit_transform(structured_data[features_to_scale])
+structured_data[num_cols] = scaler.fit_transform(structured_data[num_cols])
 
 # ------------------------------
-# 5. Feature Selection
+# 7. Feature Selection
 # ------------------------------
 
 # Remove low variance features
@@ -81,7 +118,7 @@ high_corr_features = [column for column in upper.columns if any(upper[column] > 
 structured_data.drop(columns=high_corr_features, inplace=True)
 
 # ------------------------------
-# 6. Save Preprocessed Data
+# 8. Save Preprocessed Data
 # ------------------------------
 
 # Save the preprocessed structured data
