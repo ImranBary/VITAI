@@ -1,2 +1,12 @@
 *.csv
+*.joblib
+vae_model_enhanced/
+vae_tuning/
+autoencoder_tuning/
+.tmp.drivedownload/
+.tmp.driveupload/
+Data/
 Auto_K-Means/
+Deprecated Code/
+coverage
+*.h5
