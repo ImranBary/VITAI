@@ -1,0 +1,15 @@
+conda create --name tf_gpu_env python=3.9
+conda activate tf_gpu_env
+
+
+pip cache purge
+pip uninstall tensorflow keras-tuner numpy pandas matplotlib seaborn scikit-learn joblib
+
+conda install -c conda-forge cudatoolkit=11.2 cudnn=8.1.0
+pip install --upgrade pip
+pip install "tensorflow<2.11" 
+
+pip install keras-tuner --no-deps
+pip install terminaltables tabulate tqdm colorama
+pip install pandas matplotlib seaborn scikit-learn joblib
+pip install numpy==1.23

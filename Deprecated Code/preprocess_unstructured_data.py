@@ -48,4 +48,4 @@ combined_df['Token_IDs_Padded'] = list(token_ids_padded)
 combined_df['Attention_Masks_Padded'] = list(attention_masks_padded)
 
 # Save the preprocessed unstructured data
-combined_df.to_csv('unstructured_data_preprocessed.csv', index=False)
+combined_df.to_csv('structured_data_preprocessed.csv', index=False)
