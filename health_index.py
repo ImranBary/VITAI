@@ -1,9 +1,7 @@
-'''
-health_index.py
-Author: Imran Feisal
-Date: 31/10/2024
-Description: Calculate the composite health index for each patient and save it for use in modeling.
-'''
+# health_index.py
+# Author: Imran Feisal
+# Date: 31/10/2024
+# Description: Calculate the composite health index for each patient and save it for use in modeling.
 
 import pandas as pd
 import numpy as np
@@ -38,12 +36,6 @@ def calculate_health_indicators(patient_data, data_dir):
     observations = pd.read_csv(os.path.join(data_dir, 'observations.csv'), usecols=[
         'PATIENT', 'DESCRIPTION', 'VALUE', 'UNITS'
     ])
-
-    # Initialize indicators
-    patient_data['Chronic_Conditions_Count'] = 0
-    patient_data['Hospitalizations_Count'] = 0
-    patient_data['Medications_Count'] = 0
-    patient_data['Abnormal_Observations_Count'] = 0
 
     # -----------------------------------------
     # 2.1 Calculate Chronic Conditions Count
@@ -100,10 +92,7 @@ def calculate_health_indicators(patient_data, data_dir):
     # Map condition descriptions to chronic conditions
     conditions['IS_CHRONIC'] = conditions['DESCRIPTION'].isin(chronic_conditions_list).astype(int)
     chronic_conditions_count = conditions.groupby('PATIENT')['IS_CHRONIC'].sum().reset_index()
-    chronic_conditions_count.columns = ['Id', 'Chronic_Conditions_Count']
-
-    # Merge with patient_data
-    patient_data = patient_data.merge(chronic_conditions_count, on='Id', how='left')
+    chronic_conditions_count.rename(columns={'IS_CHRONIC': 'Chronic_Conditions_Count'}, inplace=True)
 
     # -----------------------------------------
     # 2.2 Calculate Hospitalizations Count
@@ -111,19 +100,11 @@ def calculate_health_indicators(patient_data, data_dir):
     # Filter encounters for inpatient class
     hospitalizations = encounters[encounters['ENCOUNTERCLASS'] == 'inpatient']
     hospitalizations_count = hospitalizations.groupby('PATIENT').size().reset_index(name='Hospitalizations_Count')
-    hospitalizations_count.columns = ['Id', 'Hospitalizations_Count']
-
-    # Merge with patient_data
-    patient_data = patient_data.merge(hospitalizations_count, on='Id', how='left')
 
     # -----------------------------------------
     # 2.3 Calculate Medications Count
     # -----------------------------------------
-    medications_count = medications.groupby('PATIENT')['CODE'].nunique().reset_index()
-    medications_count.columns = ['Id', 'Medications_Count']
-
-    # Merge with patient_data
-    patient_data = patient_data.merge(medications_count, on='Id', how='left')
+    medications_count = medications.groupby('PATIENT')['CODE'].nunique().reset_index(name='Medications_Count')
 
     # -----------------------------------------
     # 2.4 Calculate Abnormal Observations Count
@@ -153,13 +134,34 @@ def calculate_health_indicators(patient_data, data_dir):
     # Assume any recorded value for these observations indicates an abnormal result
     observations['IS_ABNORMAL'] = observations['DESCRIPTION'].isin(abnormal_observations_list).astype(int)
     abnormal_observations_count = observations.groupby('PATIENT')['IS_ABNORMAL'].sum().reset_index()
-    abnormal_observations_count.columns = ['Id', 'Abnormal_Observations_Count']
-
-    # Merge with patient_data
-    patient_data = patient_data.merge(abnormal_observations_count, on='Id', how='left')
+    abnormal_observations_count.rename(columns={'IS_ABNORMAL': 'Abnormal_Observations_Count'}, inplace=True)
 
     # -----------------------------------------
-    # 2.5 Fill NaN values with zeros
+    # 2.5 Merge Counts into patient_data
+    # -----------------------------------------
+    # Ensure that the 'Id' column in patient_data matches 'PATIENT' in counts
+    # So, we'll merge on 'Id' and 'PATIENT' appropriately
+
+    # First, set the index of patient_data to 'Id' for efficient merging
+    patient_data.set_index('Id', inplace=True)
+
+    # Merge Chronic Conditions Count
+    patient_data = patient_data.merge(chronic_conditions_count.set_index('PATIENT'), left_index=True, right_index=True, how='left')
+
+    # Merge Hospitalizations Count
+    patient_data = patient_data.merge(hospitalizations_count.set_index('PATIENT'), left_index=True, right_index=True, how='left')
+
+    # Merge Medications Count
+    patient_data = patient_data.merge(medications_count.set_index('PATIENT'), left_index=True, right_index=True, how='left')
+
+    # Merge Abnormal Observations Count
+    patient_data = patient_data.merge(abnormal_observations_count.set_index('PATIENT'), left_index=True, right_index=True, how='left')
+
+    # Reset index to have 'Id' as a column again
+    patient_data.reset_index(inplace=True)
+
+    # -----------------------------------------
+    # 2.6 Fill NaN values with zeros
     # -----------------------------------------
     indicators = ['Chronic_Conditions_Count', 'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count']
     patient_data[indicators] = patient_data[indicators].fillna(0)
@@ -231,7 +233,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
 '''
 Comments on improvements:
