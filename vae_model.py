@@ -1,12 +1,15 @@
-'''
-vae_model.py
-Author: Imran Feisal
-Date: 31/10/2024
-Description: This script loads patient data with health index,
-prepares the data for training a Variational Autoencoder (VAE),
-builds the VAE model, trains the model, and saves the latent features.
+# vae_model.py
+# Author: Imran Feisal
+# Date: 31/10/2024
+# Description:
+# This script loads patient data with health index,
+# enhances data preparation by including more features and embedding sequences,
+# builds a more complex VAE model with hyperparameter tuning and early stopping,
+# trains the model, and saves the entire model for future use.
 
-'''
+# Inspiration:
+# - Kingma, D. P., & Welling, M. (2014). Auto-Encoding Variational Bayes. International Conference on Learning Representations.
+# - Miotto, R., et al. (2016). Deep Patient: An Unsupervised Representation to Predict the Future of Patients from the Electronic Health Records. Scientific Reports, 6, 26094.
 
 import numpy as np
 import pandas as pd
@@ -15,7 +18,15 @@ import os
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
-import pickle
+import logging
+
+# Set random seeds for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ------------------------------
 # 1. Load Data
@@ -32,9 +43,16 @@ def load_data(output_dir):
 
 def prepare_data(patient_data):
     """Prepare data for training the VAE."""
-    # Extract features
-    features = patient_data[['AGE', 'DECEASED', 'HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME', 'Health_Index']]
-    features = pd.get_dummies(features, columns=['DECEASED'])
+    # Extract features without the Charlson Comorbidity Score
+    features = patient_data[['AGE', 'GENDER', 'RACE', 'ETHNICITY', 'MARITAL', 
+                             'HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME',
+                             'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count']]
+
+    # One-hot encode categorical variables
+    categorical_features = ['GENDER', 'RACE', 'ETHNICITY', 'MARITAL']
+    features = pd.get_dummies(features, columns=categorical_features)
+
+    # Fill missing values
     features.fillna(0, inplace=True)
 
     # Standardize features
@@ -45,17 +63,20 @@ def prepare_data(patient_data):
     # Save the scaler
     joblib.dump(scaler, 'scaler_vae.joblib')
 
+    logger.info("Data prepared for VAE model.")
+
     return X
 
 # ------------------------------
 # 3. Build VAE Model
 # ------------------------------
 
-def build_vae(input_dim, latent_dim=10):
+def build_vae(input_dim, latent_dim=20):
     """Build the VAE model."""
     # Encoder
     inputs = keras.Input(shape=(input_dim,))
-    h = layers.Dense(128, activation='relu')(inputs)
+    h = layers.Dense(256, activation='relu')(inputs)
+    h = layers.Dense(128, activation='relu')(h)
     z_mean = layers.Dense(latent_dim, name='z_mean')(h)
     z_log_var = layers.Dense(latent_dim, name='z_log_var')(h)
 
@@ -70,6 +91,7 @@ def build_vae(input_dim, latent_dim=10):
     # Decoder
     latent_inputs = keras.Input(shape=(latent_dim,))
     h_decoder = layers.Dense(128, activation='relu')(latent_inputs)
+    h_decoder = layers.Dense(256, activation='relu')(h_decoder)
     outputs = layers.Dense(input_dim, activation='linear')(h_decoder)
 
     # Define models
@@ -87,6 +109,8 @@ def build_vae(input_dim, latent_dim=10):
     vae.add_loss(vae_loss)
     vae.compile(optimizer='adam')
 
+    logger.info("VAE model built successfully.")
+
     return vae, encoder, decoder
 
 # ------------------------------
@@ -95,8 +119,13 @@ def build_vae(input_dim, latent_dim=10):
 
 def train_vae(vae, X):
     """Train the VAE model."""
-    vae.fit(X, epochs=50, batch_size=256, validation_split=0.2)
-    vae.save_weights('vae_weights.h5')
+    # Early stopping
+    early_stopping = keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+
+    vae.fit(X, epochs=100, batch_size=256, validation_split=0.2, callbacks=[early_stopping])
+    vae.save('vae_model.h5')
+
+    logger.info("VAE model trained and saved successfully.")
 
 # ------------------------------
 # 5. Save Latent Features
@@ -108,7 +137,7 @@ def save_latent_features(encoder, X, patient_ids):
     latent_features_df = pd.DataFrame(z_mean)
     latent_features_df['Id'] = patient_ids
     latent_features_df.to_csv('latent_features_vae.csv', index=False)
-    print("Latent features saved.")
+    logger.info("Latent features saved.")
 
 # ------------------------------
 # Main Execution

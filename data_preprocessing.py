@@ -2,16 +2,27 @@
 data_preprocessing.py
 Author: Imran Feisal 
 Date: 31/10/2024
-Description:This script loads Synthea data from CSV files, 
+Description:
+This script loads Synthea data from CSV files, 
+enhances feature extraction from patient demographics,
+handles missing data more robustly,
 aggregates codes from conditions, medications, procedures, and observations, 
 builds sequences of visits for each patient, and saves the processed data for modeling.
 
+Inspiration:
+- Batista, G. E. A. P. A., & Monard, M. C. (2003). An analysis of four missing data treatment methods for supervised learning. Applied Artificial Intelligence, 17(5–6), 519–533.
+- Jensen, P. B., Jensen, L. J., & Brunak, S. (2012). Mining electronic health records: towards better research applications and clinical care. Nature Reviews Genetics, 13(6), 395–405.
 '''
 
 import pandas as pd
 import numpy as np
 from datetime import datetime
 import os
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ------------------------------
 # 1. Load Data
@@ -22,12 +33,16 @@ def load_data(data_dir):
     # Load Patients Data
     patients = pd.read_csv(os.path.join(data_dir, 'patients.csv'), usecols=[
         'Id', 'BIRTHDATE', 'DEATHDATE', 'GENDER', 'RACE', 'ETHNICITY',
-        'HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME'
+        'HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME', 'MARITAL'
     ])
 
-    # Convert dates to datetime without timezone
-    patients['BIRTHDATE'] = pd.to_datetime(patients['BIRTHDATE']).dt.tz_localize(None)
-    patients['DEATHDATE'] = pd.to_datetime(patients['DEATHDATE']).dt.tz_localize(None)
+    # Convert 'BIRTHDATE' and 'DEATHDATE' to datetime format
+    patients['BIRTHDATE'] = pd.to_datetime(patients['BIRTHDATE'], errors='coerce')
+    patients['DEATHDATE'] = pd.to_datetime(patients['DEATHDATE'], errors='coerce')
+
+    # Check for future birthdates and deaths before births
+    patients = patients[patients['BIRTHDATE'] <= datetime.now()]
+    patients = patients[(patients['DEATHDATE'].isnull()) | (patients['DEATHDATE'] >= patients['BIRTHDATE'])]
 
     # Calculate Age
     current_date = datetime.now()
@@ -37,8 +52,21 @@ def load_data(data_dir):
     # Calculate if patient is deceased
     patients['DECEASED'] = patients['DEATHDATE'].notnull().astype(int)
 
+    # Calculate age at death
+    patients['AGE_AT_DEATH'] = ((patients['DEATHDATE'] - patients['BIRTHDATE']).dt.days / 365.25).fillna(patients['AGE'])
+
     # Drop unnecessary columns
     patients.drop(columns=['BIRTHDATE', 'DEATHDATE'], inplace=True)
+
+    # Handle missing data using mean imputation for numerical features
+    numerical_features = ['HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME']
+    for col in numerical_features:
+        patients[col].fillna(patients[col].mean(), inplace=True)
+
+    # Handle missing data for categorical features by creating an 'Unknown' category
+    categorical_features = ['GENDER', 'RACE', 'ETHNICITY', 'MARITAL']
+    for col in categorical_features:
+        patients[col].fillna('Unknown', inplace=True)
 
     # Load Encounters Data (Visits)
     encounters = pd.read_csv(os.path.join(data_dir, 'encounters.csv'), usecols=[
@@ -51,6 +79,8 @@ def load_data(data_dir):
 
     # Sort encounters by patient and start date
     encounters.sort_values(by=['PATIENT', 'START'], inplace=True)
+
+    logger.info("Data loaded and preprocessed successfully.")
 
     return patients, encounters
 
@@ -71,7 +101,7 @@ def aggregate_codes(data_dir):
         'PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION'
     ])
     observations = pd.read_csv(os.path.join(data_dir, 'observations.csv'), usecols=[
-        'PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION'
+        'PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION', 'VALUE', 'UNITS'
     ])
 
     # Combine all codes into a single DataFrame
@@ -95,6 +125,8 @@ def aggregate_codes(data_dir):
 
     # Map codes to IDs
     codes['CODE_ID'] = codes['UNIQUE_CODE'].map(code_to_id)
+
+    logger.info("Codes aggregated successfully.")
 
     return codes, code_to_id, id_to_code
 
@@ -120,6 +152,8 @@ def build_patient_sequences(encounters, codes):
                 patient_visits.append(visit_codes)
         if patient_visits:
             patient_sequences[patient_id] = patient_visits
+
+    logger.info("Patient sequences built successfully.")
 
     return patient_sequences
 
@@ -148,7 +182,7 @@ def save_processed_data(patients, patient_sequences, code_to_id, output_dir):
     # Save patient data with sequences
     patient_data.to_pickle(os.path.join(output_dir, 'patient_data_sequences.pkl'))
 
-    print("Data aggregation complete. Processed data saved.")
+    logger.info("Data aggregation complete. Processed data saved.")
 
 # ------------------------------
 # Main Execution
