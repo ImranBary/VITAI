@@ -10,3 +10,5 @@ Auto_K-Means/
 Deprecated Code/
 coverage
 *.h5
+*.zip
+*.html

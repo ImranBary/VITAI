@@ -104,7 +104,7 @@ def objective(trial, X, y, cat_idxs, cat_dims):
             X_train=X_train_fold, y_train=y_train_fold,
             eval_set=[(X_valid_fold, y_valid_fold)],
             eval_metric=['rmse'],
-            max_epochs=200,
+            max_epochs=100,
             patience=20,
             batch_size=1024,
             virtual_batch_size=128,
@@ -121,7 +121,7 @@ def objective(trial, X, y, cat_idxs, cat_dims):
 def hyperparameter_tuning(X, y, cat_idxs, cat_dims):
     """Perform hyperparameter tuning using Optuna."""
     study = optuna.create_study(direction='minimize')
-    study.optimize(lambda trial: objective(trial, X, y, cat_idxs, cat_dims), n_trials=50)
+    study.optimize(lambda trial: objective(trial, X, y, cat_idxs, cat_dims), n_trials=20)
 
     logger.info(f"Best trial: {study.best_trial.params}")
 
@@ -133,9 +133,14 @@ def hyperparameter_tuning(X, y, cat_idxs, cat_dims):
 
 def train_tabnet(X_train, y_train, X_valid, y_valid, cat_idxs, cat_dims, best_params):
     """Train the TabNet model with the best hyperparameters."""
+    # Extract 'lr' from best_params and create 'optimizer_params'
+    optimizer_params = {'lr': best_params.pop('lr')}
+    
+    # Now pass optimizer_params to TabNetRegressor
     regressor = TabNetRegressor(
         cat_idxs=cat_idxs,
         cat_dims=cat_dims,
+        optimizer_params=optimizer_params,
         **best_params
     )
 
@@ -144,7 +149,7 @@ def train_tabnet(X_train, y_train, X_valid, y_valid, cat_idxs, cat_dims, best_pa
         y_train=y_train,
         eval_set=[(X_valid, y_valid)],
         eval_metric=['rmse'],
-        max_epochs=200,
+        max_epochs=100,
         patience=20,
         batch_size=1024,
         virtual_batch_size=128,
@@ -157,6 +162,7 @@ def train_tabnet(X_train, y_train, X_valid, y_valid, cat_idxs, cat_dims, best_pa
     logger.info("TabNet model trained and saved successfully.")
 
     return regressor
+
 
 # ------------------------------
 # 5. Evaluate Model
