@@ -214,8 +214,9 @@ def save_processed_data(patients, patient_sequences, code_to_id, output_dir):
 # ------------------------------
 
 def main():
-    data_dir = r'E:\DataGen\synthea\output\csv'  
-    output_dir = 'Data'
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, 'Data')
+    output_dir = data_dir  # same directory for outputs
     os.makedirs(output_dir, exist_ok=True)
 
     # Load data

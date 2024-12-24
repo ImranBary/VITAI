@@ -268,8 +268,10 @@ def save_health_index(patient_data, output_dir):
 # ------------------------------
 
 def main():
-    output_dir = 'Data'
-    data_dir = r'E:\DataGen\synthea\output\csv'
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, 'Data')
+    output_dir = data_dir  # same directory for outputs
+    os.makedirs(output_dir, exist_ok=True)
 
     # Load processed data
     patient_data, code_mappings = load_processed_data(output_dir)
