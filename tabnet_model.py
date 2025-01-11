@@ -15,6 +15,7 @@ from pytorch_tabnet.tab_model import TabNetRegressor
 from sklearn.model_selection import train_test_split, KFold
 from sklearn.metrics import mean_squared_error, r2_score
 import logging
+import json
 import optuna
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
@@ -140,6 +141,17 @@ def main(input_file='patient_data_with_health_index.pkl'):
     predictions_df=pd.DataFrame({'Id':patient_data.iloc[-len(X_test):]['Id'].values, 
                                  'Predicted_Health_Index':test_preds.flatten()})
     predictions_df.to_csv('tabnet_predictions.csv',index=False)
+    
+    # ---------------------------
+    # Write MSE/R2 to a small file
+    # ---------------------------
+    metrics = {
+        "test_mse": test_mse,
+        "test_r2": test_r2
+    }
+    with open("tabnet_metrics.json","w") as f:
+        json.dump(metrics, f)
+    logger.info("TabNet metrics saved to tabnet_metrics.json")
 
 if __name__=='__main__':
     main()
