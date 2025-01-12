@@ -3,8 +3,9 @@
 # Date: 31/10/2024
 # Description:
 # This script builds and trains a TabNet model using hyperparameter tuning,
-# includes cross-validation, extracts feature importances, and saves the trained model and results.
-# Updated to accept input_file parameter and avoid file renaming.
+# includes cross-validation, extracts feature importances, and saves the
+# trained model and results. 
+# Now accepts an output_prefix param to avoid overwriting artifacts.
 
 import numpy as np
 import pandas as pd
@@ -23,140 +24,154 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def load_data(output_dir, input_file):
-    data_path=os.path.join(output_dir, input_file)
+    data_path = os.path.join(output_dir, input_file)
     if not os.path.exists(data_path):
         logger.error(f"Data file not found at {data_path}")
         raise FileNotFoundError(f"Data file not found at {data_path}")
-    patient_data=pd.read_pickle(data_path)
+    patient_data = pd.read_pickle(data_path)
     logger.info("Patient data loaded.")
     return patient_data
 
 def prepare_data(patient_data):
-    features=patient_data[['AGE','DECEASED','GENDER','RACE','ETHNICITY','MARITAL',
-                           'HEALTHCARE_EXPENSES','HEALTHCARE_COVERAGE','INCOME',
-                           'Hospitalizations_Count','Medications_Count','Abnormal_Observations_Count']].copy()
-    target=patient_data['Health_Index']
+    features = patient_data[[
+        'AGE','DECEASED','GENDER','RACE','ETHNICITY','MARITAL',
+        'HEALTHCARE_EXPENSES','HEALTHCARE_COVERAGE','INCOME',
+        'Hospitalizations_Count','Medications_Count','Abnormal_Observations_Count'
+    ]].copy()
+    target = patient_data['Health_Index']
 
-    categorical_columns=['DECEASED','GENDER','RACE','ETHNICITY','MARITAL']
-    cat_idxs=[i for i,col in enumerate(features.columns) if col in categorical_columns]
-    cat_dims=[]
+    categorical_columns = ['DECEASED','GENDER','RACE','ETHNICITY','MARITAL']
+    cat_idxs = [i for i,col in enumerate(features.columns) if col in categorical_columns]
+    cat_dims = []
 
     for col in categorical_columns:
-        le=LabelEncoder()
-        features[col]=le.fit_transform(features[col].astype(str))
+        le = LabelEncoder()
+        features[col] = le.fit_transform(features[col].astype(str))
         cat_dims.append(features[col].nunique())
 
-    continuous_columns=[col for col in features.columns if col not in categorical_columns]
-    scaler=StandardScaler()
-    features[continuous_columns]=scaler.fit_transform(features[continuous_columns])
-    joblib.dump(scaler,'tabnet_scaler.joblib')
+    continuous_columns = [col for col in features.columns if col not in categorical_columns]
+    scaler = StandardScaler()
+    features[continuous_columns] = scaler.fit_transform(features[continuous_columns])
+    joblib.dump(scaler, 'tabnet_scaler.joblib')
 
-    features.fillna(0,inplace=True)
-    X=features.values
-    y=target.values.reshape(-1,1)
+    features.fillna(0, inplace=True)
+    X = features.values
+    y = target.values.reshape(-1,1)
     logger.info("Data prepared for TabNet.")
-    return X,y,cat_idxs,cat_dims,features.columns.tolist()
+    return X, y, cat_idxs, cat_dims, features.columns.tolist()
 
-def objective(trial,X,y,cat_idxs,cat_dims):
-    params={
-        'n_d':trial.suggest_int('n_d',8,64),
-        'n_a':trial.suggest_int('n_a',8,64),
-        'n_steps':trial.suggest_int('n_steps',3,10),
-        'gamma':trial.suggest_float('gamma',1.0,2.0),
-        'lambda_sparse':trial.suggest_float('lambda_sparse',1e-6,1e-3,log=True),
-        'optimizer_fn':torch.optim.Adam,
-        'optimizer_params':dict(lr=trial.suggest_float('lr',1e-4,1e-2,log=True)),
-        'cat_emb_dim':trial.suggest_int('cat_emb_dim',1,5),
-        'n_shared':trial.suggest_int('n_shared',1,5),
-        'n_independent':trial.suggest_int('n_independent',1,5),
-        'device_name':'cuda',
-        'verbose':0,
+def objective(trial, X, y, cat_idxs, cat_dims):
+    params = {
+        'n_d': trial.suggest_int('n_d', 8, 64),
+        'n_a': trial.suggest_int('n_a', 8, 64),
+        'n_steps': trial.suggest_int('n_steps', 3, 10),
+        'gamma': trial.suggest_float('gamma', 1.0, 2.0),
+        'lambda_sparse': trial.suggest_float('lambda_sparse', 1e-6, 1e-3, log=True),
+        'optimizer_fn': torch.optim.Adam,
+        'optimizer_params': dict(lr=trial.suggest_float('lr',1e-4,1e-2,log=True)),
+        'cat_emb_dim': trial.suggest_int('cat_emb_dim',1,5),
+        'n_shared': trial.suggest_int('n_shared',1,5),
+        'n_independent': trial.suggest_int('n_independent',1,5),
+        'device_name': 'cuda',
+        'verbose': 0,
     }
-    kf=KFold(n_splits=3,shuffle=True,random_state=42)
-    mse_list=[]
-    for train_idx,valid_idx in kf.split(X):
-        X_train_fold,X_valid_fold=X[train_idx],X[valid_idx]
-        y_train_fold,y_valid_fold=y[train_idx],y[valid_idx]
+    kf = KFold(n_splits=3, shuffle=True, random_state=42)
+    mse_list = []
 
-        model=TabNetRegressor(cat_idxs=cat_idxs,cat_dims=cat_dims,**params)
-        model.fit(X_train=X_train_fold,y_train=y_train_fold,
-                  eval_set=[(X_valid_fold,y_valid_fold)],
-                  eval_metric=['rmse'],
-                  max_epochs=50,
-                  patience=10,
-                  batch_size=4096,
-                  virtual_batch_size=512)
-        preds=model.predict(X_valid_fold)
-        mse=mean_squared_error(y_valid_fold,preds)
+    for train_idx, valid_idx in kf.split(X):
+        X_train_fold, X_valid_fold = X[train_idx], X[valid_idx]
+        y_train_fold, y_valid_fold = y[train_idx], y[valid_idx]
+
+        model = TabNetRegressor(cat_idxs=cat_idxs, cat_dims=cat_dims, **params)
+        model.fit(
+            X_train=X_train_fold, y_train=y_train_fold,
+            eval_set=[(X_valid_fold, y_valid_fold)],
+            eval_metric=['rmse'],
+            max_epochs=50,
+            patience=10,
+            batch_size=4096,
+            virtual_batch_size=512
+        )
+        preds = model.predict(X_valid_fold)
+        mse = mean_squared_error(y_valid_fold, preds)
         mse_list.append(mse)
     return np.mean(mse_list)
 
-def hyperparameter_tuning(X,y,cat_idxs,cat_dims):
+def hyperparameter_tuning(X, y, cat_idxs, cat_dims):
     import optuna
-    study=optuna.create_study(direction='minimize')
-    study.optimize(lambda trial: objective(trial,X,y,cat_idxs,cat_dims),n_trials=20)
+    study = optuna.create_study(direction='minimize')
+    study.optimize(lambda trial: objective(trial, X, y, cat_idxs, cat_dims), n_trials=20)
     logger.info(f"Best trial: {study.best_trial.params}")
     return study.best_trial.params
 
-def train_tabnet(X_train,y_train,X_valid,y_valid,cat_idxs,cat_dims,best_params):
-    optimizer_fn=torch.optim.Adam
-    optimizer_params={'lr':best_params.pop('lr')}
+def train_tabnet(X_train, y_train, X_valid, y_valid, cat_idxs, cat_dims, best_params, output_prefix='tabnet'):
+    optimizer_fn = torch.optim.Adam
+    optimizer_params = {'lr': best_params.pop('lr')}
     best_params.update({
-        'optimizer_fn':optimizer_fn,
-        'optimizer_params':optimizer_params,
-        'device_name':'cuda',
-        'verbose':1
+        'optimizer_fn': optimizer_fn,
+        'optimizer_params': optimizer_params,
+        'device_name': 'cuda',
+        'verbose': 1
     })
-    regressor=TabNetRegressor(cat_idxs=cat_idxs,cat_dims=cat_dims,**best_params)
-    regressor.fit(X_train=X_train,
-                  y_train=y_train,
-                  eval_set=[(X_valid,y_valid)],
-                  eval_metric=['rmse'],
-                  max_epochs=200,
-                  patience=20,
-                  batch_size=8192,
-                  virtual_batch_size=1024)
-    regressor.save_model('tabnet_model')
-    logger.info("TabNet model trained and saved.")
+    regressor = TabNetRegressor(cat_idxs=cat_idxs, cat_dims=cat_dims, **best_params)
+    regressor.fit(
+        X_train=X_train,
+        y_train=y_train,
+        eval_set=[(X_valid, y_valid)],
+        eval_metric=['rmse'],
+        max_epochs=200,
+        patience=20,
+        batch_size=8192,
+        virtual_batch_size=1024
+    )
+    regressor.save_model(f'{output_prefix}_model')
+    logger.info(f"TabNet model trained and saved -> {output_prefix}_model.zip (among others).")
     return regressor
 
-def main(input_file='patient_data_with_health_index.pkl'):
+def main(input_file='patient_data_with_health_index.pkl', output_prefix='tabnet'):
+    """
+    Args:
+        input_file (str): Pickle file containing patient data
+        output_prefix (str): Unique prefix to avoid overwriting model artifacts
+    """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     output_dir = os.path.join(script_dir, 'Data')
-    patient_data=load_data(output_dir,input_file)
-    X,y,cat_idxs,cat_dims,feature_columns=prepare_data(patient_data)
+    patient_data = load_data(output_dir, input_file)
+    X, y, cat_idxs, cat_dims, feature_columns = prepare_data(patient_data)
 
-    X_train_full,X_test,y_train_full,y_test=train_test_split(X,y,test_size=0.1,random_state=42)
-    X_train,X_valid,y_train,y_valid=train_test_split(X_train_full,y_train_full,test_size=0.2,random_state=42)
+    X_train_full, X_test, y_train_full, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
+    X_train, X_valid, y_train, y_valid = train_test_split(X_train_full, y_train_full, test_size=0.2, random_state=42)
 
-    best_params=hyperparameter_tuning(X_train,y_train,cat_idxs,cat_dims)
-    regressor=train_tabnet(X_train,y_train,X_valid,y_valid,cat_idxs,cat_dims,best_params)
-    test_preds=regressor.predict(X_test)
-    test_mse=mean_squared_error(y_test,test_preds)
-    test_r2=r2_score(y_test,test_preds)
+    best_params = hyperparameter_tuning(X_train, y_train, cat_idxs, cat_dims)
+    regressor = train_tabnet(X_train, y_train, X_valid, y_valid, cat_idxs, cat_dims, best_params, output_prefix=output_prefix)
+
+    test_preds = regressor.predict(X_test)
+    test_mse = mean_squared_error(y_test, test_preds)
+    test_r2 = r2_score(y_test, test_preds)
     logger.info(f"Test MSE: {test_mse:.4f}")
     logger.info(f"Test R2: {test_r2:.4f}")
 
-    # Save predictions for analysis
-    predictions_df=pd.DataFrame({'Id':patient_data.iloc[-len(X_test):]['Id'].values, 
-                                 'Predicted_Health_Index':test_preds.flatten()})
-    predictions_df.to_csv('tabnet_predictions.csv',index=False)
-    
-    # ---------------------------
-    # Write MSE/R2 to a small file
-    # ---------------------------
+    # Save predictions
+    predictions_df = pd.DataFrame({
+        'Id': patient_data.iloc[-len(X_test):]['Id'].values, 
+        'Predicted_Health_Index': test_preds.flatten()
+    })
+    pred_csv = f'{output_prefix}_predictions.csv'
+    predictions_df.to_csv(pred_csv, index=False)
+    logger.info(f"TabNet predictions saved -> {pred_csv}")
+
+    # Save metrics
     metrics = {
         "test_mse": test_mse,
         "test_r2": test_r2
     }
-    with open("tabnet_metrics.json","w") as f:
+    metrics_file = f"{output_prefix}_metrics.json"
+    with open(metrics_file, "w") as f:
         json.dump(metrics, f)
-    logger.info("TabNet metrics saved to tabnet_metrics.json")
+    logger.info(f"TabNet metrics saved -> {metrics_file}")
 
-if __name__=='__main__':
+if __name__ == '__main__':
     main()
-
-
 
 '''
 import numpy as np

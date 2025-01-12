@@ -1,7 +1,7 @@
 """
 comprehensive_testing.py
-Author: [Your Name]
-Date: [DD/MM/YYYY]
+Author: Imran Feisal 
+Date: 11/01/2025
 
 Description:
 This script orchestrates a series of experiments to evaluate multiple configurations 
@@ -226,21 +226,37 @@ def select_features(patient_data, feature_config="composite"):
 # Model Runners
 # ------------------------------------------------------------------------------
 
-def run_vae(patient_data_pkl):
-    logger.info(f"[INFO] Running VAE on {patient_data_pkl} ...")
-    vae_main(input_file=patient_data_pkl)
-    latent_csv = "latent_features_vae.csv"
+def run_vae(patient_data_pkl, output_prefix):
+    """
+    Runs the VAE script with a given output_prefix and returns the path 
+    to the latent CSV file produced.
+    """
+    logger.info(f"[INFO] Running VAE on {patient_data_pkl} with prefix={output_prefix} ...")
+    # We call the VAE main script via an OS command or by importing and calling main().
+    # If you're calling it as a function, do:
+    from vae_model import main as vae_main
+    vae_main(input_file=patient_data_pkl, output_prefix=output_prefix)
+
+    latent_csv = f"{output_prefix}_latent_features.csv"  
     if not os.path.exists(latent_csv):
-        logger.warning("[WARN] latent_features_vae.csv not found after VAE training.")
+        logger.warning("[WARN] latent features CSV not found after VAE training.")
+        return None
     return latent_csv
 
 
-def run_tabnet(patient_data_pkl):
-    logger.info(f"[INFO] Running TabNet on {patient_data_pkl} ...")
-    tabnet_main(input_file=patient_data_pkl)
-    preds_csv = "tabnet_predictions.csv"
+def run_tabnet(patient_data_pkl, output_prefix):
+    """
+    Runs the TabNet script with a given output_prefix and returns the path
+    to the predictions CSV.
+    """
+    logger.info(f"[INFO] Running TabNet on {patient_data_pkl} with prefix={output_prefix} ...")
+    from tabnet_model import main as tabnet_main
+    tabnet_main(input_file=patient_data_pkl, output_prefix=output_prefix)
+
+    preds_csv = f"{output_prefix}_predictions.csv"
     if not os.path.exists(preds_csv):
-        logger.warning("[WARN] tabnet_predictions.csv not found after TabNet training.")
+        logger.warning("[WARN] TabNet predictions CSV not found after TabNet training.")
+        return None
     return preds_csv
 
 
@@ -494,29 +510,37 @@ def main():
         config_id = f"{fc}_{ss}_{ma}"
         logger.info(f"\n--- Running config: {config_id} ---")
 
-        # 1) Filter data to subset
+        # (1) Filter data
         data_sub = filter_subpopulation(full_data, ss, data_dir=data_dir)
 
-        # 2) Select features
+        # (2) Select features
         data_sel = select_features(data_sub, fc)
 
-        # 3) Save to .pkl
+        # (3) Save to .pkl
         tmp_pkl_name = f"temp_data_{config_id}_{run_timestamp}.pkl"
         tmp_pkl_path = os.path.join(data_dir, tmp_pkl_name)
         data_sel.to_pickle(tmp_pkl_path)
-        logger.info(f"[INFO] Saved subset data for config={config_id} -> {tmp_pkl_path}")
+        logger.info(f"[INFO] Saved subset data -> {tmp_pkl_path}")
 
-        # 4) Train model(s)
-        latent_csv, tabnet_csv = None, None
+        # (4) Train model(s)
+        latent_csv = None
+        tabnet_csv = None
+
         if ma == "vae":
-            latent_csv = run_vae(tmp_pkl_name)
-        elif ma == "tabnet":
-            tabnet_csv = run_tabnet(tmp_pkl_name)
-        elif ma == "hybrid":
-            latent_csv = run_vae(tmp_pkl_name)
-            tabnet_csv = run_tabnet(tmp_pkl_name)
+            prefix_vae = f"{config_id}_{run_timestamp}_vae"
+            latent_csv = run_vae(tmp_pkl_name, prefix_vae)
 
-        # 5) Merge outputs & cluster
+        elif ma == "tabnet":
+            prefix_tabnet = f"{config_id}_{run_timestamp}_tabnet"
+            tabnet_csv = run_tabnet(tmp_pkl_name, prefix_tabnet)
+
+        elif ma == "hybrid":
+            prefix_vae = f"{config_id}_{run_timestamp}_vae"
+            prefix_tabnet = f"{config_id}_{run_timestamp}_tabnet"
+            latent_csv = run_vae(tmp_pkl_name, prefix_vae)
+            tabnet_csv = run_tabnet(tmp_pkl_name, prefix_tabnet)
+
+        # (5) Merge & cluster
         if latent_csv or tabnet_csv:
             frames = []
             if latent_csv and os.path.exists(latent_csv):
@@ -538,21 +562,39 @@ def main():
         else:
             logger.info("[INFO] No model output CSV to evaluate for config=" + config_id)
 
-        # 6) Evaluate TabNet regression if relevant
-        if ma in ["tabnet","hybrid"]:
-            reg_res = evaluate_regression_performance(config_id)
+        # (6) Evaluate TabNet if relevant
+        if ma in ["tabnet", "hybrid"]:
+            # We read from "xx_tabnet_metrics.json" depending on prefix_tabnet
+            metrics_file = f"{config_id}_{run_timestamp}_tabnet_metrics.json"
+            if os.path.exists(metrics_file):
+                try:
+                    with open(metrics_file, "r") as f:
+                        metrics_data = json.load(f)
+                    mse_val = float(metrics_data.get("test_mse", np.nan))
+                    r2_val = float(metrics_data.get("test_r2", np.nan))
+                except Exception as e:
+                    logger.warning(f"Could not parse {metrics_file}: {e}")
+                    mse_val, r2_val = np.nan, np.nan
+            else:
+                logger.info(f"No TabNet metrics file found for config={config_id}; using placeholder.")
+                mse_val, r2_val = np.nan, np.nan
+
+            reg_res = {
+                "config_id": config_id,
+                "tabnet_mse": mse_val,
+                "tabnet_r2": r2_val
+            }
             all_results.append(reg_res)
 
-        # Clean up if you like:
+        # Clean up if you like
         os.remove(tmp_pkl_path)
 
-    # 7) Save all experiment results
+    # (7) Save all results
     if all_results:
         save_results_to_csv(OUTPUT_RESULTS_CSV, all_results)
         logger.info(f"[INFO] Comprehensive testing done. Results appended to {OUTPUT_RESULTS_CSV}.")
     else:
         logger.info("[WARN] No results collected. Check model outputs.")
-
 
 if __name__ == "__main__":
     main()
