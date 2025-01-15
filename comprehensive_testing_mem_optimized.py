@@ -18,7 +18,7 @@ It references:
 
 Memory-Saving Approaches:
  - Skips hierarchical clustering entirely (AgglomerativeClustering).
- - Uses sampling for DBSCAN, t-SNE, UMAP if the dataset is large.
+ - Uses the entire dataset (no subsampling) for DBSCAN, t-SNE, UMAP, etc.
  - Employs joblib to dump intermediate DataFrames to disk, free memory, and reload as needed.
 
 Usage:
@@ -63,6 +63,7 @@ from tabnet_model import main as tabnet_main
 OUTPUT_RESULTS_CSV = "comprehensive_experiments_results.csv"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 ###############################################################################
 # 1. Ensure Data Preprocessing & CCI
@@ -116,6 +117,7 @@ def ensure_preprocessed_data(data_dir):
     else:
         logger.info("CCI data found.")
 
+
 ###############################################################################
 # 2. Subset Filtering Logic
 ###############################################################################
@@ -159,10 +161,16 @@ def filter_subpopulation(patient_data, subset_type, data_dir):
         logger.warning(f"Unknown subset_type={subset_type}, returning full data.")
         return patient_data
 
+
 ###############################################################################
 # 3. Feature Selection
 ###############################################################################
 def select_features(patient_data, feature_config="composite"):
+    """
+    Grabs only the columns relevant for each feature config.
+    We'll one-hot encode them later, after merging with the model outputs,
+    to avoid numeric-categorical mismatch.
+    """
     chosen_cols = ['Id']
     base_demo = [
         'GENDER','RACE','ETHNICITY','MARITAL',
@@ -188,15 +196,11 @@ def select_features(patient_data, feature_config="composite"):
 
     return patient_data[chosen_cols].copy()
 
+
 ###############################################################################
 # 4. Model Runners
 ###############################################################################
 def run_vae(pkl_file, output_prefix):
-    """
-    Runs the VAE script; returns path to the latent CSV.
-    You can have vae_model.py also accept an output_dir parameter
-    so that it saves the model in the desired folder.
-    """
     from vae_model import main as vae_main
     logger.info(f"Running VAE on {pkl_file} with prefix={output_prefix}.")
     vae_main(input_file=pkl_file, output_prefix=output_prefix)
@@ -207,11 +211,6 @@ def run_vae(pkl_file, output_prefix):
     return latent_csv
 
 def run_tabnet(pkl_file, output_prefix):
-    """
-    Runs the TabNet script; returns path to predictions CSV.
-    Similarly, you can modify tabnet_model.py to accept output_dir
-    if you want the model artifacts saved in a subfolder.
-    """
     from tabnet_model import main as tabnet_main
     logger.info(f"Running TabNet on {pkl_file} with prefix={output_prefix}.")
     tabnet_main(input_file=pkl_file, output_prefix=output_prefix)
@@ -221,18 +220,22 @@ def run_tabnet(pkl_file, output_prefix):
         return None
     return preds_csv
 
+
 ###############################################################################
-# 5. Clustering & Visualization (Memory-Optimized, No Hierarchical)
+# 5. Clustering & Visualization
 ###############################################################################
-def memory_optimized_clustering_and_visualization(merged_df, config_id):
+def memory_optimized_clustering_and_visualization(merged_df, config_id, plots_folder):
     """
-    Uses the entire dataset for clustering and visualization 
-    (no subsampling for memory savings).
+    Clusters on the entire dataset, saving 2D t-SNE/UMAP plots to 'plots_folder'.
+    One-hot encoding must already be done if we have categorical columns.
     """
-    # Make sure we have features to cluster on
-    X_columns = [c for c in merged_df.columns if c not in ('Id','Predicted_Health_Index')]
+    os.makedirs(plots_folder, exist_ok=True)
+
+    # Exclude 'Id' and 'Predicted_Health_Index' from clustering
+    X_columns = [c for c in merged_df.columns if c not in ('Id', 'Predicted_Health_Index')]
     X_full = merged_df[X_columns].values
     logger.info(f"[CLUSTER] Data shape: {X_full.shape}")
+
     if X_full.shape[1] == 0:
         logger.warning(f"[CLUSTER] 0 features for {config_id}. Skipping clustering.")
         return {}
@@ -240,9 +243,7 @@ def memory_optimized_clustering_and_visualization(merged_df, config_id):
     scaler = StandardScaler()
     X_full_scaled = scaler.fit_transform(X_full)
 
-    # ----------------------------
-    # 1) K-Means with entire dataset
-    # ----------------------------
+    # 1) K-Means
     cluster_range = range(6, 10)
     kmeans_results = []
     for n in cluster_range:
@@ -264,13 +265,9 @@ def memory_optimized_clustering_and_visualization(merged_df, config_id):
     best_km = KMeans(n_clusters=best_k, random_state=42)
     best_km.fit(X_full_scaled)
     final_labels_kmeans = best_km.predict(X_full_scaled)
-
-    # Assign final cluster labels
     merged_df['Cluster'] = final_labels_kmeans
 
-    # ----------------------------
-    # 2) DBSCAN with entire dataset
-    # ----------------------------
+    # 2) DBSCAN
     neighbors = 5
     nbrs = NearestNeighbors(n_neighbors=neighbors).fit(X_full_scaled)
     dist, idx = nbrs.kneighbors(X_full_scaled)
@@ -281,7 +278,7 @@ def memory_optimized_clustering_and_visualization(merged_df, config_id):
 
     def cluster_scores(arr, labels):
         uset = set(labels)
-        if len(uset) < 2:  # everything is in 1 cluster or noise
+        if len(uset) < 2:
             return (np.nan, np.nan, np.nan)
         return (
             silhouette_score(arr, labels),
@@ -291,41 +288,39 @@ def memory_optimized_clustering_and_visualization(merged_df, config_id):
 
     db_sil, db_cal, db_dav = cluster_scores(X_full_scaled, db_labels)
 
-    # ----------------------------
-    # 3) Severity Index if we have Predicted_Health_Index
-    # ----------------------------
+    # 3) Severity Index if Predicted_Health_Index is present
     if 'Predicted_Health_Index' in merged_df.columns:
-        cluster_mean = (merged_df
-                        .groupby('Cluster')['Predicted_Health_Index']
-                        .mean()
-                        .sort_values()
-                        .reset_index())
+        cluster_mean = (
+            merged_df
+            .groupby('Cluster')['Predicted_Health_Index']
+            .mean()
+            .sort_values()
+            .reset_index()
+        )
         cluster_mean['Severity_Index'] = range(1, len(cluster_mean)+1)
         c_map = dict(zip(cluster_mean['Cluster'], cluster_mean['Severity_Index']))
         merged_df['Severity_Index'] = merged_df['Cluster'].map(c_map)
 
-    # ----------------------------
-    # 4) Visualization with t-SNE & UMAP
-    # ----------------------------
+    # 4) t-SNE & UMAP Visualization
     hue_col = 'Severity_Index' if 'Severity_Index' in merged_df.columns else 'Cluster'
     hue_vals = merged_df[hue_col].values
 
-    # t-SNE
     tsne_2d = TSNE(n_components=2, random_state=42)
     X_tsne_2d = tsne_2d.fit_transform(X_full_scaled)
     plt.figure(figsize=(8,6))
     sns.scatterplot(x=X_tsne_2d[:,0], y=X_tsne_2d[:,1], hue=hue_vals, palette='viridis')
     plt.title(f"t-SNE 2D - KMeans best_k={best_k}, config={config_id}")
-    plt.savefig(f"tsne2d_{config_id}.png", bbox_inches='tight')
+    tsne_path = os.path.join(plots_folder, f"tsne2d_{config_id}.png")
+    plt.savefig(tsne_path, bbox_inches='tight')
     plt.close()
 
-    # UMAP
     umap_2d = umap.UMAP(n_components=2, random_state=42)
     X_umap_2d = umap_2d.fit_transform(X_full_scaled)
     plt.figure(figsize=(8,6))
     sns.scatterplot(x=X_umap_2d[:,0], y=X_umap_2d[:,1], hue=hue_vals, palette='viridis')
     plt.title(f"UMAP 2D - {config_id}")
-    plt.savefig(f"umap2d_{config_id}.png", bbox_inches='tight')
+    umap_path = os.path.join(plots_folder, f"umap2d_{config_id}.png")
+    plt.savefig(umap_path, bbox_inches='tight')
     plt.close()
 
     # 5) Final K-Means metrics
@@ -333,7 +328,6 @@ def memory_optimized_clustering_and_visualization(merged_df, config_id):
     final_ch = calinski_harabasz_score(X_full_scaled, final_labels_kmeans)
     final_db = davies_bouldin_score(X_full_scaled, final_labels_kmeans)
 
-    # Clean up
     del X_full, X_full_scaled
     gc.collect()
 
@@ -371,6 +365,7 @@ def evaluate_regression_performance(config_id, output_prefix):
         logger.info(f"No TabNet metrics file {metrics_file} found; skipping.")
     return {"config_id": config_id, "tabnet_mse": mse_val, "tabnet_r2": r2_val}
 
+
 ###############################################################################
 # 7. Save Overall Experiment Results
 ###############################################################################
@@ -378,6 +373,7 @@ def save_results_to_csv(output_path, results_list):
     df = pd.DataFrame(results_list)
     write_header = not os.path.exists(output_path)
     df.to_csv(output_path, mode='a', header=write_header, index=False)
+
 
 ###############################################################################
 # 8. Main Execution
@@ -462,6 +458,21 @@ def main():
                 temp_data = pd.read_pickle(temp_file)
                 merged_df = temp_data.merge(merged_df, on='Id', how='inner')
 
+                # >>>>>>  (b2) One-Hot Encode Categorical Columns  <<<<<<
+                cat_cols = ['GENDER', 'RACE', 'ETHNICITY', 'MARITAL']
+                # Only encode if these columns exist
+                existing_cat = [c for c in cat_cols if c in merged_df.columns]
+                if existing_cat:
+                    # Convert to string before pd.get_dummies
+                    for col in existing_cat:
+                        merged_df[col] = merged_df[col].astype(str)
+                    merged_df = pd.get_dummies(
+                        merged_df, 
+                        columns=existing_cat, 
+                        drop_first=True  # avoids dummy trap
+                    )
+                # End of one-hot step
+
                 # (c) Cluster if we have > 0 features
                 features_cols = [c for c in merged_df.columns if c not in ('Id','Predicted_Health_Index')]
                 if len(features_cols) == 0:
@@ -470,8 +481,9 @@ def main():
                     # Use a config-specific plots folder
                     plots_folder = os.path.join(config_folder, "plots")
                     clust_res = memory_optimized_clustering_and_visualization(
-                        merged_df, config_id,
-                        plots_folder=plots_folder,
+                        merged_df,
+                        config_id,
+                        plots_folder=plots_folder
                     )
                     all_results.append(clust_res)
 
@@ -503,6 +515,7 @@ def main():
         logger.info("[MAIN] All experiment results appended to %s", results_csv_path)
     else:
         logger.info("[WARN] No results collected. Check logs for issues.")
+
 
 if __name__ == "__main__":
     main()
