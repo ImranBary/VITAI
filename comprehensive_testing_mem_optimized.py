@@ -303,9 +303,12 @@ def run_vae(pkl_file, output_prefix):
         return None
     return latent_csv
 
-def run_tabnet(pkl_file, output_prefix):
-    logger.info(f"Running TabNet on {pkl_file} with prefix={output_prefix}.")
-    tabnet_main(input_file=pkl_file, output_prefix=output_prefix)
+def run_tabnet(pkl_file, output_prefix, target_col="Health_Index"):
+    """
+    Modified runner that passes a dynamic target_col to tabnet_main.
+    """
+    logger.info(f"Running TabNet on {pkl_file} with prefix={output_prefix}, target={target_col}.")
+    tabnet_main(input_file=pkl_file, output_prefix=output_prefix, target_col=target_col)
     preds_csv = f"{output_prefix}_predictions.csv"
     if not os.path.exists(preds_csv):
         logger.warning("[WARN] TabNet predictions CSV missing after training.")
@@ -541,7 +544,13 @@ def main():
             if step_tabnet_artifacts_ok(tabnet_prefix):
                 logger.info("[RESUME] TabNet artifacts found for %s, skipping TabNet step.", config_id)
             else:
-                run_tabnet(temp_file, tabnet_prefix)
+                # Decide which target_col to use
+                if fc == "cci":
+                    # For cci feature config, predict CharlsonIndex
+                    run_tabnet(temp_file, tabnet_prefix, target_col="CharlsonIndex")
+                else:
+                    # For composite or combined, predict Health_Index
+                    run_tabnet(temp_file, tabnet_prefix, target_col="Health_Index")
 
         # 5) Merge outputs & cluster
         #    Only do clustering if at least one model produced an output
