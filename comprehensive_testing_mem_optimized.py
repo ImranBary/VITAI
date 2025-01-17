@@ -1,5 +1,5 @@
 """
-comprehensive_testing_mem_optimized.py
+comprehensive_testing_mem_optimized_refactored.py
 Author: Imran Feisal
 Date: 12/01/2025
 
@@ -22,7 +22,7 @@ Memory-Saving Approaches:
  - Employs joblib to dump intermediate DataFrames to disk, free memory, and reload as needed.
 
 Usage:
-  python comprehensive_testing_mem_optimized.py
+  python comprehensive_testing_mem_optimized_refactored.py
 """
 
 import os
@@ -32,6 +32,7 @@ import datetime
 import logging
 import json
 import itertools
+import time
 
 import numpy as np
 import pandas as pd
@@ -64,6 +65,99 @@ OUTPUT_RESULTS_CSV = "comprehensive_experiments_results.csv"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+###############################################################################
+# 0. Helper Functions for "Resume" Logic
+###############################################################################
+def file_is_fully_written(file_path, min_size=1, max_age_seconds=30):
+    """
+    Return True if the file_path exists, is larger than min_size (bytes),
+    and hasn't been modified in the last `max_age_seconds` (to avoid partial).
+    """
+    if not os.path.exists(file_path):
+        return False
+
+    # Check file size
+    if os.path.getsize(file_path) < min_size:
+        return False
+
+    # Check last modification time
+    mtime = os.path.getmtime(file_path)
+    now = time.time()
+    if (now - mtime) < max_age_seconds:
+        # If the file was *just* modified, there's a small chance it's incomplete
+        # We consider it "not fully written" in this window
+        return False
+
+    return True
+
+def step_vae_artifacts_ok(vae_prefix):
+    """
+    For VAE, the final artifact is typically the latent-features CSV.
+    Optionally, you could also check the saved model directories.
+    """
+    latent_csv = f"{vae_prefix}_latent_features.csv"
+    return file_is_fully_written(latent_csv, min_size=10)
+
+def step_tabnet_artifacts_ok(tabnet_prefix):
+    """
+    For TabNet, we expect both predictions CSV and metrics JSON.
+    Optionally, also check the model zip file.
+    """
+    preds_csv = f"{tabnet_prefix}_predictions.csv"
+    metrics_json = f"{tabnet_prefix}_metrics.json"
+    preds_ok = file_is_fully_written(preds_csv, min_size=10)
+    metrics_ok = file_is_fully_written(metrics_json, min_size=2)
+    return preds_ok and metrics_ok
+
+def step_clustering_artifacts_ok(config_id, config_folder):
+    """
+    We consider clustering "done" if we have both tsne and umap plots.
+    If you store more artifacts (e.g. a CSV with cluster labels),
+    you can check that as well.
+    """
+    plots_folder = os.path.join(config_folder, "plots")
+    tsne_file = os.path.join(plots_folder, f"tsne2d_{config_id}.png")
+    umap_file = os.path.join(plots_folder, f"umap2d_{config_id}.png")
+    tsne_ok = file_is_fully_written(tsne_file, min_size=1000)
+    umap_ok = file_is_fully_written(umap_file, min_size=1000)
+    return (tsne_ok and umap_ok)
+
+def all_steps_done(fc, ss, ma, config_folder, run_timestamp):
+    """
+    If you want to skip the entire (fc, ss, ma) if *all* final artifacts exist,
+    define this function. We'll check VAE, TabNet, and clustering if relevant.
+    """
+    config_id = f"{fc}_{ss}_{ma}"
+    # Build typical prefixes
+    vae_prefix = os.path.join(config_folder, f"{config_id}_{run_timestamp}_vae")
+    tabnet_prefix = os.path.join(config_folder, f"{config_id}_{run_timestamp}_tabnet")
+
+    # Depending on the approach:
+    if ma == "vae":
+        # Must have VAE done + clustering done
+        if step_vae_artifacts_ok(vae_prefix) and step_clustering_artifacts_ok(config_id, config_folder):
+            return True
+        else:
+            return False
+
+    elif ma == "tabnet":
+        # Must have tabnet done + clustering done
+        if step_tabnet_artifacts_ok(tabnet_prefix) and step_clustering_artifacts_ok(config_id, config_folder):
+            return True
+        else:
+            return False
+
+    elif ma == "hybrid":
+        # Must have both VAE & TabNet done + clustering done
+        if (step_vae_artifacts_ok(vae_prefix) and 
+            step_tabnet_artifacts_ok(tabnet_prefix) and
+            step_clustering_artifacts_ok(config_id, config_folder)):
+            return True
+        else:
+            return False
+
+    # Fallback
+    return False
 
 ###############################################################################
 # 1. Ensure Data Preprocessing & CCI
@@ -201,7 +295,6 @@ def select_features(patient_data, feature_config="composite"):
 # 4. Model Runners
 ###############################################################################
 def run_vae(pkl_file, output_prefix):
-    from vae_model import main as vae_main
     logger.info(f"Running VAE on {pkl_file} with prefix={output_prefix}.")
     vae_main(input_file=pkl_file, output_prefix=output_prefix)
     latent_csv = f"{output_prefix}_latent_features.csv"
@@ -211,7 +304,6 @@ def run_vae(pkl_file, output_prefix):
     return latent_csv
 
 def run_tabnet(pkl_file, output_prefix):
-    from tabnet_model import main as tabnet_main
     logger.info(f"Running TabNet on {pkl_file} with prefix={output_prefix}.")
     tabnet_main(input_file=pkl_file, output_prefix=output_prefix)
     preds_csv = f"{output_prefix}_predictions.csv"
@@ -354,6 +446,11 @@ def evaluate_regression_performance(config_id, output_prefix):
     metrics_file = f"{output_prefix}_metrics.json"
     mse_val, r2_val = np.nan, np.nan
     if os.path.exists(metrics_file):
+        # Also check if it's fully written
+        if not file_is_fully_written(metrics_file, min_size=2):
+            logger.warning(f"Metrics file {metrics_file} might be incomplete.")
+            return {"config_id": config_id, "tabnet_mse": np.nan, "tabnet_r2": np.nan}
+
         try:
             with open(metrics_file, 'r') as f:
                 data = json.load(f)
@@ -396,6 +493,7 @@ def main():
     model_approaches = ["vae", "tabnet", "hybrid"]
 
     all_results = []
+    # We'll use one global run_timestamp so each combination is time-labeled consistently
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # For each (feature_config, subset, model_approach), we do an experiment
@@ -409,6 +507,13 @@ def main():
         config_folder = os.path.join(data_dir, "Experiments", config_id)
         os.makedirs(config_folder, exist_ok=True)
 
+        # ---------------------------------------------------
+        # (Optional) Check if entire config is done -> skip
+        # ---------------------------------------------------
+        if all_steps_done(fc, ss, ma, config_folder, run_timestamp):
+            logger.info("[RESUME] Skipping entire config_id=%s – all artifacts found.", config_id)
+            continue
+
         # 1) Filter subset
         sub_df = filter_subpopulation(full_df, ss, data_dir)
         # 2) Feature selection
@@ -420,95 +525,85 @@ def main():
         del sub_df, use_df
         gc.collect()
 
-        # 3) Train or load models
-        latent_csv = None
-        tabnet_csv = None
+        # Build typical model prefixes
+        vae_prefix = os.path.join(config_folder, f"{config_id}_{run_timestamp}_vae")
+        tabnet_prefix = os.path.join(config_folder, f"{config_id}_{run_timestamp}_tabnet")
 
-        if ma == "vae":
-            vae_prefix = os.path.join(config_folder, f"{config_id}_{run_timestamp}_vae")
-            latent_csv = run_vae(temp_file, vae_prefix)
-
-        elif ma == "tabnet":
-            tabnet_prefix = os.path.join(config_folder, f"{config_id}_{run_timestamp}_tabnet")
-            tabnet_csv = run_tabnet(temp_file, tabnet_prefix)
-
-        elif ma == "hybrid":
-            vae_prefix = os.path.join(config_folder, f"{config_id}_{run_timestamp}_vae")
-            tabnet_prefix = os.path.join(config_folder, f"{config_id}_{run_timestamp}_tabnet")
-            latent_csv = run_vae(temp_file, vae_prefix)
-            tabnet_csv = run_tabnet(temp_file, tabnet_prefix)
-
-        # 4) Merge outputs & cluster
-        if latent_csv or tabnet_csv:
-            frames = []
-            if latent_csv and os.path.exists(latent_csv):
-                df_lat = pd.read_csv(latent_csv)
-                frames.append(df_lat)
-            if tabnet_csv and os.path.exists(tabnet_csv):
-                df_tab = pd.read_csv(tabnet_csv)
-                frames.append(df_tab)
-
-            if frames:
-                # (a) Merge any model outputs together
-                merged_df = frames[0]
-                for fdf in frames[1:]:
-                    merged_df = merged_df.merge(fdf, on='Id', how='inner')
-
-                # (b) Re-merge the original training features
-                temp_data = pd.read_pickle(temp_file)
-                merged_df = temp_data.merge(merged_df, on='Id', how='inner')
-
-                # >>>>>>  (b2) One-Hot Encode Categorical Columns  <<<<<<
-                cat_cols = ['GENDER', 'RACE', 'ETHNICITY', 'MARITAL']
-                # Only encode if these columns exist
-                existing_cat = [c for c in cat_cols if c in merged_df.columns]
-                if existing_cat:
-                    # Convert to string before pd.get_dummies
-                    for col in existing_cat:
-                        merged_df[col] = merged_df[col].astype(str)
-                    merged_df = pd.get_dummies(
-                        merged_df, 
-                        columns=existing_cat, 
-                        drop_first=True  # avoids dummy trap
-                    )
-                # End of one-hot step
-
-                # (c) Cluster if we have > 0 features
-                features_cols = [c for c in merged_df.columns if c not in ('Id','Predicted_Health_Index')]
-                if len(features_cols) == 0:
-                    logger.warning(f"No features to cluster on for {config_id}, skipping clustering.")
-                else:
-                    # Use a config-specific plots folder
-                    plots_folder = os.path.join(config_folder, "plots")
-                    clust_res = memory_optimized_clustering_and_visualization(
-                        merged_df,
-                        config_id,
-                        plots_folder=plots_folder
-                    )
-                    all_results.append(clust_res)
-
-                # Clean up
-                del merged_df
-                for fdf in frames:
-                    del fdf
-                gc.collect()
+        # 3) VAE step if needed
+        if ma in ["vae", "hybrid"]:
+            if step_vae_artifacts_ok(vae_prefix):
+                logger.info("[RESUME] VAE artifacts found for %s, skipping VAE step.", config_id)
             else:
-                logger.info("[INFO] No CSV frames to merge for clustering.")
-        else:
-            logger.info(f"[INFO] No model output CSV to cluster/visualize for {config_id}")
+                run_vae(temp_file, vae_prefix)
 
-        # 5) Evaluate TabNet if relevant
+        # 4) TabNet step if needed
         if ma in ["tabnet", "hybrid"]:
-            tabnet_prefix = os.path.join(config_folder, f"{config_id}_{run_timestamp}_tabnet")
+            if step_tabnet_artifacts_ok(tabnet_prefix):
+                logger.info("[RESUME] TabNet artifacts found for %s, skipping TabNet step.", config_id)
+            else:
+                run_tabnet(temp_file, tabnet_prefix)
+
+        # 5) Merge outputs & cluster
+        #    Only do clustering if at least one model produced an output
+        frames = []
+        if ma in ["vae", "hybrid"] and step_vae_artifacts_ok(vae_prefix):
+            df_lat = pd.read_csv(f"{vae_prefix}_latent_features.csv")
+            frames.append(df_lat)
+        if ma in ["tabnet", "hybrid"] and step_tabnet_artifacts_ok(tabnet_prefix):
+            df_tab = pd.read_csv(f"{tabnet_prefix}_predictions.csv")
+            frames.append(df_tab)
+
+        if frames:
+            merged_df = frames[0]
+            for fdf in frames[1:]:
+                merged_df = merged_df.merge(fdf, on='Id', how='inner')
+
+            temp_data = pd.read_pickle(temp_file)
+            merged_df = temp_data.merge(merged_df, on='Id', how='inner')
+
+            cat_cols = ['GENDER', 'RACE', 'ETHNICITY', 'MARITAL']
+            existing_cat = [c for c in cat_cols if c in merged_df.columns]
+            if existing_cat:
+                for col in existing_cat:
+                    merged_df[col] = merged_df[col].astype(str)
+                merged_df = pd.get_dummies(
+                    merged_df,
+                    columns=existing_cat,
+                    drop_first=True
+                )
+
+            # If clustering artifacts are missing, do clustering
+            if not step_clustering_artifacts_ok(config_id, config_folder):
+                logger.info("Performing clustering for %s", config_id)
+                plots_folder = os.path.join(config_folder, "plots")
+                clust_res = memory_optimized_clustering_and_visualization(
+                    merged_df,
+                    config_id,
+                    plots_folder=plots_folder
+                )
+                all_results.append(clust_res)
+            else:
+                logger.info("[RESUME] Clustering plots found for %s, skipping clustering.", config_id)
+
+            del merged_df, temp_data
+            for fdf in frames:
+                del fdf
+            gc.collect()
+        else:
+            logger.info("[INFO] No model output CSV to cluster/visualize for %s", config_id)
+
+        # 6) Evaluate TabNet if relevant
+        if ma in ["tabnet", "hybrid"]:
+            # We always do this because we might have partial metrics
             reg_res = evaluate_regression_performance(config_id, tabnet_prefix)
             all_results.append(reg_res)
 
-        # 6) Remove temp file
+        # 7) Remove temp file
         if os.path.exists(temp_file):
             os.remove(temp_file)
         gc.collect()
 
-    # 7) Save all results (at the top level or inside data_dir)
+    # 8) Save all results
     results_csv_path = os.path.join(data_dir, OUTPUT_RESULTS_CSV)
     if all_results:
         save_results_to_csv(results_csv_path, all_results)
