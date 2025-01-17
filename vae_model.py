@@ -131,7 +131,7 @@ def train_vae(vae, input_data, output_prefix='vae'):
     vae.fit(
         x_train, 
         epochs=100, 
-        batch_size=256, 
+        batch_size=512, 
         validation_split=0.2, 
         callbacks=[early_stopping, checkpoint]
     )
