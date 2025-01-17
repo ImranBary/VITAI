@@ -5,7 +5,8 @@
 # This script builds and trains a TabNet model using hyperparameter tuning,
 # includes cross-validation, extracts feature importances, and saves the
 # trained model and results. 
-# Now accepts an output_prefix param to avoid overwriting artifacts.
+# Now accepts an output_prefix param to avoid overwriting artifacts,
+# and target_col param to decide which column to predict (Health_Index or CharlsonIndex).
 
 import numpy as np
 import pandas as pd
@@ -32,14 +33,25 @@ def load_data(output_dir, input_file):
     logger.info("Patient data loaded.")
     return patient_data
 
-def prepare_data(patient_data):
+def prepare_data(patient_data, target_col='Health_Index'):
+    """
+    Prepare the dataset for TabNet:
+      - features: columns that define the model inputs
+      - target: the column we want to predict (Health_Index or CharlsonIndex)
+    """
+    # Feature columns
     features = patient_data[[
         'AGE','DECEASED','GENDER','RACE','ETHNICITY','MARITAL',
         'HEALTHCARE_EXPENSES','HEALTHCARE_COVERAGE','INCOME',
         'Hospitalizations_Count','Medications_Count','Abnormal_Observations_Count'
     ]].copy()
-    target = patient_data['Health_Index']
 
+    # Target column is chosen based on `target_col`
+    if target_col not in patient_data.columns:
+        raise KeyError(f"Column '{target_col}' not found in patient_data!")
+    target = patient_data[target_col]
+
+    # Setup categorical columns
     categorical_columns = ['DECEASED','GENDER','RACE','ETHNICITY','MARITAL']
     cat_idxs = [i for i,col in enumerate(features.columns) if col in categorical_columns]
     cat_dims = []
@@ -49,15 +61,19 @@ def prepare_data(patient_data):
         features[col] = le.fit_transform(features[col].astype(str))
         cat_dims.append(features[col].nunique())
 
+    # Scale continuous columns
     continuous_columns = [col for col in features.columns if col not in categorical_columns]
     scaler = StandardScaler()
     features[continuous_columns] = scaler.fit_transform(features[continuous_columns])
     joblib.dump(scaler, 'tabnet_scaler.joblib')
 
+    # Handle missing
     features.fillna(0, inplace=True)
+
     X = features.values
-    y = target.values.reshape(-1,1)
-    logger.info("Data prepared for TabNet.")
+    y = target.values.reshape(-1, 1)
+    logger.info(f"Data prepared for TabNet (target_col='{target_col}').")
+
     return X, y, cat_idxs, cat_dims, features.columns.tolist()
 
 def objective(trial, X, y, cat_idxs, cat_dims):
@@ -98,7 +114,6 @@ def objective(trial, X, y, cat_idxs, cat_dims):
     return np.mean(mse_list)
 
 def hyperparameter_tuning(X, y, cat_idxs, cat_dims):
-    import optuna
     study = optuna.create_study(direction='minimize')
     study.optimize(lambda trial: objective(trial, X, y, cat_idxs, cat_dims), n_trials=20)
     logger.info(f"Best trial: {study.best_trial.params}")
@@ -128,23 +143,31 @@ def train_tabnet(X_train, y_train, X_valid, y_valid, cat_idxs, cat_dims, best_pa
     logger.info(f"TabNet model trained and saved -> {output_prefix}_model.zip (among others).")
     return regressor
 
-def main(input_file='patient_data_with_health_index.pkl', output_prefix='tabnet'):
+def main(input_file='patient_data_with_health_index.pkl',
+         output_prefix='tabnet',
+         target_col='Health_Index'):
     """
     Args:
         input_file (str): Pickle file containing patient data
         output_prefix (str): Unique prefix to avoid overwriting model artifacts
+        target_col (str): Which column to predict ('Health_Index' or 'CharlsonIndex')
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     output_dir = os.path.join(script_dir, 'Data')
     patient_data = load_data(output_dir, input_file)
-    X, y, cat_idxs, cat_dims, feature_columns = prepare_data(patient_data)
 
+    # Prepare data for the specified target column
+    X, y, cat_idxs, cat_dims, feature_columns = prepare_data(patient_data, target_col=target_col)
+
+    # Train/valid/test splits
     X_train_full, X_test, y_train_full, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
     X_train, X_valid, y_train, y_valid = train_test_split(X_train_full, y_train_full, test_size=0.2, random_state=42)
 
+    # Hyperparameter tuning
     best_params = hyperparameter_tuning(X_train, y_train, cat_idxs, cat_dims)
     regressor = train_tabnet(X_train, y_train, X_valid, y_valid, cat_idxs, cat_dims, best_params, output_prefix=output_prefix)
 
+    # Evaluate on test set
     test_preds = regressor.predict(X_test)
     test_mse = mean_squared_error(y_test, test_preds)
     test_r2 = r2_score(y_test, test_preds)
@@ -152,9 +175,21 @@ def main(input_file='patient_data_with_health_index.pkl', output_prefix='tabnet'
     logger.info(f"Test R2: {test_r2:.4f}")
 
     # Save predictions
+    # If 'Id' is present in the DF, we can map it; otherwise we do a simple index-based approach
+    num_test = len(X_test)
+    pred_col_name = ("Predicted_Health_Index" if target_col == "Health_Index" 
+                     else "Predicted_CharlsonIndex")
+
+    if 'Id' in patient_data.columns:
+        # Take the last 'num_test' rows as test IDs
+        test_ids = patient_data.iloc[-num_test:]['Id'].values
+    else:
+        # Fallback if not present
+        test_ids = np.arange(num_test)
+
     predictions_df = pd.DataFrame({
-        'Id': patient_data.iloc[-len(X_test):]['Id'].values, 
-        'Predicted_Health_Index': test_preds.flatten()
+        'Id': test_ids,
+        pred_col_name: test_preds.flatten()
     })
     pred_csv = f'{output_prefix}_predictions.csv'
     predictions_df.to_csv(pred_csv, index=False)
