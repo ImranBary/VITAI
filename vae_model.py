@@ -4,18 +4,23 @@
 # Description:
 # Updated script to address variable duplication warnings in TensorFlow.
 # This script trains a VAE model, now accepts an input_file and output_prefix parameters
-# so as to avoid overwriting model artifacts.
+# so as to avoid overwriting model artifacts. 
+# 
+# UPDATe 19/01/2025 this script now saves a JSON file with final
+# training and validation losses, named <output_prefix>_vae_metrics.json.
 
 import numpy as np
 import pandas as pd
 import joblib
 import os
+import json
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 import logging
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
+# Set random seeds for reproducibility
 np.random.seed(42)
 tf.random.set_seed(42)
 
@@ -128,15 +133,32 @@ def train_vae(vae, input_data, output_prefix='vae'):
         save_best_only=True
     )
 
-    vae.fit(
+    # Fit returns a History object with training & validation losses
+    history = vae.fit(
         x_train, 
         epochs=100, 
         batch_size=512, 
         validation_split=0.2, 
-        callbacks=[early_stopping, checkpoint]
+        callbacks=[early_stopping, checkpoint],
+        verbose=1
     )
     vae.save(f'{output_prefix}_model', save_format='tf')
     logger.info(f"VAE trained and saved with prefix={output_prefix}.")
+
+    # Extract final losses from history
+    # Because of early stopping, 'val_loss' might not correspond to the final epoch
+    # We take the minimal val_loss across epochs as a reference
+    final_train_loss = float(history.history['loss'][-1])  # last epoch's training loss
+    final_val_loss = float(min(history.history['val_loss']))  # best validation loss
+
+    # Save them to a JSON for easier retrieval
+    metrics_json = {
+        "final_train_loss": final_train_loss,
+        "best_val_loss": final_val_loss
+    }
+    with open(f"{output_prefix}_vae_metrics.json", "w") as f:
+        json.dump(metrics_json, f, indent=2)
+    logger.info(f"[METRICS] VAE training/validation losses saved to {output_prefix}_vae_metrics.json")
 
 def save_latent_features(encoder, input_data, patient_ids, output_prefix='vae'):
     x_pred = {
@@ -176,8 +198,6 @@ def main(input_file='patient_data_with_health_index.pkl', output_prefix='vae'):
 
 if __name__ == '__main__':
     main()
-
-
 
 
 '''
