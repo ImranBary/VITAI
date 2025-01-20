@@ -6,7 +6,7 @@ Date: 18/01/2025
 Description:
 Extends the original comprehensive testing framework to:
  - Merge columns from BOTH `patient_data_with_health_index_cci.pkl` (Charlson, etc.)
-   and `patient_data_with_health_index.pkl` (Hospital/Med/Abnormal counts, etc.).
+   and `patient_data_with_health_index.pkl` (Hospital/Med/Abnormal counts, etc.) if they exist.
  - Read existing VAE/TabNet outputs for each config, merges them with the base data,
    then performs clustering if no t-SNE/UMAP plots are found.
  - Appends newly generated clustering rows to `comprehensive_experiments_results_v2.csv`.
@@ -40,7 +40,7 @@ EXPERIMENTS_DIR = os.path.join(DATA_DIR, "Experiments")
 ORIGINAL_RESULTS_FILE = "comprehensive_experiments_results.csv"
 NEW_RESULTS_FILE = "comprehensive_experiments_results_v2.csv"
 
-# Two pickles that, when merged, contain everything we need:
+# The two pickles you wish to merge:
 CCI_PICKLE = os.path.join(DATA_DIR, "patient_data_with_health_index_cci.pkl")
 EXTRA_PICKLE = os.path.join(DATA_DIR, "patient_data_with_health_index.pkl")
 
@@ -58,11 +58,10 @@ def clustering_artifacts_exist(config_id, config_folder):
 ###############################################################################
 def perform_clustering_and_visualization(merged_df, config_id, plots_folder):
     """
-    Does KMeans in [6..9], picks best by silhouette. Also runs DBSCAN for reference.
+    Clusters with K-Means [6..9], picks best by silhouette. Also runs DBSCAN.
     Excludes 'Id', 'Predicted_Health_Index', 'Predicted_CharlsonIndex' from features.
-    Skips if <2 rows or <2 features.
-    Saves t-SNE and UMAP into {plots_folder}/tsne2d_{config_id}.png, etc.
-    Returns a dict of cluster metrics to be appended to final CSV.
+    If <2 rows/features, skip. Saves t-SNE & UMAP plots if possible.
+    Returns a dict of cluster metrics.
     """
     os.makedirs(plots_folder, exist_ok=True)
 
@@ -72,35 +71,30 @@ def perform_clustering_and_visualization(merged_df, config_id, plots_folder):
 
     n_rows, n_feats = X.shape
     if n_rows < 2 or n_feats < 2:
-        logger.warning(
-            f"[{config_id}] Cannot cluster: not enough rows/features ({n_rows}x{n_feats})."
-        )
+        logger.warning(f"[{config_id}] Not enough rows/features ({n_rows}x{n_feats}) to cluster.")
         return {}
 
     # Scale
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # KMeans [6..9]
+    # K-Means over [6..9], pick best by silhouette
     best_k = None
-    best_metrics = None
+    best_sil = -1
     for k in range(6, 10):
         km = KMeans(n_clusters=k, random_state=42)
         labels = km.fit_predict(X_scaled)
         sil = silhouette_score(X_scaled, labels)
-        cal = calinski_harabasz_score(X_scaled, labels)
-        dav = davies_bouldin_score(X_scaled, labels)
-        # Simple best-silhouette approach
-        if (best_metrics is None) or (sil > best_metrics["sil"]):
+        if sil > best_sil:
+            best_sil = sil
             best_k = k
-            best_metrics = {"sil": sil, "cal": cal, "dav": dav}
 
-    # Fit final KMeans with best_k
+    # Fit final KMeans
     final_km = KMeans(n_clusters=best_k, random_state=42).fit(X_scaled)
     final_labels = final_km.predict(X_scaled)
     merged_df["Cluster"] = final_labels
 
-    # Evaluate final cluster metrics
+    # Evaluate cluster metrics
     final_sil = silhouette_score(X_scaled, final_labels)
     final_cal = calinski_harabasz_score(X_scaled, final_labels)
     final_dav = davies_bouldin_score(X_scaled, final_labels)
@@ -115,18 +109,14 @@ def perform_clustering_and_visualization(merged_df, config_id, plots_folder):
         db_cal = calinski_harabasz_score(X_scaled, db_labels)
         db_dav = davies_bouldin_score(X_scaled, db_labels)
 
-    # t-SNE & UMAP if enough points
+    # t-SNE & UMAP if enough rows
     if n_rows > 1:
         # t-SNE
         tsne = TSNE(n_components=2, random_state=42)
         X_tsne = tsne.fit_transform(X_scaled)
-        plt.figure(figsize=(7,5))
-        sns.scatterplot(
-            x=X_tsne[:,0],
-            y=X_tsne[:,1],
-            hue=merged_df["Cluster"],
-            palette="viridis"
-        )
+        plt.figure(figsize=(7, 5))
+        sns.scatterplot(x=X_tsne[:,0], y=X_tsne[:,1],
+                        hue=merged_df["Cluster"], palette="viridis")
         plt.title(f"t-SNE for {config_id} (K={best_k})")
         tsne_path = os.path.join(plots_folder, f"tsne2d_{config_id}.png")
         plt.savefig(tsne_path, bbox_inches="tight")
@@ -135,13 +125,9 @@ def perform_clustering_and_visualization(merged_df, config_id, plots_folder):
         # UMAP
         reducer = umap.UMAP(n_components=2, random_state=42)
         X_umap = reducer.fit_transform(X_scaled)
-        plt.figure(figsize=(7,5))
-        sns.scatterplot(
-            x=X_umap[:,0],
-            y=X_umap[:,1],
-            hue=merged_df["Cluster"],
-            palette="viridis"
-        )
+        plt.figure(figsize=(7, 5))
+        sns.scatterplot(x=X_umap[:,0], y=X_umap[:,1],
+                        hue=merged_df["Cluster"], palette="viridis")
         plt.title(f"UMAP for {config_id} (K={best_k})")
         umap_path = os.path.join(plots_folder, f"umap2d_{config_id}.png")
         plt.savefig(umap_path, bbox_inches="tight")
@@ -156,21 +142,21 @@ def perform_clustering_and_visualization(merged_df, config_id, plots_folder):
         "final_davies_bouldin": final_dav,
         "dbscan_silhouette": db_sil,
         "dbscan_calinski": db_cal,
-        "dbscan_davies_bouldin": db_dav
+        "dbscan_davies_bouldin": db_dav,
     }
 
 ###############################################################################
 # 3. Main Update Logic
 ###############################################################################
 def main():
-    # Load the original results file if it exists
-    original_results_path = os.path.join(DATA_DIR, ORIGINAL_RESULTS_FILE)
-    if os.path.exists(original_results_path):
-        original_results = pd.read_csv(original_results_path)
+    # Load the original results CSV if present
+    orig_csv_path = os.path.join(DATA_DIR, ORIGINAL_RESULTS_FILE)
+    if os.path.exists(orig_csv_path):
+        original_results = pd.read_csv(orig_csv_path)
     else:
         original_results = pd.DataFrame()
 
-    # Load both pickles so we can have Charlson + extra derived columns
+    # Check for existence of both pickles
     if not os.path.exists(CCI_PICKLE):
         logger.error(f"Missing {CCI_PICKLE}; cannot proceed.")
         return
@@ -178,39 +164,40 @@ def main():
         logger.error(f"Missing {EXTRA_PICKLE}; cannot proceed.")
         return
 
-    df_cci = pd.read_pickle(CCI_PICKLE)   # Contains 'CharlsonIndex', etc.
-    df_extra = pd.read_pickle(EXTRA_PICKLE)  # Contains 'Hospitalizations_Count', etc.
+    # Read them
+    df_cci = pd.read_pickle(CCI_PICKLE)
+    df_extra = pd.read_pickle(EXTRA_PICKLE)
+    logger.info(f"[BASE] df_cci shape={df_cci.shape}, df_extra shape={df_extra.shape}")
 
-    # Merge them on "Id" to get all columns
-    # If both have the same columns, 'how="outer"' or 'how="left"'; up to you.
-    base_df = df_cci.merge(
-        df_extra[[
-            "Id",
-            "Hospitalizations_Count",
-            "Medications_Count",
-            "Abnormal_Observations_Count"
-        ]],
-        on="Id",
-        how="left"
-    )
-    logger.info(f"[BASE] Combined shape = {base_df.shape}")
+    # Safely pick only columns from df_extra that exist
+    # i.e. if Hospitalizations_Count is missing, we skip it
+    wanted_cols = {"Id", "Hospitalizations_Count", "Medications_Count", "Abnormal_Observations_Count"}
+    actual_extra_cols = list(set(df_extra.columns).intersection(wanted_cols))
 
-    # If you still have a "SEQUENCE" or "PATIENT" column, drop it if present
+    if len(actual_extra_cols) < 4:
+        missing = wanted_cols - set(df_extra.columns)
+        if missing:
+            logger.warning(f"[BASE] The following expected columns are missing in EXTRA_PICKLE: {missing}")
+
+    # Merge them on "Id"
+    base_df = df_cci.merge(df_extra[actual_extra_cols], on="Id", how="left")
+    logger.info(f"[BASE] After merge shape={base_df.shape}")
+
+    # Drop unneeded or list-typed columns
     drop_cols = ["SEQUENCE", "PATIENT"]
     for col in drop_cols:
         if col in base_df.columns:
             base_df.drop(columns=[col], inplace=True)
 
-    # For any columns that might contain lists, drop them
+    # If any column holds list data, drop it
     for col in list(base_df.columns):
         if base_df[col].map(type).eq(list).any():
             logger.warning(f"[BASE] Dropping {col} because it contains list data.")
             base_df.drop(columns=[col], inplace=True)
 
-    # Now let's do the main loop
+    # Now cluster each config directory
     all_results = []
-    config_dirs = sorted(os.listdir(EXPERIMENTS_DIR))
-    for config_dir in config_dirs:
+    for config_dir in sorted(os.listdir(EXPERIMENTS_DIR)):
         config_path = os.path.join(EXPERIMENTS_DIR, config_dir)
         if not os.path.isdir(config_path):
             continue
@@ -218,51 +205,44 @@ def main():
         config_id = config_dir
         plots_folder = os.path.join(config_path, "plots")
 
-        # Skip if clustering artifacts exist
         if clustering_artifacts_exist(config_id, config_path):
-            logger.info(f"[SKIP] Already has clustering plots for {config_id}.")
+            logger.info(f"[SKIP] Clustering already done for {config_id}.")
             continue
 
-        # Find VAE / TabNet outputs
-        latents = glob.glob(os.path.join(config_path, "*_latent_features.csv"))
-        preds = glob.glob(os.path.join(config_path, "*_predictions.csv"))
+        # Look for VAE or TabNet outputs
+        lat_files = glob.glob(os.path.join(config_path, "*_latent_features.csv"))
+        pred_files = glob.glob(os.path.join(config_path, "*_predictions.csv"))
 
-        latent_csv = latents[0] if latents else None
-        preds_csv = preds[0] if preds else None
-
-        if not latent_csv and not preds_csv:
+        if not lat_files and not pred_files:
             logger.warning(f"[MISSING] No VAE or TabNet CSV for {config_id}")
             continue
 
-        # Merge the base data with whichever we have
         merged = base_df.copy()
 
-        if latent_csv:
-            df_lat = pd.read_csv(latent_csv)
+        # Merge latent if present
+        if lat_files:
+            df_lat = pd.read_csv(lat_files[0])
             merged = merged.merge(df_lat, on="Id", how="inner")
 
-        if preds_csv:
-            df_pred = pd.read_csv(preds_csv)
+        # Merge preds if present
+        if pred_files:
+            df_pred = pd.read_csv(pred_files[0])
             merged = merged.merge(df_pred, on="Id", how="inner")
 
         logger.info(f"[{config_id}] final merged shape={merged.shape}")
 
-        # If any columns hold list data, drop them
+        # Drop columns with list data again if they re-appear
         for col in list(merged.columns):
             if merged[col].map(type).eq(list).any():
-                logger.warning(f"[{config_id}] Dropping column {col} with list data.")
+                logger.warning(f"[{config_id}] Dropping {col}; it has list data.")
                 merged.drop(columns=[col], inplace=True)
 
-        # One-hot encode the same demographic columns the original script used
+        # One-hot encode typical demographic columns if present
         cat_cols = ["GENDER", "RACE", "ETHNICITY", "MARITAL"]
         for c in cat_cols:
             if c in merged.columns:
                 merged[c] = merged[c].astype(str)
-        merged = pd.get_dummies(
-            merged, 
-            columns=[c for c in cat_cols if c in merged.columns],
-            drop_first=True
-        )
+        merged = pd.get_dummies(merged, columns=[c for c in cat_cols if c in merged.columns], drop_first=True)
 
         # Perform clustering
         res = perform_clustering_and_visualization(merged, config_id, plots_folder)
@@ -272,15 +252,15 @@ def main():
         del merged
         gc.collect()
 
-    # Append new rows to the original
+    # Append new results
     if all_results:
         new_df = pd.DataFrame(all_results)
         combined_df = pd.concat([original_results, new_df], ignore_index=True)
-        out_path = os.path.join(DATA_DIR, NEW_RESULTS_FILE)
-        combined_df.to_csv(out_path, index=False)
-        logger.info(f"[DONE] Wrote updated results -> {NEW_RESULTS_FILE}")
+        out_csv_path = os.path.join(DATA_DIR, NEW_RESULTS_FILE)
+        combined_df.to_csv(out_csv_path, index=False)
+        logger.info(f"[DONE] Updated results -> {NEW_RESULTS_FILE}")
     else:
-        logger.info("[INFO] No new clustering results generated.")
+        logger.info("[INFO] No new clustering results were generated.")
 
 if __name__ == "__main__":
     main()

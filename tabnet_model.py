@@ -115,7 +115,7 @@ def objective(trial, X, y, cat_idxs, cat_dims):
 
 def hyperparameter_tuning(X, y, cat_idxs, cat_dims):
     study = optuna.create_study(direction='minimize')
-    study.optimize(lambda trial: objective(trial, X, y, cat_idxs, cat_dims), n_trials=8)
+    study.optimize(lambda trial: objective(trial, X, y, cat_idxs, cat_dims), n_trials=10)
     logger.info(f"Best trial: {study.best_trial.params}")
     return study.best_trial.params
 
