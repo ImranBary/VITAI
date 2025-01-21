@@ -9,7 +9,9 @@ def load_data(data_dir):
     encounters = pd.read_csv(os.path.join(data_dir, 'encounters.csv'))
     medications = pd.read_csv(os.path.join(data_dir, 'medications.csv'))
     observations = pd.read_csv(os.path.join(data_dir, 'observations.csv'))
-    return conditions, encounters, medications, observations
+    patients = pd.read_csv(os.path.join(data_dir, 'patients.csv'))
+    procedures = pd.read_csv(os.path.join(data_dir, 'procedures.csv'))
+    return conditions, encounters, medications, observations, patients, procedures
 
 def explore_conditions(conditions):
     """Explore conditions data."""
@@ -38,15 +40,27 @@ def explore_observations(observations):
     print(observations.head())
     print("\nUnique Observation Descriptions:")
     print(observations['DESCRIPTION'].unique())
+    
+def explore_patients(patients):
+    """Explore patients data."""
+    print("Patients Data Sample:")
+    print(patients.head())
+    
+def explore_procedures(procedures):
+    """Explore procedures data."""
+    print("Procedures Data Sample:")
+    print(procedures.head())
 
 def main():
-    data_dir =  r'E:\DataGen\synthea\output\csv'  
-    conditions, encounters, medications, observations = load_data(data_dir)
+    data_dir =  'Data'  
+    conditions, encounters, medications, observations, patients, procedures = load_data(data_dir)
 
-    explore_conditions(conditions)
-    explore_encounters(encounters)
-    explore_medications(medications)
+    #explore_conditions(conditions)
+    #explore_encounters(encounters)
+    #explore_medications(medications)
     explore_observations(observations)
+    #explore_patients(patients)
+    #explore_procedures(procedures)
 
 if __name__ == '__main__':
     main()

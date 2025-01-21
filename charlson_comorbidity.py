@@ -1,6 +1,6 @@
 # charlson_comorbidity.py
-# Author: Your Name
-# Date: DD/MM/YYYY
+# Author: Imran Feisal  
+# Date: 22/15/2024
 # Description:
 # This script computes the Charlson Comorbidity Index (CCI) from SNOMED codes.
 # It expects a CSV mapping file with columns:
