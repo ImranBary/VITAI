@@ -2,13 +2,14 @@ import os
 
 # List of .py files to read
 py_files = [
-    'data_preprocessing.py',
-    'health_index.py',
-    'charlson_comorbidity.py',
-    'vae_model.py',
-    'tabnet_model.py',
+    # 'data_preprocessing.py',
+    # 'health_index.py',
+    # 'charlson_comorbidity.py',
+    # 'vae_model.py',
+    # 'tabnet_model.py'
     'comprehensive_testing_mem_optimized.py',
-    'update_comprehensive_results.py'
+    'update_comprehensive_results.py',
+    'update_model_metrics.py'
 ]
 
 # Initialize an empty string to hold the combined content

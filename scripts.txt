@@ -1,0 +1,1209 @@
+"""
+comprehensive_testing_mem_optimized_refactored.py
+Author: Imran Feisal
+Date: 12/01/2025
+
+Description:
+This memory-optimized script orchestrates multiple experiments to evaluate:
+ - Feature configurations: composite, cci, combined
+ - Subsets: none, diabetes, ckd
+ - Model approaches: vae, tabnet, hybrid
+
+It references:
+ - data_preprocessing.py   -> generating patient_data_sequences.pkl
+ - health_index.py         -> computing the composite health index
+ - charlson_comorbidity.py -> integrating Charlson Comorbidity Index (CCI)
+ - vae_model.py            -> training VAE & saving latent features
+ - tabnet_model.py         -> training TabNet & saving predictions
+
+Memory-Saving Approaches:
+ - Skips hierarchical clustering entirely (AgglomerativeClustering).
+ - Uses the entire dataset (no subsampling) for DBSCAN, t-SNE, UMAP, etc.
+ - Employs joblib to dump intermediate DataFrames to disk, free memory, and reload as needed.
+
+Usage:
+  python comprehensive_testing_mem_optimized_refactored.py
+"""
+
+import os
+import sys
+import gc
+import datetime
+import logging
+import json
+import itertools
+import time
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from joblib import dump, load
+
+# Clustering & metrics
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.neighbors import NearestNeighbors
+from sklearn.metrics import (
+    silhouette_score, calinski_harabasz_score, davies_bouldin_score
+)
+from sklearn.preprocessing import StandardScaler
+
+# Dimensionality reduction
+from sklearn.manifold import TSNE
+import umap.umap_ as umap
+
+# Local imports
+from data_preprocessing import main as preprocess_main
+from health_index import main as health_main
+from charlson_comorbidity import load_cci_mapping, compute_cci
+from vae_model import main as vae_main
+from tabnet_model import main as tabnet_main
+
+# Basic config
+OUTPUT_RESULTS_CSV = "comprehensive_experiments_results.csv"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+###############################################################################
+# 0. Helper Functions for "Resume" Logic
+###############################################################################
+def file_is_fully_written(file_path, min_size=1, max_age_seconds=30):
+    """
+    Return True if the file_path exists, is larger than min_size (bytes),
+    and hasn't been modified in the last `max_age_seconds` (to avoid partial).
+    """
+    if not os.path.exists(file_path):
+        return False
+
+    # Check file size
+    if os.path.getsize(file_path) < min_size:
+        return False
+
+    # Check last modification time
+    mtime = os.path.getmtime(file_path)
+    now = time.time()
+    if (now - mtime) < max_age_seconds:
+        # If the file was *just* modified, there's a small chance it's incomplete
+        # We consider it "not fully written" in this window
+        return False
+
+    return True
+
+def step_vae_artifacts_ok(vae_prefix):
+    """
+    For VAE, the final artifact is typically the latent-features CSV.
+    Optionally, you could also check the saved model directories.
+    """
+    latent_csv = f"{vae_prefix}_latent_features.csv"
+    return file_is_fully_written(latent_csv, min_size=10)
+
+def step_tabnet_artifacts_ok(tabnet_prefix):
+    """
+    For TabNet, we expect both predictions CSV and metrics JSON.
+    Optionally, also check the model zip file.
+    """
+    preds_csv = f"{tabnet_prefix}_predictions.csv"
+    metrics_json = f"{tabnet_prefix}_metrics.json"
+    preds_ok = file_is_fully_written(preds_csv, min_size=10)
+    metrics_ok = file_is_fully_written(metrics_json, min_size=2)
+    return preds_ok and metrics_ok
+
+def step_clustering_artifacts_ok(config_id, config_folder):
+    """
+    We consider clustering "done" if we have both tsne and umap plots.
+    If you store more artifacts (e.g. a CSV with cluster labels),
+    you can check that as well.
+    """
+    plots_folder = os.path.join(config_folder, "plots")
+    tsne_file = os.path.join(plots_folder, f"tsne2d_{config_id}.png")
+    umap_file = os.path.join(plots_folder, f"umap2d_{config_id}.png")
+    tsne_ok = file_is_fully_written(tsne_file, min_size=1000)
+    umap_ok = file_is_fully_written(umap_file, min_size=1000)
+    return (tsne_ok and umap_ok)
+
+def all_steps_done(fc, ss, ma, config_folder, run_timestamp):
+    """
+    If you want to skip the entire (fc, ss, ma) if *all* final artifacts exist,
+    define this function. We'll check VAE, TabNet, and clustering if relevant.
+    """
+    config_id = f"{fc}_{ss}_{ma}"
+    # Build typical prefixes
+    vae_prefix = os.path.join(config_folder, f"{config_id}_{run_timestamp}_vae")
+    tabnet_prefix = os.path.join(config_folder, f"{config_id}_{run_timestamp}_tabnet")
+
+    # Depending on the approach:
+    if ma == "vae":
+        # Must have VAE done + clustering done
+        if step_vae_artifacts_ok(vae_prefix) and step_clustering_artifacts_ok(config_id, config_folder):
+            return True
+        else:
+            return False
+
+    elif ma == "tabnet":
+        # Must have tabnet done + clustering done
+        if step_tabnet_artifacts_ok(tabnet_prefix) and step_clustering_artifacts_ok(config_id, config_folder):
+            return True
+        else:
+            return False
+
+    elif ma == "hybrid":
+        # Must have both VAE & TabNet done + clustering done
+        if (step_vae_artifacts_ok(vae_prefix) and 
+            step_tabnet_artifacts_ok(tabnet_prefix) and
+            step_clustering_artifacts_ok(config_id, config_folder)):
+            return True
+        else:
+            return False
+
+    # Fallback
+    return False
+
+###############################################################################
+# 1. Ensure Data Preprocessing & CCI
+###############################################################################
+def ensure_preprocessed_data(data_dir):
+    """
+    Ensures we have patient_data_sequences.pkl,
+    patient_data_with_health_index.pkl, and
+    patient_data_with_health_index_cci.pkl.
+    If missing, calls relevant scripts.
+    """
+    pkl_sequences = os.path.join(data_dir, "patient_data_sequences.pkl")
+    pkl_health_index = os.path.join(data_dir, "patient_data_with_health_index.pkl")
+    pkl_health_cci = os.path.join(data_dir, "patient_data_with_health_index_cci.pkl")
+
+    # data_preprocessing step
+    if not os.path.exists(pkl_sequences):
+        logger.info("Missing patient_data_sequences.pkl -> Running data_preprocessing.py")
+        preprocess_main()
+    else:
+        logger.info("Preprocessed sequences found.")
+
+    # health_index step
+    if not os.path.exists(pkl_health_index):
+        logger.info("Missing patient_data_with_health_index.pkl -> Running health_index.py")
+        health_main()
+    else:
+        logger.info("Health index data found.")
+
+    # CCI step
+    if not os.path.exists(pkl_health_cci):
+        logger.info("Missing patient_data_with_health_index_cci.pkl -> merging CCI.")
+        conditions_csv = os.path.join(data_dir, "conditions.csv")
+        if not os.path.exists(conditions_csv):
+            raise FileNotFoundError("conditions.csv not found. Cannot compute CCI.")
+
+        conditions = pd.read_csv(conditions_csv, usecols=["PATIENT","CODE","DESCRIPTION"])
+        cci_map = load_cci_mapping(data_dir)
+        patient_cci = compute_cci(conditions, cci_map)
+
+        patient_data = pd.read_pickle(pkl_health_index)
+        merged = patient_data.merge(
+            patient_cci, how="left", left_on="Id", right_on="PATIENT"
+        )
+        merged.drop(columns="PATIENT", inplace=True)
+        merged["CharlsonIndex"] = merged["CharlsonIndex"].fillna(0.0)
+        merged.to_pickle(pkl_health_cci)
+        logger.info("[INFO] CCI merged & saved -> %s", pkl_health_cci)
+        del conditions, cci_map, patient_cci, patient_data, merged
+        gc.collect()
+    else:
+        logger.info("CCI data found.")
+
+
+###############################################################################
+# 2. Subset Filtering Logic
+###############################################################################
+def load_conditions(data_dir):
+    cpath = os.path.join(data_dir, "conditions.csv")
+    if not os.path.exists(cpath):
+        raise FileNotFoundError(f"conditions.csv not found at {cpath}.")
+    return pd.read_csv(cpath, usecols=['PATIENT','CODE','DESCRIPTION'])
+
+def subset_diabetes(patient_data, data_dir):
+    conditions = load_conditions(data_dir)
+    mask = conditions['DESCRIPTION'].str.lower().str.contains('diabetes', na=False)
+    diabetes_patients = conditions.loc[mask, 'PATIENT'].unique()
+    sub = patient_data[patient_data['Id'].isin(diabetes_patients)].copy()
+    logger.info(f"[INFO] Diabetes subset shape: {sub.shape}")
+    del conditions
+    gc.collect()
+    return sub
+
+def subset_ckd(patient_data, data_dir):
+    conditions = load_conditions(data_dir)
+    ckd_snomed = {431855005, 431856006, 433144002, 431857002, 46177005}
+    code_mask = conditions['CODE'].isin(ckd_snomed)
+    text_mask = conditions['DESCRIPTION'].str.lower().str.contains('chronic kidney disease', na=False)
+    ckd_mask = code_mask | text_mask
+    ckd_patients = conditions.loc[ckd_mask, 'PATIENT'].unique()
+    sub = patient_data[patient_data['Id'].isin(ckd_patients)].copy()
+    logger.info(f"[INFO] CKD subset shape: {sub.shape}")
+    del conditions
+    gc.collect()
+    return sub
+
+def filter_subpopulation(patient_data, subset_type, data_dir):
+    if subset_type.lower() == "none":
+        return patient_data
+    elif subset_type.lower() == "diabetes":
+        return subset_diabetes(patient_data, data_dir)
+    elif subset_type.lower() == "ckd":
+        return subset_ckd(patient_data, data_dir)
+    else:
+        logger.warning(f"Unknown subset_type={subset_type}, returning full data.")
+        return patient_data
+
+
+###############################################################################
+# 3. Feature Selection
+###############################################################################
+def select_features(patient_data, feature_config="composite"):
+    """
+    Grabs only the columns relevant for each feature config.
+    We'll one-hot encode them later, after merging with the model outputs,
+    to avoid numeric-categorical mismatch.
+    """
+    chosen_cols = ['Id']
+    base_demo = [
+        'GENDER','RACE','ETHNICITY','MARITAL',
+        'HEALTHCARE_EXPENSES','HEALTHCARE_COVERAGE','INCOME',
+        'AGE','DECEASED','Hospitalizations_Count','Medications_Count','Abnormal_Observations_Count'
+    ]
+    chosen_cols.extend(base_demo)
+
+    if feature_config == "composite":
+        if 'Health_Index' not in patient_data.columns:
+            raise KeyError("Missing 'Health_Index' for feature_config='composite'")
+        chosen_cols.append('Health_Index')
+    elif feature_config == "cci":
+        if 'CharlsonIndex' not in patient_data.columns:
+            raise KeyError("Missing 'CharlsonIndex' for feature_config='cci'")
+        chosen_cols.append('CharlsonIndex')
+    elif feature_config == "combined":
+        if 'Health_Index' not in patient_data.columns or 'CharlsonIndex' not in patient_data.columns:
+            raise KeyError("Missing 'Health_Index' or 'CharlsonIndex' for feature_config='combined'")
+        chosen_cols.extend(['Health_Index', 'CharlsonIndex'])
+    else:
+        raise ValueError(f"Invalid feature_config: {feature_config}")
+
+    return patient_data[chosen_cols].copy()
+
+
+###############################################################################
+# 4. Model Runners
+###############################################################################
+def run_vae(pkl_file, output_prefix):
+    logger.info(f"Running VAE on {pkl_file} with prefix={output_prefix}.")
+    vae_main(input_file=pkl_file, output_prefix=output_prefix)
+    latent_csv = f"{output_prefix}_latent_features.csv"
+    if not os.path.exists(latent_csv):
+        logger.warning("[WARN] latent features CSV missing after VAE.")
+        return None
+    return latent_csv
+
+def run_tabnet(pkl_file, output_prefix, target_col="Health_Index"):
+    """
+    Modified runner that passes a dynamic target_col to tabnet_main.
+    """
+    logger.info(f"Running TabNet on {pkl_file} with prefix={output_prefix}, target={target_col}.")
+    tabnet_main(input_file=pkl_file, output_prefix=output_prefix, target_col=target_col)
+    preds_csv = f"{output_prefix}_predictions.csv"
+    if not os.path.exists(preds_csv):
+        logger.warning("[WARN] TabNet predictions CSV missing after training.")
+        return None
+    return preds_csv
+
+
+###############################################################################
+# 5. Clustering & Visualization
+###############################################################################
+def memory_optimized_clustering_and_visualization(merged_df, config_id, plots_folder):
+    """
+    Clusters on the entire dataset, saving 2D t-SNE/UMAP plots to 'plots_folder'.
+    One-hot encoding must already be done if we have categorical columns.
+    """
+    os.makedirs(plots_folder, exist_ok=True)
+
+    # Exclude 'Id' and 'Predicted_Health_Index' from clustering
+    X_columns = [c for c in merged_df.columns if c not in ('Id', 'Predicted_Health_Index')]
+    X_full = merged_df[X_columns].values
+    logger.info(f"[CLUSTER] Data shape: {X_full.shape}")
+
+    if X_full.shape[1] == 0:
+        logger.warning(f"[CLUSTER] 0 features for {config_id}. Skipping clustering.")
+        return {}
+
+    scaler = StandardScaler()
+    X_full_scaled = scaler.fit_transform(X_full)
+
+    # 1) K-Means
+    cluster_range = range(6, 10)
+    kmeans_results = []
+    for n in cluster_range:
+        km = KMeans(n_clusters=n, random_state=42)
+        labels_km = km.fit_predict(X_full_scaled)
+        s = silhouette_score(X_full_scaled, labels_km)
+        c = calinski_harabasz_score(X_full_scaled, labels_km)
+        d = davies_bouldin_score(X_full_scaled, labels_km)
+        kmeans_results.append((n, s, c, d))
+
+    kmeans_df = pd.DataFrame(kmeans_results, columns=['k','silhouette','calinski','davies_bouldin'])
+    kmeans_df['method'] = 'KMeans'
+    kmeans_df['sil_rank'] = kmeans_df['silhouette'].rank(ascending=False)
+    kmeans_df['ch_rank'] = kmeans_df['calinski'].rank(ascending=False)
+    kmeans_df['db_rank'] = kmeans_df['davies_bouldin'].rank(ascending=True)
+    kmeans_df['avg_rank'] = kmeans_df[['sil_rank','ch_rank','db_rank']].mean(axis=1)
+
+    best_k = int(kmeans_df.loc[kmeans_df['avg_rank'].idxmin(), 'k'])
+    best_km = KMeans(n_clusters=best_k, random_state=42)
+    best_km.fit(X_full_scaled)
+    final_labels_kmeans = best_km.predict(X_full_scaled)
+    merged_df['Cluster'] = final_labels_kmeans
+
+    # 2) DBSCAN
+    neighbors = 5
+    nbrs = NearestNeighbors(n_neighbors=neighbors).fit(X_full_scaled)
+    dist, idx = nbrs.kneighbors(X_full_scaled)
+    dist = np.sort(dist[:, neighbors-1], axis=0)
+    epsilon = dist[int(0.9 * len(dist))]
+    dbscan = DBSCAN(eps=epsilon, min_samples=5)
+    db_labels = dbscan.fit_predict(X_full_scaled)
+
+    def cluster_scores(arr, labels):
+        uset = set(labels)
+        if len(uset) < 2:
+            return (np.nan, np.nan, np.nan)
+        return (
+            silhouette_score(arr, labels),
+            calinski_harabasz_score(arr, labels),
+            davies_bouldin_score(arr, labels)
+        )
+
+    db_sil, db_cal, db_dav = cluster_scores(X_full_scaled, db_labels)
+
+    # 3) Severity Index if Predicted_Health_Index is present
+    if 'Predicted_Health_Index' in merged_df.columns:
+        cluster_mean = (
+            merged_df
+            .groupby('Cluster')['Predicted_Health_Index']
+            .mean()
+            .sort_values()
+            .reset_index()
+        )
+        cluster_mean['Severity_Index'] = range(1, len(cluster_mean)+1)
+        c_map = dict(zip(cluster_mean['Cluster'], cluster_mean['Severity_Index']))
+        merged_df['Severity_Index'] = merged_df['Cluster'].map(c_map)
+
+    # 4) t-SNE & UMAP Visualization
+    hue_col = 'Severity_Index' if 'Severity_Index' in merged_df.columns else 'Cluster'
+    hue_vals = merged_df[hue_col].values
+
+    tsne_2d = TSNE(n_components=2, random_state=42)
+    X_tsne_2d = tsne_2d.fit_transform(X_full_scaled)
+    plt.figure(figsize=(8,6))
+    sns.scatterplot(x=X_tsne_2d[:,0], y=X_tsne_2d[:,1], hue=hue_vals, palette='viridis')
+    plt.title(f"t-SNE 2D - KMeans best_k={best_k}, config={config_id}")
+    tsne_path = os.path.join(plots_folder, f"tsne2d_{config_id}.png")
+    plt.savefig(tsne_path, bbox_inches='tight')
+    plt.close()
+
+    umap_2d = umap.UMAP(n_components=2, random_state=42)
+    X_umap_2d = umap_2d.fit_transform(X_full_scaled)
+    plt.figure(figsize=(8,6))
+    sns.scatterplot(x=X_umap_2d[:,0], y=X_umap_2d[:,1], hue=hue_vals, palette='viridis')
+    plt.title(f"UMAP 2D - {config_id}")
+    umap_path = os.path.join(plots_folder, f"umap2d_{config_id}.png")
+    plt.savefig(umap_path, bbox_inches='tight')
+    plt.close()
+
+    # 5) Final K-Means metrics
+    final_sil = silhouette_score(X_full_scaled, final_labels_kmeans)
+    final_ch = calinski_harabasz_score(X_full_scaled, final_labels_kmeans)
+    final_db = davies_bouldin_score(X_full_scaled, final_labels_kmeans)
+
+    del X_full, X_full_scaled
+    gc.collect()
+
+    return {
+        "config_id": config_id,
+        "chosen_method": "KMeans",
+        "chosen_k": best_k,
+        "final_silhouette": final_sil,
+        "final_calinski": final_ch,
+        "final_davies_bouldin": final_db,
+        "dbscan_silhouette": db_sil,
+        "dbscan_calinski": db_cal,
+        "dbscan_davies_bouldin": db_dav
+    }
+
+
+###############################################################################
+# 6. TabNet Regression Performance
+###############################################################################
+def evaluate_regression_performance(config_id, output_prefix):
+    """
+    Reads TabNet's metrics JSON if available.
+    """
+    metrics_file = f"{output_prefix}_metrics.json"
+    mse_val, r2_val = np.nan, np.nan
+    if os.path.exists(metrics_file):
+        # Also check if it's fully written
+        if not file_is_fully_written(metrics_file, min_size=2):
+            logger.warning(f"Metrics file {metrics_file} might be incomplete.")
+            return {"config_id": config_id, "tabnet_mse": np.nan, "tabnet_r2": np.nan}
+
+        try:
+            with open(metrics_file, 'r') as f:
+                data = json.load(f)
+            mse_val = float(data.get("test_mse", np.nan))
+            r2_val = float(data.get("test_r2", np.nan))
+        except Exception as e:
+            logger.warning(f"Could not parse {metrics_file}: {e}")
+    else:
+        logger.info(f"No TabNet metrics file {metrics_file} found; skipping.")
+    return {"config_id": config_id, "tabnet_mse": mse_val, "tabnet_r2": r2_val}
+
+
+###############################################################################
+# 7. Save Overall Experiment Results
+###############################################################################
+def save_results_to_csv(output_path, results_list):
+    df = pd.DataFrame(results_list)
+    write_header = not os.path.exists(output_path)
+    df.to_csv(output_path, mode='a', header=write_header, index=False)
+
+
+###############################################################################
+# 8. Main Execution
+###############################################################################
+def main():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, "Data")
+
+    # Ensure data is ready
+    ensure_preprocessed_data(data_dir)
+    cci_path = os.path.join(data_dir, "patient_data_with_health_index_cci.pkl")
+    if not os.path.exists(cci_path):
+        raise FileNotFoundError("patient_data_with_health_index_cci.pkl missing after preprocessing.")
+
+    full_df = pd.read_pickle(cci_path)
+    logger.info("[MAIN] Loaded data shape=%s", full_df.shape)
+
+    feature_configs = ["composite", "cci", "combined"]
+    subset_types = ["none", "diabetes", "ckd"]
+    model_approaches = ["vae", "tabnet", "hybrid"]
+
+    all_results = []
+    # We'll use one global run_timestamp so each combination is time-labeled consistently
+    run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # For each (feature_config, subset, model_approach), we do an experiment
+    for fc, ss, ma in itertools.product(feature_configs, subset_types, model_approaches):
+        config_id = f"{fc}_{ss}_{ma}"
+        logger.info("\n========================================")
+        logger.info(" Running config: %s", config_id)
+        logger.info("========================================")
+
+        # Create a per-config subfolder
+        config_folder = os.path.join(data_dir, "Experiments", config_id)
+        os.makedirs(config_folder, exist_ok=True)
+
+        # ---------------------------------------------------
+        # (Optional) Check if entire config is done -> skip
+        # ---------------------------------------------------
+        if all_steps_done(fc, ss, ma, config_folder, run_timestamp):
+            logger.info("[RESUME] Skipping entire config_id=%s – all artifacts found.", config_id)
+            continue
+
+        # 1) Filter subset
+        sub_df = filter_subpopulation(full_df, ss, data_dir)
+        # 2) Feature selection
+        use_df = select_features(sub_df, fc)
+
+        # Dump intermediate to disk, then free memory
+        temp_file = os.path.join(config_folder, f"temp_{config_id}_{run_timestamp}.pkl")
+        use_df.to_pickle(temp_file)
+        del sub_df, use_df
+        gc.collect()
+
+        # Build typical model prefixes
+        vae_prefix = os.path.join(config_folder, f"{config_id}_{run_timestamp}_vae")
+        tabnet_prefix = os.path.join(config_folder, f"{config_id}_{run_timestamp}_tabnet")
+
+        # 3) VAE step if needed
+        if ma in ["vae", "hybrid"]:
+            if step_vae_artifacts_ok(vae_prefix):
+                logger.info("[RESUME] VAE artifacts found for %s, skipping VAE step.", config_id)
+            else:
+                run_vae(temp_file, vae_prefix)
+
+        # 4) TabNet step if needed
+        if ma in ["tabnet", "hybrid"]:
+            if step_tabnet_artifacts_ok(tabnet_prefix):
+                logger.info("[RESUME] TabNet artifacts found for %s, skipping TabNet step.", config_id)
+            else:
+                # Decide which target_col to use
+                if fc == "cci":
+                    # For cci feature config, predict CharlsonIndex
+                    run_tabnet(temp_file, tabnet_prefix, target_col="CharlsonIndex")
+                else:
+                    # For composite or combined, predict Health_Index
+                    run_tabnet(temp_file, tabnet_prefix, target_col="Health_Index")
+
+        # 5) Merge outputs & cluster
+        #    Only do clustering if at least one model produced an output
+        frames = []
+        if ma in ["vae", "hybrid"] and step_vae_artifacts_ok(vae_prefix):
+            df_lat = pd.read_csv(f"{vae_prefix}_latent_features.csv")
+            frames.append(df_lat)
+        if ma in ["tabnet", "hybrid"] and step_tabnet_artifacts_ok(tabnet_prefix):
+            df_tab = pd.read_csv(f"{tabnet_prefix}_predictions.csv")
+            frames.append(df_tab)
+
+        if frames:
+            merged_df = frames[0]
+            for fdf in frames[1:]:
+                merged_df = merged_df.merge(fdf, on='Id', how='inner')
+
+            temp_data = pd.read_pickle(temp_file)
+            merged_df = temp_data.merge(merged_df, on='Id', how='inner')
+
+            cat_cols = ['GENDER', 'RACE', 'ETHNICITY', 'MARITAL']
+            existing_cat = [c for c in cat_cols if c in merged_df.columns]
+            if existing_cat:
+                for col in existing_cat:
+                    merged_df[col] = merged_df[col].astype(str)
+                merged_df = pd.get_dummies(
+                    merged_df,
+                    columns=existing_cat,
+                    drop_first=True
+                )
+
+            # If clustering artifacts are missing, do clustering
+            if not step_clustering_artifacts_ok(config_id, config_folder):
+                logger.info("Performing clustering for %s", config_id)
+                plots_folder = os.path.join(config_folder, "plots")
+                clust_res = memory_optimized_clustering_and_visualization(
+                    merged_df,
+                    config_id,
+                    plots_folder=plots_folder
+                )
+                all_results.append(clust_res)
+            else:
+                logger.info("[RESUME] Clustering plots found for %s, skipping clustering.", config_id)
+
+            del merged_df, temp_data
+            for fdf in frames:
+                del fdf
+            gc.collect()
+        else:
+            logger.info("[INFO] No model output CSV to cluster/visualize for %s", config_id)
+
+        # 6) Evaluate TabNet if relevant
+        if ma in ["tabnet", "hybrid"]:
+            # We always do this because we might have partial metrics
+            reg_res = evaluate_regression_performance(config_id, tabnet_prefix)
+            all_results.append(reg_res)
+
+        # 7) Remove temp file
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        gc.collect()
+
+    # 8) Save all results
+    results_csv_path = os.path.join(data_dir, OUTPUT_RESULTS_CSV)
+    if all_results:
+        save_results_to_csv(results_csv_path, all_results)
+        logger.info("[MAIN] All experiment results appended to %s", results_csv_path)
+    else:
+        logger.info("[WARN] No results collected. Check logs for issues.")
+
+
+if __name__ == "__main__":
+    main()
+
+"""
+update_comprehensive_results.py
+Author: Imran Feisal
+Date: 18/01/2025
+
+Description:
+Extends the original comprehensive testing framework to:
+ - Merge columns from BOTH `patient_data_with_health_index_cci.pkl` (Charlson, etc.)
+   and `patient_data_with_health_index.pkl` (Hospital/Med/Abnormal counts, etc.) if they exist.
+ - Read existing VAE/TabNet outputs for each config, merges them with the base data,
+   then performs clustering if no t-SNE/UMAP plots are found.
+ - Appends newly generated clustering rows to `comprehensive_experiments_results_v2.csv`.
+"""
+
+import os
+import gc
+import glob
+import logging
+import pandas as pd
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.metrics import (
+    silhouette_score,
+    calinski_harabasz_score,
+    davies_bouldin_score
+)
+from sklearn.manifold import TSNE
+import umap.umap_ as umap
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Constants
+DATA_DIR = "Data"
+EXPERIMENTS_DIR = os.path.join(DATA_DIR, "Experiments")
+
+ORIGINAL_RESULTS_FILE = "comprehensive_experiments_results.csv"
+NEW_RESULTS_FILE = "comprehensive_experiments_results_v2.csv"
+
+# The two pickles you wish to merge:
+CCI_PICKLE = os.path.join(DATA_DIR, "patient_data_with_health_index_cci.pkl")
+EXTRA_PICKLE = os.path.join(DATA_DIR, "patient_data_with_health_index.pkl")
+
+###############################################################################
+# 1. Check if clustering artifacts exist
+###############################################################################
+def clustering_artifacts_exist(config_id, config_folder):
+    plots_folder = os.path.join(config_folder, "plots")
+    tsne_file = os.path.join(plots_folder, f"tsne2d_{config_id}.png")
+    umap_file = os.path.join(plots_folder, f"umap2d_{config_id}.png")
+    return os.path.exists(tsne_file) and os.path.exists(umap_file)
+
+###############################################################################
+# 2. Perform Clustering + Visualisation
+###############################################################################
+def perform_clustering_and_visualization(merged_df, config_id, plots_folder):
+    """
+    Clusters with K-Means [6..9], picks best by silhouette. Also runs DBSCAN.
+    Excludes 'Id', 'Predicted_Health_Index', 'Predicted_CharlsonIndex' from features.
+    If <2 rows/features, skip. Saves t-SNE & UMAP plots if possible.
+    Returns a dict of cluster metrics.
+    """
+    os.makedirs(plots_folder, exist_ok=True)
+
+    exclude_cols = {"Id", "Predicted_Health_Index", "Predicted_CharlsonIndex"}
+    X_cols = [c for c in merged_df.columns if c not in exclude_cols]
+    X = merged_df[X_cols].values
+
+    n_rows, n_feats = X.shape
+    if n_rows < 2 or n_feats < 2:
+        logger.warning(f"[{config_id}] Not enough rows/features ({n_rows}x{n_feats}) to cluster.")
+        return {}
+
+    # Scale
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # K-Means over [6..9], pick best by silhouette
+    best_k = None
+    best_sil = -1
+    for k in range(6, 10):
+        km = KMeans(n_clusters=k, random_state=42)
+        labels = km.fit_predict(X_scaled)
+        sil = silhouette_score(X_scaled, labels)
+        if sil > best_sil:
+            best_sil = sil
+            best_k = k
+
+    # Fit final KMeans
+    final_km = KMeans(n_clusters=best_k, random_state=42).fit(X_scaled)
+    final_labels = final_km.predict(X_scaled)
+    merged_df["Cluster"] = final_labels
+
+    # Evaluate cluster metrics
+    final_sil = silhouette_score(X_scaled, final_labels)
+    final_cal = calinski_harabasz_score(X_scaled, final_labels)
+    final_dav = davies_bouldin_score(X_scaled, final_labels)
+
+    # DBSCAN for reference
+    db = DBSCAN(eps=0.5, min_samples=5).fit(X_scaled)
+    db_labels = db.labels_
+    if len(set(db_labels)) < 2:
+        db_sil, db_cal, db_dav = None, None, None
+    else:
+        db_sil = silhouette_score(X_scaled, db_labels)
+        db_cal = calinski_harabasz_score(X_scaled, db_labels)
+        db_dav = davies_bouldin_score(X_scaled, db_labels)
+
+    # t-SNE & UMAP if enough rows
+    if n_rows > 1:
+        # t-SNE
+        tsne = TSNE(n_components=2, random_state=42)
+        X_tsne = tsne.fit_transform(X_scaled)
+        plt.figure(figsize=(7, 5))
+        sns.scatterplot(x=X_tsne[:,0], y=X_tsne[:,1],
+                        hue=merged_df["Cluster"], palette="viridis")
+        plt.title(f"t-SNE for {config_id} (K={best_k})")
+        tsne_path = os.path.join(plots_folder, f"tsne2d_{config_id}.png")
+        plt.savefig(tsne_path, bbox_inches="tight")
+        plt.close()
+
+        # UMAP
+        reducer = umap.UMAP(n_components=2, random_state=42)
+        X_umap = reducer.fit_transform(X_scaled)
+        plt.figure(figsize=(7, 5))
+        sns.scatterplot(x=X_umap[:,0], y=X_umap[:,1],
+                        hue=merged_df["Cluster"], palette="viridis")
+        plt.title(f"UMAP for {config_id} (K={best_k})")
+        umap_path = os.path.join(plots_folder, f"umap2d_{config_id}.png")
+        plt.savefig(umap_path, bbox_inches="tight")
+        plt.close()
+
+    return {
+        "config_id": config_id,
+        "chosen_method": "KMeans",
+        "chosen_k": best_k,
+        "final_silhouette": final_sil,
+        "final_calinski": final_cal,
+        "final_davies_bouldin": final_dav,
+        "dbscan_silhouette": db_sil,
+        "dbscan_calinski": db_cal,
+        "dbscan_davies_bouldin": db_dav,
+    }
+
+###############################################################################
+# 3. Main Update Logic
+###############################################################################
+def main():
+    # Load the original results CSV if present
+    orig_csv_path = os.path.join(DATA_DIR, ORIGINAL_RESULTS_FILE)
+    if os.path.exists(orig_csv_path):
+        original_results = pd.read_csv(orig_csv_path)
+    else:
+        original_results = pd.DataFrame()
+
+    # Check for existence of both pickles
+    if not os.path.exists(CCI_PICKLE):
+        logger.error(f"Missing {CCI_PICKLE}; cannot proceed.")
+        return
+    if not os.path.exists(EXTRA_PICKLE):
+        logger.error(f"Missing {EXTRA_PICKLE}; cannot proceed.")
+        return
+
+    # Read them
+    df_cci = pd.read_pickle(CCI_PICKLE)
+    df_extra = pd.read_pickle(EXTRA_PICKLE)
+    logger.info(f"[BASE] df_cci shape={df_cci.shape}, df_extra shape={df_extra.shape}")
+
+    # Safely pick only columns from df_extra that exist
+    # i.e. if Hospitalizations_Count is missing, we skip it
+    wanted_cols = {"Id", "Hospitalizations_Count", "Medications_Count", "Abnormal_Observations_Count"}
+    actual_extra_cols = list(set(df_extra.columns).intersection(wanted_cols))
+
+    if len(actual_extra_cols) < 4:
+        missing = wanted_cols - set(df_extra.columns)
+        if missing:
+            logger.warning(f"[BASE] The following expected columns are missing in EXTRA_PICKLE: {missing}")
+
+    # Merge them on "Id"
+    base_df = df_cci.merge(df_extra[actual_extra_cols], on="Id", how="left")
+    logger.info(f"[BASE] After merge shape={base_df.shape}")
+
+    # Drop unneeded or list-typed columns
+    drop_cols = ["SEQUENCE", "PATIENT"]
+    for col in drop_cols:
+        if col in base_df.columns:
+            base_df.drop(columns=[col], inplace=True)
+
+    # If any column holds list data, drop it
+    for col in list(base_df.columns):
+        if base_df[col].map(type).eq(list).any():
+            logger.warning(f"[BASE] Dropping {col} because it contains list data.")
+            base_df.drop(columns=[col], inplace=True)
+
+    # Now cluster each config directory
+    all_results = []
+    for config_dir in sorted(os.listdir(EXPERIMENTS_DIR)):
+        config_path = os.path.join(EXPERIMENTS_DIR, config_dir)
+        if not os.path.isdir(config_path):
+            continue
+
+        config_id = config_dir
+        plots_folder = os.path.join(config_path, "plots")
+
+        if clustering_artifacts_exist(config_id, config_path):
+            logger.info(f"[SKIP] Clustering already done for {config_id}.")
+            continue
+
+        # Look for VAE or TabNet outputs
+        lat_files = glob.glob(os.path.join(config_path, "*_latent_features.csv"))
+        pred_files = glob.glob(os.path.join(config_path, "*_predictions.csv"))
+
+        if not lat_files and not pred_files:
+            logger.warning(f"[MISSING] No VAE or TabNet CSV for {config_id}")
+            continue
+
+        merged = base_df.copy()
+
+        # Merge latent if present
+        if lat_files:
+            df_lat = pd.read_csv(lat_files[0])
+            merged = merged.merge(df_lat, on="Id", how="inner")
+
+        # Merge preds if present
+        if pred_files:
+            df_pred = pd.read_csv(pred_files[0])
+            merged = merged.merge(df_pred, on="Id", how="inner")
+
+        logger.info(f"[{config_id}] final merged shape={merged.shape}")
+
+        # Drop columns with list data again if they re-appear
+        for col in list(merged.columns):
+            if merged[col].map(type).eq(list).any():
+                logger.warning(f"[{config_id}] Dropping {col}; it has list data.")
+                merged.drop(columns=[col], inplace=True)
+
+        # One-hot encode typical demographic columns if present
+        cat_cols = ["GENDER", "RACE", "ETHNICITY", "MARITAL"]
+        for c in cat_cols:
+            if c in merged.columns:
+                merged[c] = merged[c].astype(str)
+        merged = pd.get_dummies(merged, columns=[c for c in cat_cols if c in merged.columns], drop_first=True)
+
+        # Perform clustering
+        res = perform_clustering_and_visualization(merged, config_id, plots_folder)
+        if res:
+            all_results.append(res)
+
+        del merged
+        gc.collect()
+
+    # Append new results
+    if all_results:
+        new_df = pd.DataFrame(all_results)
+        combined_df = pd.concat([original_results, new_df], ignore_index=True)
+        out_csv_path = os.path.join(DATA_DIR, NEW_RESULTS_FILE)
+        combined_df.to_csv(out_csv_path, index=False)
+        logger.info(f"[DONE] Updated results -> {NEW_RESULTS_FILE}")
+    else:
+        logger.info("[INFO] No new clustering results were generated.")
+
+if __name__ == "__main__":
+    main()
+
+"""
+update_model_metrics.py
+Author: Imran Feisal
+Date: 19/01/2025
+
+Description:
+1) Reads 'comprehensive_experiments_results_v2.csv' (clustering + partial TabNet metrics).
+2) Merges base data from 'patient_data_with_health_index_cci.pkl' + 'patient_data_with_health_index.pkl'.
+3) For each config_id that is 'vae' or 'hybrid' but missing VAE outputs, re-run VAE with a temp pkl.
+4) Grab new VAE metrics (final_train_loss, best_val_loss) + TabNet MSE/R2 from JSONs.
+5) Update the table as 'comprehensive_experiments_results_v3.csv'.
+"""
+
+import os
+import glob
+import json
+import logging
+import numpy as np
+import pandas as pd
+import time
+
+from vae_model import main as vae_main
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+###############################################################################
+# Paths
+###############################################################################
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(SCRIPT_DIR, "Data")
+EXPERIMENTS_DIR = os.path.join(DATA_DIR, "Experiments")
+
+OLD_RESULTS_CSV = "comprehensive_experiments_results_v2.csv"
+NEW_RESULTS_CSV = "comprehensive_experiments_results_v3.csv"
+
+CCI_PICKLE = os.path.join(DATA_DIR, "patient_data_with_health_index_cci.pkl")
+EXTRA_PICKLE = os.path.join(DATA_DIR, "patient_data_with_health_index.pkl")
+
+TEMP_PKL_DIR = os.path.join(DATA_DIR, "temp_pkls")
+os.makedirs(TEMP_PKL_DIR, exist_ok=True)
+
+###############################################################################
+# Utility: Check if file is fully written
+###############################################################################
+def file_is_fully_written(file_path, min_size=1, max_age_seconds=30):
+    """True iff file_path is large enough and not freshly modified."""
+    if not os.path.exists(file_path):
+        return False
+    if os.path.getsize(file_path) < min_size:
+        return False
+    mtime = os.path.getmtime(file_path)
+    now = time.time()
+    if (now - mtime) < max_age_seconds:
+        return False
+    return True
+
+def step_vae_artifacts_ok(config_path):
+    """
+    Return True iff *both* '*_latent_features.csv' & '*_vae_metrics.json' exist & are valid size.
+    """
+    latents = glob.glob(os.path.join(config_path, "*_latent_features.csv"))
+    metrics = glob.glob(os.path.join(config_path, "*_vae_metrics.json"))
+    if not latents or not metrics:
+        return False
+    lat_csv_ok = any(file_is_fully_written(f, min_size=10) for f in latents)
+    json_ok = any(file_is_fully_written(f, min_size=2) for f in metrics)
+    return lat_csv_ok and json_ok
+
+###############################################################################
+# Merge Base Data
+###############################################################################
+def load_and_merge_base_data():
+    """Load cci + extra pickles, merge if columns exist, drop list columns."""
+    if not os.path.exists(CCI_PICKLE):
+        raise FileNotFoundError(f"Missing {CCI_PICKLE}")
+    if not os.path.exists(EXTRA_PICKLE):
+        raise FileNotFoundError(f"Missing {EXTRA_PICKLE}")
+
+    df_cci = pd.read_pickle(CCI_PICKLE)   # has CharlsonIndex, Health_Index
+    df_extra = pd.read_pickle(EXTRA_PICKLE)  # has Hospitalizations_Count, etc.
+
+    # Only merge columns that exist
+    desired = {
+        "Id", 
+        "Hospitalizations_Count", 
+        "Medications_Count", 
+        "Abnormal_Observations_Count"
+    }
+    actual_extra_cols = list(set(df_extra.columns).intersection(desired))
+    missing = desired - set(df_extra.columns)
+    if missing:
+        logger.warning(f"[BASE] The following columns not found in {EXTRA_PICKLE}: {missing}")
+
+    base_df = df_cci.merge(df_extra[actual_extra_cols], on="Id", how="left")
+
+    # Drop any list columns
+    for col in ["SEQUENCE", "PATIENT"]:
+        if col in base_df.columns:
+            base_df.drop(columns=[col], inplace=True)
+
+    for col in list(base_df.columns):
+        if base_df[col].map(type).eq(list).any():
+            logger.warning(f"[BASE] Dropping {col}, it contains list data.")
+            base_df.drop(columns=[col], inplace=True)
+
+    return base_df
+
+###############################################################################
+# Subset + Feature Selection
+###############################################################################
+def subset_ckd(df):
+    ckd_codes = {431855005, 431856006, 433144002, 431857002, 46177005}
+    cond_path = os.path.join(DATA_DIR, "conditions.csv")
+    if not os.path.exists(cond_path):
+        raise FileNotFoundError("conditions.csv not found (subset_ckd).")
+
+    cdf = pd.read_csv(cond_path, usecols=["PATIENT","CODE","DESCRIPTION"])
+    code_mask = cdf["CODE"].isin(ckd_codes)
+    text_mask = cdf["DESCRIPTION"].str.lower().str.contains("chronic kidney disease", na=False)
+    ckd_patients = cdf.loc[code_mask | text_mask, "PATIENT"].unique()
+    return df[df["Id"].isin(ckd_patients)].copy()
+
+def subset_diabetes(df):
+    cond_path = os.path.join(DATA_DIR, "conditions.csv")
+    if not os.path.exists(cond_path):
+        raise FileNotFoundError("conditions.csv not found (subset_diabetes).")
+
+    cdf = pd.read_csv(cond_path, usecols=["PATIENT","DESCRIPTION"])
+    mask = cdf["DESCRIPTION"].str.lower().str.contains("diabetes", na=False)
+    diab_patients = cdf.loc[mask, "PATIENT"].unique()
+    return df[df["Id"].isin(diab_patients)].copy()
+
+def filter_subpopulation(df, subset_type):
+    ss = subset_type.lower()
+    if ss == "none":
+        return df
+    elif ss == "ckd":
+        return subset_ckd(df)
+    elif ss == "diabetes":
+        return subset_diabetes(df)
+    else:
+        logger.warning(f"[subset] Unknown subset={subset_type}, returning full.")
+        return df
+
+def select_features(df, feature_config):
+    """
+    We want base_cols = [
+      'Id','GENDER','RACE','ETHNICITY','MARITAL',
+      'HEALTHCARE_EXPENSES','HEALTHCARE_COVERAGE','INCOME',
+      'AGE','DECEASED',
+      'Hospitalizations_Count','Medications_Count','Abnormal_Observations_Count'
+    ]
+    plus Health_Index or CharlsonIndex or both.
+    If some columns are missing, fill them with zeros.
+    """
+    base_cols = [
+        'Id','GENDER','RACE','ETHNICITY','MARITAL',
+        'HEALTHCARE_EXPENSES','HEALTHCARE_COVERAGE','INCOME',
+        'AGE','DECEASED',
+        'Hospitalizations_Count','Medications_Count','Abnormal_Observations_Count'
+    ]
+    # Fill missing base cols with zero
+    missing_in_df = set(base_cols) - set(df.columns)
+    for col in missing_in_df:
+        df[col] = 0
+
+    if feature_config == "composite":
+        if "Health_Index" not in df.columns:
+            raise KeyError("Missing 'Health_Index' for feature_config='composite'")
+        final_cols = base_cols + ["Health_Index"]
+    elif feature_config == "cci":
+        if "CharlsonIndex" not in df.columns:
+            raise KeyError("Missing 'CharlsonIndex' for feature_config='cci'")
+        final_cols = base_cols + ["CharlsonIndex"]
+    elif feature_config == "combined":
+        if ("Health_Index" not in df.columns or "CharlsonIndex" not in df.columns):
+            raise KeyError("Missing 'Health_Index' or 'CharlsonIndex' for 'combined'")
+        final_cols = base_cols + ["Health_Index","CharlsonIndex"]
+    else:
+        raise ValueError(f"Invalid feature_config: {feature_config}")
+
+    # Only use columns that actually exist now
+    final_cols = [c for c in final_cols if c in df.columns]
+    return df[final_cols].copy()
+
+###############################################################################
+# Main
+###############################################################################
+def main():
+    old_path = os.path.join(DATA_DIR, OLD_RESULTS_CSV)
+    if not os.path.exists(old_path):
+        logger.error(f"[ERROR] {OLD_RESULTS_CSV} not found; nothing to update.")
+        return
+
+    df_results = pd.read_csv(old_path)
+    logger.info(f"[INFO] Loaded results shape={df_results.shape}")
+
+    # Merge base data
+    base_df = load_and_merge_base_data()
+    logger.info(f"[INFO] Base data shape={base_df.shape}")
+
+    updated_info = {}
+
+    # 1) Check each row => config_id => parse fc, ss, ma => if ma in [vae, hybrid], 
+    #    check if we have VAE artifacts. If not, rebuild temp pkl & run VAE.
+    for i, row in df_results.iterrows():
+        cid = row.get("config_id","")
+        if not cid:
+            continue
+
+        parts = cid.split("_")
+        if len(parts) != 3:
+            continue  # or do something else
+        fc, ss, ma = parts
+
+        if ma not in ["vae","hybrid"]:
+            continue
+
+        config_path = os.path.join(EXPERIMENTS_DIR, cid)
+        if not os.path.isdir(config_path):
+            # No folder => skip
+            continue
+
+        # If we already have VAE artifacts, skip
+        if step_vae_artifacts_ok(config_path):
+            logger.info(f"[SKIP] {cid} => VAE artifacts exist.")
+            continue
+
+        # Otherwise, re-train
+        logger.info(f"[RETRAIN] {cid} => missing VAE => generating temp pkl & run VAE.")
+        sub_df = filter_subpopulation(base_df, ss)
+        use_df = select_features(sub_df, fc)
+
+        temp_path = os.path.join(TEMP_PKL_DIR, f"temp_{cid}.pkl")
+        use_df.to_pickle(temp_path)
+
+        # VAE prefix
+        vae_prefix = os.path.join(config_path, f"{cid}_manual_vae")
+        try:
+            vae_main(input_file=temp_path, output_prefix=vae_prefix)
+            logger.info(f"[DONE] VAE re-trained for {cid}")
+        except Exception as ex:
+            logger.error(f"[FAIL] Could not run VAE for {cid}: {ex}")
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    # 2) Gather TabNet & VAE metrics
+    config_dirs = sorted(os.listdir(EXPERIMENTS_DIR))
+    for conf in config_dirs:
+        conf_path = os.path.join(EXPERIMENTS_DIR, conf)
+        if not os.path.isdir(conf_path):
+            continue
+
+        updated_info[conf] = {}
+
+        # TabNet
+        t_json = glob.glob(os.path.join(conf_path, "*_tabnet_metrics.json"))
+        tabnet_mse = np.nan
+        tabnet_r2 = np.nan
+        if t_json:
+            tfile = t_json[0]
+            if file_is_fully_written(tfile, min_size=2):
+                try:
+                    with open(tfile,"r") as f:
+                        data = json.load(f)
+                    tabnet_mse = float(data.get("test_mse", np.nan))
+                    tabnet_r2 = float(data.get("test_r2", np.nan))
+                except Exception as e:
+                    logger.warning(f"[{conf}] parse error on {tfile}: {e}")
+        updated_info[conf]["tabnet_mse"] = tabnet_mse
+        updated_info[conf]["tabnet_r2"] = tabnet_r2
+
+        # VAE
+        v_json = glob.glob(os.path.join(conf_path, "*_vae_metrics.json"))
+        vae_loss = np.nan
+        vae_val = np.nan
+        if v_json:
+            vfile = v_json[0]
+            if file_is_fully_written(vfile, min_size=2):
+                try:
+                    with open(vfile,"r") as f:
+                        data = json.load(f)
+                    vae_loss = float(data.get("final_train_loss", np.nan))
+                    vae_val  = float(data.get("best_val_loss", np.nan))
+                except Exception as e:
+                    logger.warning(f"[{conf}] parse error on {vfile}: {e}")
+        updated_info[conf]["vae_loss"] = vae_loss
+        updated_info[conf]["vae_val_loss"] = vae_val
+
+    # 3) Insert into df_results
+    for col in ["tabnet_mse","tabnet_r2","vae_loss","vae_val_loss"]:
+        if col not in df_results.columns:
+            df_results[col] = np.nan
+
+    for i in range(len(df_results)):
+        configid = df_results.at[i,"config_id"]
+        if configid in updated_info:
+            # TabNet
+            if pd.isna(df_results.at[i,"tabnet_mse"]):
+                df_results.at[i,"tabnet_mse"] = updated_info[configid]["tabnet_mse"]
+            if pd.isna(df_results.at[i,"tabnet_r2"]):
+                df_results.at[i,"tabnet_r2"] = updated_info[configid]["tabnet_r2"]
+            # VAE
+            df_results.at[i,"vae_loss"] = updated_info[configid]["vae_loss"]
+            df_results.at[i,"vae_val_loss"] = updated_info[configid]["vae_val_loss"]
+
+    # 4) Save
+    out_csv = os.path.join(DATA_DIR, NEW_RESULTS_CSV)
+    df_results.to_csv(out_csv, index=False)
+    logger.info(f"[DONE] Wrote {NEW_RESULTS_CSV} with updated metrics.")
+
+if __name__ == "__main__":
+    main()
+
