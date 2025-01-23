@@ -12,7 +12,10 @@ import json
 import logging
 import numpy as np
 import pandas as pd
+import sys
 
+root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(root_path)
 # Root-level models
 from vae_model import main as vae_main
 from tabnet_model import main as tabnet_main

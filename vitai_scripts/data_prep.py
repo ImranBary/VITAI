@@ -25,7 +25,10 @@ import os
 import logging
 import pandas as pd
 import gc
+import sys
 
+root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(root_path)
 # Root-level modules
 from data_preprocessing import main as preprocess_main
 from health_index import main as health_main

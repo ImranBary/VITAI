@@ -29,11 +29,11 @@ import numpy as np
 from tqdm import tqdm
 
 # vitai_scripts modules
-from vitai_scripts.data_prep import ensure_preprocessed_data
-from vitai_scripts.subset_utils import filter_subpopulation
-from vitai_scripts.feature_utils import select_features
-from vitai_scripts.model_utils import run_vae, run_tabnet, gather_vae_metrics, gather_tabnet_metrics
-from vitai_scripts.cluster_utils import cluster_and_visualise
+from data_prep import ensure_preprocessed_data
+from subset_utils import filter_subpopulation
+from feature_utils import select_features
+from model_utils import run_vae, run_tabnet, gather_vae_metrics, gather_tabnet_metrics
+from cluster_utils import cluster_and_visualise
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -89,31 +89,15 @@ def all_done(fc, ss, ma, config_folder, run_ts):
         return vae_done(vae_prefix) and tabnet_done(tabnet_prefix) and cluster_done(config_id, config_folder)
     return False
 
-def main():
-    parser = argparse.ArgumentParser(description="Run the entire VITAI pipeline (incl. Elixhauser) from one script.")
-    parser.add_argument("--data-dir", type=str, default="Data",
-                        help="Path to the Data folder.")
-    parser.add_argument("--output-file", type=str, default="vitai_final_results.csv",
-                        help="Name of the final CSV to produce.")
-    parser.add_argument("--feature-configs", nargs="+",
-                        default=["composite","cci","eci","combined","combined_eci"],
-                        help="Which feature configs to test.")
-    parser.add_argument("--subset-types", nargs="+",
-                        default=["none","diabetes","ckd"],
-                        help="Which subpopulations to test.")
-    parser.add_argument("--model-approaches", nargs="+",
-                        default=["vae","tabnet","hybrid"],
-                        help="Which model approaches to test.")
-    args = parser.parse_args()
-
-    data_dir = os.path.abspath(args.data_dir)
-    out_csv  = os.path.join(data_dir, args.output_file)
+def run_vitai_pipeline(data_dir, output_file, feature_configs, subset_types, model_approaches):
+    data_dir = os.path.abspath(data_dir)
+    out_csv  = os.path.join(data_dir, output_file)
 
     logger.info(f"Data directory: {data_dir}")
     logger.info(f"Output CSV: {out_csv}")
-    logger.info(f"Feature configs: {args.feature_configs}")
-    logger.info(f"Subset types: {args.subset_types}")
-    logger.info(f"Model approaches: {args.model_approaches}")
+    logger.info(f"Feature configs: {feature_configs}")
+    logger.info(f"Subset types: {subset_types}")
+    logger.info(f"Model approaches: {model_approaches}")
 
     # 1) Ensure data is fully prepped (including Elixhauser)
     ensure_preprocessed_data(data_dir)
@@ -126,7 +110,7 @@ def main():
     logger.info(f"[Main] Loaded final dataset shape={full_df.shape}")
 
     # 3) Build combos
-    combos = list(itertools.product(args.feature_configs, args.subset_types, args.model_approaches))
+    combos = list(itertools.product(feature_configs, subset_types, model_approaches))
     total = len(combos)
 
     # We'll store results for each combo, then write to a single CSV
@@ -231,6 +215,25 @@ def main():
         logger.info(f"Saved final results to {out_csv}")
     else:
         logger.info("No new results to write. All done.")
+
+def main():
+    parser = argparse.ArgumentParser(description="Run the entire VITAI pipeline (incl. Elixhauser) from one script.")
+    parser.add_argument("--data-dir", type=str, default="Data",
+                        help="Path to the Data folder.")
+    parser.add_argument("--output-file", type=str, default="vitai_final_results.csv",
+                        help="Name of the final CSV to produce.")
+    parser.add_argument("--feature-configs", nargs="+",
+                        default=["composite","cci","eci","combined","combined_eci", "combined_all"],
+                        help="Which feature configs to test.")
+    parser.add_argument("--subset-types", nargs="+",
+                        default=["none","diabetes","ckd"],
+                        help="Which subpopulations to test.")
+    parser.add_argument("--model-approaches", nargs="+",
+                        default=["vae","tabnet","hybrid"],
+                        help="Which model approaches to test.")
+    args = parser.parse_args()
+
+    run_vitai_pipeline(args.data_dir, args.output_file, args.feature_configs, args.subset_types, args.model_approaches)
 
 if __name__ == "__main__":
     main()
