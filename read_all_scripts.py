@@ -2,14 +2,17 @@ import os
 
 # List of .py files to read
 py_files = [
-    # 'data_preprocessing.py',
-    # 'health_index.py',
-    # 'charlson_comorbidity.py',
-    # 'vae_model.py',
-    # 'tabnet_model.py'
-    'comprehensive_testing_mem_optimized.py',
-    'update_comprehensive_results.py',
-    'update_model_metrics.py'
+    'data_preprocessing.py',
+    'health_index.py',
+    'charlson_comorbidity.py',
+    'vae_model.py',
+    'tabnet_model.py',
+    'vitai_scripts/cluster_utils.py',
+    'vitai_scripts/data_prep.py',
+    'vitai_scripts/feature_utils.py',
+    'vitai_scripts/model_utils.py',
+    'vitai_scripts/run_vitai_tests_main.py',
+    'vitai_scripts/subset_utils.py'
 ]
 
 # Initialize an empty string to hold the combined content
