@@ -44,7 +44,8 @@ def explore_observations(observations):
 def explore_patients(patients):
     """Explore patients data."""
     print("Patients Data Sample:")
-    print(patients.head())
+    #print(patients.head())
+    #patients.head().to_csv("patients_sample.csv")
     
 def explore_procedures(procedures):
     """Explore procedures data."""
@@ -53,13 +54,16 @@ def explore_procedures(procedures):
 
 def main():
     data_dir =  'Data'  
-    conditions, encounters, medications, observations, patients, procedures = load_data(data_dir)
+    #conditions, encounters, medications, observations, patients, procedures = load_data(data_dir)
+    patients = load_data(data_dir)
+    patients.head().to_csv("patients_sample.csv")
+
 
     #explore_conditions(conditions)
     #explore_encounters(encounters)
     #explore_medications(medications)
-    explore_observations(observations)
-    #explore_patients(patients)
+    #explore_observations(observations)
+    explore_patients(patients)
     #explore_procedures(procedures)
 
 if __name__ == '__main__':

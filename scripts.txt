@@ -1,3 +1,312 @@
+# charlson_comorbidity.py
+# Author: Imran Feisal  
+# Date: 22/15/2024
+# Description:
+# This script computes the Charlson Comorbidity Index (CCI) from SNOMED codes.
+# It expects a CSV mapping file with columns:
+# code, coding_system, description, entity, list_name, upload_date, medcode, snomedctdescriptionid, CharlsonCategory
+# It also expects a conditions dataframe with SNOMED-CT codes.
+#
+# The output is a DataFrame with patient IDs and their computed CCI scores.
+
+import pandas as pd
+import os
+
+def load_cci_mapping(data_dir):
+    """
+    Load the Charlson mapping file.
+    Expects a CSV with columns: ['code', 'CharlsonCategory', ...].
+    If no CSV or the file is missing, this function might raise FileNotFoundError
+    or produce an empty DataFrame (depending on your needs).
+    """
+    cci_filepath = os.path.join(data_dir, 'res195-comorbidity-cci-snomed.csv')
+    cci_df = pd.read_csv(cci_filepath)
+    # Basic cleanup or renaming if needed
+    # e.g. rename columns to something standard
+    # cci_df.rename(columns={'code': 'SNOMED', 'CharlsonCategory': 'CharlsonCategory'}, inplace=True)
+    return cci_df
+
+def assign_cci_weights(CharlsonCategory):
+    """
+    Assign Charlson weights based on category.
+    As per the original Charlson Comorbidity Index:
+      - Myocardial infarction, Congestive heart failure, Peripheral vascular disease,
+        Cerebrovascular disease, Dementia, Chronic pulmonary disease, Connective tissue disease,
+        Ulcer disease, Mild liver disease, Diabetes without end-organ damage => weight 1
+      - Hemiplegia, Moderate/severe kidney disease, Diabetes with end-organ damage,
+        Any tumour (solid tumor), leukemia, lymphoma => weight 2
+      - Moderate or severe liver disease => weight 3
+      - Metastatic solid tumour, AIDS => weight 6
+    """
+    category_to_weight = {
+        'Myocardial infarction': 1,
+        'Congestive heart failure': 1,
+        'Peripheral vascular disease': 1,
+        'Cerebrovascular disease': 1,
+        'Dementia': 1,
+        'Chronic pulmonary disease': 1,
+        'Connective tissue disease': 1,
+        'Ulcer disease': 1,
+        'Mild liver disease': 1,
+        'Diabetes without end-organ damage': 1,
+        'Hemiplegia': 2,
+        'Moderate or severe kidney disease': 2,
+        'Diabetes with end-organ damage': 2,
+        'Any tumour, leukaemia, lymphoma': 2,
+        'Moderate or severe liver disease': 3,
+        'Metastatic solid tumour': 6,
+        'AIDS/HIV': 6
+    }
+    return category_to_weight.get(CharlsonCategory, 0)
+
+def compute_cci(conditions, cci_mapping):
+    """
+    Compute the Charlson Comorbidity Index for each patient from a DataFrame of SNOMED-CT codes.
+    
+    Args:
+        conditions (pd.DataFrame): Must include ['PATIENT', 'CODE'] columns where
+                                   CODE is a SNOMED code (int or str).
+        cci_mapping (pd.DataFrame): A CSV-based lookup with at least:
+                                   ['code', 'CharlsonCategory']
+                                   (Loaded from load_cci_mapping).
+                                   Some codes may be missing from the CSV.
+    
+    Returns:
+        pd.DataFrame: A DataFrame with columns ['PATIENT', 'CharlsonIndex'].
+                      If a patient has no mapped comorbidities, CharlsonIndex = 0.
+    """
+
+    # 1. Define a fallback dictionary for SNOMED -> CharlsonCategory
+    SNOMED_TO_CHARLSON = {
+        #
+        # MYOCARDIAL INFARCTION (weight 1)
+        #
+        22298006: "Myocardial infarction",      # "Myocardial infarction (disorder)"
+        401303003: "Myocardial infarction",     # "Acute ST segment elevation myocardial infarction"
+        401314000: "Myocardial infarction",     # "Acute non-ST segment elevation myocardial infarction"
+        129574000: "Myocardial infarction",     # "Postoperative myocardial infarction (disorder)"
+        #
+        # CONGESTIVE HEART FAILURE (weight 1)
+        #
+        88805009: "Congestive heart failure",   # "Chronic congestive heart failure (disorder)"
+        84114007: "Congestive heart failure",   # "Heart failure (disorder)"
+        #
+        # PERIPHERAL VASCULAR DISEASE (weight 1)
+        #
+        # -- None in your list match typical “peripheral vascular disease” codes --
+        #
+        # CEREBROVASCULAR DISEASE (weight 1)
+        #
+        230690007: "Cerebrovascular disease",   # "Cerebrovascular accident (disorder)"
+        #
+        # DEMENTIA (weight 1)
+        #
+        26929004: "Dementia",                   # "Alzheimer's disease (disorder)"
+        230265002: "Dementia",                  # "Familial Alzheimer's disease of early onset (disorder)"
+        #
+        # CHRONIC PULMONARY DISEASE (weight 1)
+        #
+        185086009: "Chronic pulmonary disease", # "Chronic obstructive bronchitis (disorder)"
+        87433001:  "Chronic pulmonary disease", # "Pulmonary emphysema (disorder)"
+        195967001: "Chronic pulmonary disease", # "Asthma (disorder)" – (Some include chronic asthma under COPD)
+        233678006: "Chronic pulmonary disease", # "Childhood asthma (disorder)"
+        #
+        # CONNECTIVE TISSUE DISEASE (weight 1)
+        #
+        69896004: "Connective tissue disease",  # "Rheumatoid arthritis (disorder)"
+        200936003: "Connective tissue disease", # "Lupus erythematosus (disorder)"
+        #
+        # ULCER DISEASE (weight 1)
+        #
+        # -- None in your list specifically match “peptic ulcer disease” --
+        #
+        # MILD LIVER DISEASE (weight 1)
+        #
+        128302006: "Mild liver disease",        # "Chronic hepatitis C (disorder)" 
+        61977001:  "Mild liver disease",        # "Chronic type B viral hepatitis (disorder)"
+        #
+        # DIABETES WITHOUT END-ORGAN DAMAGE (weight 1)
+        #
+        44054006: "Diabetes without end-organ damage",  # "Diabetes mellitus type 2 (disorder)"
+        #
+        # DIABETES WITH END-ORGAN DAMAGE (weight 2)
+        #
+        368581000119106: "Diabetes with end-organ damage",  # "Neuropathy due to type 2 diabetes mellitus"
+        422034002:        "Diabetes with end-organ damage",  # "Retinopathy due to type 2 diabetes mellitus"
+        127013003:        "Diabetes with end-organ damage",  # "Disorder of kidney due to diabetes mellitus"
+        90781000119102:   "Diabetes with end-organ damage",  # "Microalbuminuria due to type 2 diabetes mellitus"
+        157141000119108:  "Diabetes with end-organ damage",  # "Proteinuria due to type 2 diabetes mellitus"
+        60951000119105:   "Diabetes with end-organ damage",  # "Blindness due to type 2 diabetes mellitus"
+        97331000119101:   "Diabetes with end-organ damage",  # "Macular edema & retinopathy due to T2DM"
+        1501000119109:    "Diabetes with end-organ damage",  # "Proliferative retinopathy due to T2DM"
+        1551000119108:    "Diabetes with end-organ damage",  # "Nonproliferative retinopathy due to T2DM"
+        #
+        # HEMIPLEGIA or PARAPLEGIA (weight 2)
+        #
+        # -- None in your list appear to indicate hemiplegia or paraplegia, 
+        #    e.g. “cerebral palsy” is not typically counted as hemiplegia. 
+        #
+        # MODERATE OR SEVERE KIDNEY DISEASE (weight 2)
+        #
+        # Some references only count CKD stage 3 or worse. 
+        # The user had stage 1 & 2 included, so we’ll keep that approach consistent:
+        431855005: "Moderate or severe kidney disease",  # "CKD stage 1 (disorder)"
+        431856006: "Moderate or severe kidney disease",  # "CKD stage 2 (disorder)"
+        433144002: "Moderate or severe kidney disease",  # "CKD stage 3 (disorder)"
+        431857002: "Moderate or severe kidney disease",  # "CKD stage 4 (disorder)"
+        46177005:  "Moderate or severe kidney disease",  # "End-stage renal disease (disorder)"
+        129721000119106: "Moderate or severe kidney disease",  # "Acute renal failure on dialysis (disorder)"
+        #
+        # ANY TUMOUR (solid tumor), LEUKEMIA, LYMPHOMA (weight 2)
+        #
+        254637007: "Any tumour, leukaemia, lymphoma",  # "Non-small cell lung cancer (disorder)"
+        254632001: "Any tumour, leukaemia, lymphoma",  # "Small cell carcinoma of lung (disorder)"
+        93761005:  "Any tumour, leukaemia, lymphoma",  # "Primary malignant neoplasm of colon"
+        363406005: "Any tumour, leukaemia, lymphoma",  # "Malignant neoplasm of colon"
+        109838007: "Any tumour, leukaemia, lymphoma",  # "Overlapping malignant neoplasm of colon"
+        126906006: "Any tumour, leukaemia, lymphoma",  # "Neoplasm of prostate (disorder)"
+        92691004:  "Any tumour, leukaemia, lymphoma",  # "Carcinoma in situ of prostate"
+        254837009: "Any tumour, leukaemia, lymphoma",  # "Malignant neoplasm of breast"
+        109989006: "Any tumour, leukaemia, lymphoma",  # "Multiple myeloma (disorder)"
+        93143009:  "Any tumour, leukaemia, lymphoma",  # "Leukemia disease (disorder)"
+        91861009:  "Any tumour, leukaemia, lymphoma",  # "Acute myeloid leukemia (disorder)"
+        #
+        # MODERATE OR SEVERE LIVER DISEASE (weight 3)
+        #
+        # -- None in your list mention cirrhosis or advanced hepatic failure 
+        #    that we'd classify as 'moderate/severe liver disease'.
+        #
+        # METASTATIC SOLID TUMOUR (weight 6)
+        #
+        94503003: "Metastatic solid tumour",    # "Metastatic malignant neoplasm to prostate"
+        94260004: "Metastatic solid tumour",    # "Metastatic malignant neoplasm to colon"
+        #
+        # AIDS/HIV (weight 6)
+        #
+        62479008: "AIDS/HIV",   # "Acquired immune deficiency syndrome (disorder)"
+        86406008: "AIDS/HIV",   # "Human immunodeficiency virus infection (disorder)"
+    }
+
+
+    # 2. Merge conditions with cci_mapping on SNOMED code (left_on='CODE', right_on='code')
+    #    This way if a code is present in the CSV, it overrides or supplies CharlsonCategory
+    merged = conditions.merge(
+        cci_mapping[['code', 'CharlsonCategory']],
+        how='left',
+        left_on='CODE',
+        right_on='code'
+    )
+
+    # 3. Fallback: For rows where the CSV didn't provide a CharlsonCategory, try the SNOMED_TO_CHARLSON dict
+    #    If neither the CSV nor the dict have it, it remains None/NaN
+    def fallback_category(row):
+        if pd.notna(row['CharlsonCategory']):
+            return row['CharlsonCategory']
+        else:
+            # Attempt dictionary lookup
+            return SNOMED_TO_CHARLSON.get(row['CODE'], None)
+
+    merged['CharlsonCategory'] = merged.apply(fallback_category, axis=1)
+
+    # 4. Compute the Charlson weight for each row
+    merged['CCI_Weight'] = merged['CharlsonCategory'].apply(assign_cci_weights)
+
+    # 5. For each patient, sum the unique categories.
+    #    i.e. if a patient has multiple codes in the same category, only count once.
+    #    We do this by grouping on (PATIENT, CharlsonCategory) and taking the max weight
+    #    Then summing across categories for each patient
+    patient_cci = (
+        merged
+        .groupby(['PATIENT', 'CharlsonCategory'])['CCI_Weight']
+        .max()
+        .reset_index()
+    )
+
+    patient_cci_sum = (
+        patient_cci
+        .groupby('PATIENT')['CCI_Weight']
+        .sum()
+        .reset_index()
+    )
+
+    # Rename column to match the expected return type
+    patient_cci_sum.rename(columns={'CCI_Weight': 'CharlsonIndex'}, inplace=True)
+
+    return patient_cci_sum
+
+
+
+# data_exploration.py
+
+import pandas as pd
+import os
+
+def load_data(data_dir):
+    """Load data for exploration."""
+    conditions = pd.read_csv(os.path.join(data_dir, 'conditions.csv'))
+    encounters = pd.read_csv(os.path.join(data_dir, 'encounters.csv'))
+    medications = pd.read_csv(os.path.join(data_dir, 'medications.csv'))
+    observations = pd.read_csv(os.path.join(data_dir, 'observations.csv'))
+    patients = pd.read_csv(os.path.join(data_dir, 'patients.csv'))
+    procedures = pd.read_csv(os.path.join(data_dir, 'procedures.csv'))
+    return conditions, encounters, medications, observations, patients, procedures
+
+def explore_conditions(conditions):
+    """Explore conditions data."""
+    print("Conditions Data Sample:")
+    print(conditions.head())
+    print("\nUnique Condition Descriptions:")
+    print(conditions['DESCRIPTION'].unique())
+
+def explore_encounters(encounters):
+    """Explore encounters data."""
+    print("Encounters Data Sample:")
+    print(encounters.head())
+    print("\nEncounter Classes:")
+    print(encounters['ENCOUNTERCLASS'].unique())
+
+def explore_medications(medications):
+    """Explore medications data."""
+    print("Medications Data Sample:")
+    print(medications.head())
+    print("\nUnique Medication Descriptions:")
+    print(medications['DESCRIPTION'].unique())
+
+def explore_observations(observations):
+    """Explore observations data."""
+    print("Observations Data Sample:")
+    print(observations.head())
+    print("\nUnique Observation Descriptions:")
+    print(observations['DESCRIPTION'].unique())
+    
+def explore_patients(patients):
+    """Explore patients data."""
+    print("Patients Data Sample:")
+    #print(patients.head())
+    #patients.head().to_csv("patients_sample.csv")
+    
+def explore_procedures(procedures):
+    """Explore procedures data."""
+    print("Procedures Data Sample:")
+    print(procedures.head())
+
+def main():
+    data_dir =  'Data'  
+    #conditions, encounters, medications, observations, patients, procedures = load_data(data_dir)
+    patients = load_data(data_dir)
+    patients.head().to_csv("patients_sample.csv")
+
+
+    #explore_conditions(conditions)
+    #explore_encounters(encounters)
+    #explore_medications(medications)
+    #explore_observations(observations)
+    explore_patients(patients)
+    #explore_procedures(procedures)
+
+if __name__ == '__main__':
+    main()
+
 # data_preprocessing.py
 # Author: Imran Feisal 
 # Date: 31/10/2024
@@ -233,6 +542,207 @@ def main():
 
 if __name__ == '__main__':
     main()
+# elixhauser_comorbidity.py
+# Author: Imran Feisal
+# Date: 21/01/2025
+# Description:
+# This script computes the Elixhauser Comorbidity Index (ECI) from SNOMED codes.
+# It expects a conditions dataframe with SNOMED-CT codes and patient IDs.
+# The output is a DataFrame with patient IDs and their computed ECI scores.
+
+import pandas as pd
+
+def assign_eci_weights(ElixhauserCategory):
+    """
+    Assign weights for the Elixhauser Comorbidity Index based on the Van Walraven method.
+    """
+    category_to_weight = {
+        'Congestive heart failure': 7,
+        'Cardiac arrhythmias': 5,
+        'Valvular disease': 4,
+        'Pulmonary circulation disorders': 6,
+        'Peripheral vascular disorders': 2,
+        'Hypertension, uncomplicated': -1,
+        'Hypertension, complicated': 0,
+        'Paralysis': 7,
+        'Other neurological disorders': 6,
+        'Chronic pulmonary disease': 3,
+        'Diabetes, uncomplicated': 0,
+        'Diabetes, complicated': 7,
+        'Hypothyroidism': 0,
+        'Renal failure': 5,
+        'Liver disease': 11,
+        'Peptic ulcer disease': 0,
+        'AIDS/HIV': 0,
+        'Lymphoma': 9,
+        'Metastatic cancer': 14,
+        'Solid tumour without metastasis': 8,
+        'Rheumatoid arthritis/collagen vascular diseases': 4,
+        'Coagulopathy': 11,
+        'Obesity': 0,
+        'Weight loss': 6,
+        'Fluid and electrolyte disorders': 5,
+        'Blood loss anaemia': 3,
+        'Deficiency anaemias': 0,
+        'Alcohol abuse': 0,
+        'Drug abuse': 0,
+        'Psychoses': 0,
+        'Depression': -3
+    }
+    return category_to_weight.get(ElixhauserCategory, 0)
+
+def compute_eci(conditions):
+    """
+    Compute the Elixhauser Comorbidity Index for each patient from a DataFrame of SNOMED-CT codes.
+    
+    Args:
+        conditions (pd.DataFrame): Must include ['PATIENT', 'CODE'] columns where
+                                   CODE is a SNOMED code (int or str).
+    
+    Returns:
+        pd.DataFrame: A DataFrame with columns ['PATIENT', 'ElixhauserIndex'].
+                      If a patient has no mapped comorbidities, ElixhauserIndex = 0.
+    """
+
+    # Define the SNOMED to Elixhauser category mapping dictionary
+    SNOMED_TO_ELIXHAUSER = {
+        # Congestive Heart Failure
+        88805009: "Congestive heart failure",
+        84114007: "Congestive heart failure",
+
+        # Cardiac Arrhythmias
+        49436004: "Cardiac arrhythmias",
+
+        # Valvular Disease
+        48724000: "Valvular disease",
+        91434003: "Pulmonic valve regurgitation",
+        79619009: "Mitral valve stenosis",
+        111287006: "Tricuspid valve regurgitation",
+        49915006: "Tricuspid valve stenosis",
+        60573004: "Aortic valve stenosis",
+        60234000: "Aortic valve regurgitation",
+        
+        # Pulmonary Circulation Disorders
+        65710008: "Pulmonary circulation disorders",
+        706870000: "Acute pulmonary embolism",
+        67782005: "Acute respiratory distress syndrome",
+
+        # Peripheral Vascular Disorders
+        698754002: "Peripheral vascular disorders",
+
+        # Hypertension
+        59621000: "Hypertension, uncomplicated",
+
+        # Paralysis
+        698754002: "Paralysis",
+        128188000: "Paralysis",
+
+        # Other Neurological Disorders
+        69896004: "Other neurological disorders",
+        128613002: "Seizure disorder",
+
+        # Chronic Pulmonary Disease
+        195967001: "Chronic pulmonary disease",
+        233678006: "Chronic pulmonary disease",
+
+        # Diabetes, Complicated
+        368581000119106: "Diabetes, complicated",
+        422034002: "Diabetes, complicated",
+        90781000119102: "Diabetes, complicated",
+
+        # Diabetes, Uncomplicated
+        44054006: "Diabetes, uncomplicated",
+
+        # Renal Failure
+        129721000119106: "Renal failure",
+        433144002: "Renal failure",
+
+        # Liver Disease
+        128302006: "Liver disease",
+        61977001: "Liver disease",
+
+        # Peptic Ulcer Disease
+        # (Not identified in the dataset)
+
+        # AIDS/HIV
+        62479008: "AIDS/HIV",
+        86406008: "AIDS/HIV",
+
+        # Lymphoma
+        93143009: "Lymphoma",
+
+        # Metastatic Cancer
+        94503003: "Metastatic cancer",
+        94260004: "Metastatic cancer",
+
+        # Solid Tumour Without Metastasis
+        126906006: "Solid tumour without metastasis",
+        254637007: "Solid tumour without metastasis",
+
+        # Rheumatoid Arthritis / Collagen Vascular Diseases
+        69896004: "Rheumatoid arthritis/collagen vascular diseases",
+        200936003: "Rheumatoid arthritis/collagen vascular diseases",
+
+        # Coagulopathy
+        234466008: "Coagulopathy",
+
+        # Obesity
+        408512008: "Obesity",
+        162864005: "Obesity",
+
+        # Weight Loss
+        278860009: "Weight loss",
+
+        # Fluid and Electrolyte Disorders
+        389087006: "Fluid and electrolyte disorders",
+
+        # Blood Loss Anaemia
+        # (Not identified in the dataset)
+
+        # Deficiency Anaemias
+        271737000: "Deficiency anaemias",
+
+        # Alcohol Abuse
+        7200002: "Alcohol abuse",
+
+        # Drug Abuse
+        6525002: "Drug abuse",
+
+        # Psychoses
+        47505003: "Psychoses",
+
+        # Depression
+        370143000: "Depression",
+        36923009: "Depression",
+    }
+
+
+    # Map SNOMED codes to Elixhauser categories
+    conditions['ElixhauserCategory'] = conditions['CODE'].map(SNOMED_TO_ELIXHAUSER)
+
+    # Assign weights based on categories
+    conditions['ECI_Weight'] = conditions['ElixhauserCategory'].apply(assign_eci_weights)
+
+    # For each patient, sum the unique weights for each category
+    patient_eci = (
+        conditions
+        .groupby(['PATIENT', 'ElixhauserCategory'])['ECI_Weight']
+        .max()
+        .reset_index()
+    )
+
+    patient_eci_sum = (
+        patient_eci
+        .groupby('PATIENT')['ECI_Weight']
+        .sum()
+        .reset_index()
+    )
+
+    # Rename the result column for clarity
+    patient_eci_sum.rename(columns={'ECI_Weight': 'ElixhauserIndex'}, inplace=True)
+
+    return patient_eci_sum
+
 # health_index.py
 # Author: Imran Feisal
 # Date: 31/10/2024
@@ -522,444 +1032,51 @@ def main():
 
 if __name__ == '__main__':
     main()
-# charlson_comorbidity.py
-# Author: Imran Feisal  
-# Date: 22/15/2024
-# Description:
-# This script computes the Charlson Comorbidity Index (CCI) from SNOMED codes.
-# It expects a CSV mapping file with columns:
-# code, coding_system, description, entity, list_name, upload_date, medcode, snomedctdescriptionid, CharlsonCategory
-# It also expects a conditions dataframe with SNOMED-CT codes.
-#
-# The output is a DataFrame with patient IDs and their computed CCI scores.
-
-import pandas as pd
 import os
 
-def load_cci_mapping(data_dir):
-    """
-    Load the Charlson mapping file.
-    Expects a CSV with columns: ['code', 'CharlsonCategory', ...].
-    If no CSV or the file is missing, this function might raise FileNotFoundError
-    or produce an empty DataFrame (depending on your needs).
-    """
-    cci_filepath = os.path.join(data_dir, 'res195-comorbidity-cci-snomed.csv')
-    cci_df = pd.read_csv(cci_filepath)
-    # Basic cleanup or renaming if needed
-    # e.g. rename columns to something standard
-    # cci_df.rename(columns={'code': 'SNOMED', 'CharlsonCategory': 'CharlsonCategory'}, inplace=True)
-    return cci_df
+# List of directories to read .py files from
+directories = [
+    '.',
+    'vitai_scripts',
+    'Finals',
+    'Validations',
+    'Explain_Xai'
+]
 
-def assign_cci_weights(CharlsonCategory):
-    """
-    Assign Charlson weights based on category.
-    As per the original Charlson Comorbidity Index:
-      - Myocardial infarction, Congestive heart failure, Peripheral vascular disease,
-        Cerebrovascular disease, Dementia, Chronic pulmonary disease, Connective tissue disease,
-        Ulcer disease, Mild liver disease, Diabetes without end-organ damage => weight 1
-      - Hemiplegia, Moderate/severe kidney disease, Diabetes with end-organ damage,
-        Any tumour (solid tumor), leukemia, lymphoma => weight 2
-      - Moderate or severe liver disease => weight 3
-      - Metastatic solid tumour, AIDS => weight 6
-    """
-    category_to_weight = {
-        'Myocardial infarction': 1,
-        'Congestive heart failure': 1,
-        'Peripheral vascular disease': 1,
-        'Cerebrovascular disease': 1,
-        'Dementia': 1,
-        'Chronic pulmonary disease': 1,
-        'Connective tissue disease': 1,
-        'Ulcer disease': 1,
-        'Mild liver disease': 1,
-        'Diabetes without end-organ damage': 1,
-        'Hemiplegia': 2,
-        'Moderate or severe kidney disease': 2,
-        'Diabetes with end-organ damage': 2,
-        'Any tumour, leukaemia, lymphoma': 2,
-        'Moderate or severe liver disease': 3,
-        'Metastatic solid tumour': 6,
-        'AIDS/HIV': 6
-    }
-    return category_to_weight.get(CharlsonCategory, 0)
+# Initialize an empty string to hold the combined content
+combined_content = ""
 
-def compute_cci(conditions, cci_mapping):
-    """
-    Compute the Charlson Comorbidity Index for each patient from a DataFrame of SNOMED-CT codes.
-    
-    Args:
-        conditions (pd.DataFrame): Must include ['PATIENT', 'CODE'] columns where
-                                   CODE is a SNOMED code (int or str).
-        cci_mapping (pd.DataFrame): A CSV-based lookup with at least:
-                                   ['code', 'CharlsonCategory']
-                                   (Loaded from load_cci_mapping).
-                                   Some codes may be missing from the CSV.
-    
-    Returns:
-        pd.DataFrame: A DataFrame with columns ['PATIENT', 'CharlsonIndex'].
-                      If a patient has no mapped comorbidities, CharlsonIndex = 0.
-    """
+# Iterate over each directory in the list
+for directory in directories:
+    # Iterate over each file in the directory
+    for file_name in os.listdir(directory):
+        # Check if the file is a .py file
+        if file_name.endswith('.py'):
+            file_path = os.path.join(directory, file_name)
+            print(f"Reading file {file_path}...")
+            # Check if the file exists
+            if os.path.exists(file_path):
+                # Open the file and read its content
+                with open(file_path, 'r', encoding='utf-8') as file:
+                    combined_content += file.read() + "\n"
+            else:
+                print(f"File {file_path} does not exist.")
 
-    # 1. Define a fallback dictionary for SNOMED -> CharlsonCategory
-    SNOMED_TO_CHARLSON = {
-        #
-        # MYOCARDIAL INFARCTION (weight 1)
-        #
-        22298006: "Myocardial infarction",      # "Myocardial infarction (disorder)"
-        401303003: "Myocardial infarction",     # "Acute ST segment elevation myocardial infarction"
-        401314000: "Myocardial infarction",     # "Acute non-ST segment elevation myocardial infarction"
-        129574000: "Myocardial infarction",     # "Postoperative myocardial infarction (disorder)"
-        #
-        # CONGESTIVE HEART FAILURE (weight 1)
-        #
-        88805009: "Congestive heart failure",   # "Chronic congestive heart failure (disorder)"
-        84114007: "Congestive heart failure",   # "Heart failure (disorder)"
-        #
-        # PERIPHERAL VASCULAR DISEASE (weight 1)
-        #
-        # -- None in your list match typical “peripheral vascular disease” codes --
-        #
-        # CEREBROVASCULAR DISEASE (weight 1)
-        #
-        230690007: "Cerebrovascular disease",   # "Cerebrovascular accident (disorder)"
-        #
-        # DEMENTIA (weight 1)
-        #
-        26929004: "Dementia",                   # "Alzheimer's disease (disorder)"
-        230265002: "Dementia",                  # "Familial Alzheimer's disease of early onset (disorder)"
-        #
-        # CHRONIC PULMONARY DISEASE (weight 1)
-        #
-        185086009: "Chronic pulmonary disease", # "Chronic obstructive bronchitis (disorder)"
-        87433001:  "Chronic pulmonary disease", # "Pulmonary emphysema (disorder)"
-        195967001: "Chronic pulmonary disease", # "Asthma (disorder)" – (Some include chronic asthma under COPD)
-        233678006: "Chronic pulmonary disease", # "Childhood asthma (disorder)"
-        #
-        # CONNECTIVE TISSUE DISEASE (weight 1)
-        #
-        69896004: "Connective tissue disease",  # "Rheumatoid arthritis (disorder)"
-        200936003: "Connective tissue disease", # "Lupus erythematosus (disorder)"
-        #
-        # ULCER DISEASE (weight 1)
-        #
-        # -- None in your list specifically match “peptic ulcer disease” --
-        #
-        # MILD LIVER DISEASE (weight 1)
-        #
-        128302006: "Mild liver disease",        # "Chronic hepatitis C (disorder)" 
-        61977001:  "Mild liver disease",        # "Chronic type B viral hepatitis (disorder)"
-        #
-        # DIABETES WITHOUT END-ORGAN DAMAGE (weight 1)
-        #
-        44054006: "Diabetes without end-organ damage",  # "Diabetes mellitus type 2 (disorder)"
-        #
-        # DIABETES WITH END-ORGAN DAMAGE (weight 2)
-        #
-        368581000119106: "Diabetes with end-organ damage",  # "Neuropathy due to type 2 diabetes mellitus"
-        422034002:        "Diabetes with end-organ damage",  # "Retinopathy due to type 2 diabetes mellitus"
-        127013003:        "Diabetes with end-organ damage",  # "Disorder of kidney due to diabetes mellitus"
-        90781000119102:   "Diabetes with end-organ damage",  # "Microalbuminuria due to type 2 diabetes mellitus"
-        157141000119108:  "Diabetes with end-organ damage",  # "Proteinuria due to type 2 diabetes mellitus"
-        60951000119105:   "Diabetes with end-organ damage",  # "Blindness due to type 2 diabetes mellitus"
-        97331000119101:   "Diabetes with end-organ damage",  # "Macular edema & retinopathy due to T2DM"
-        1501000119109:    "Diabetes with end-organ damage",  # "Proliferative retinopathy due to T2DM"
-        1551000119108:    "Diabetes with end-organ damage",  # "Nonproliferative retinopathy due to T2DM"
-        #
-        # HEMIPLEGIA or PARAPLEGIA (weight 2)
-        #
-        # -- None in your list appear to indicate hemiplegia or paraplegia, 
-        #    e.g. “cerebral palsy” is not typically counted as hemiplegia. 
-        #
-        # MODERATE OR SEVERE KIDNEY DISEASE (weight 2)
-        #
-        # Some references only count CKD stage 3 or worse. 
-        # The user had stage 1 & 2 included, so we’ll keep that approach consistent:
-        431855005: "Moderate or severe kidney disease",  # "CKD stage 1 (disorder)"
-        431856006: "Moderate or severe kidney disease",  # "CKD stage 2 (disorder)"
-        433144002: "Moderate or severe kidney disease",  # "CKD stage 3 (disorder)"
-        431857002: "Moderate or severe kidney disease",  # "CKD stage 4 (disorder)"
-        46177005:  "Moderate or severe kidney disease",  # "End-stage renal disease (disorder)"
-        129721000119106: "Moderate or severe kidney disease",  # "Acute renal failure on dialysis (disorder)"
-        #
-        # ANY TUMOUR (solid tumor), LEUKEMIA, LYMPHOMA (weight 2)
-        #
-        254637007: "Any tumour, leukaemia, lymphoma",  # "Non-small cell lung cancer (disorder)"
-        254632001: "Any tumour, leukaemia, lymphoma",  # "Small cell carcinoma of lung (disorder)"
-        93761005:  "Any tumour, leukaemia, lymphoma",  # "Primary malignant neoplasm of colon"
-        363406005: "Any tumour, leukaemia, lymphoma",  # "Malignant neoplasm of colon"
-        109838007: "Any tumour, leukaemia, lymphoma",  # "Overlapping malignant neoplasm of colon"
-        126906006: "Any tumour, leukaemia, lymphoma",  # "Neoplasm of prostate (disorder)"
-        92691004:  "Any tumour, leukaemia, lymphoma",  # "Carcinoma in situ of prostate"
-        254837009: "Any tumour, leukaemia, lymphoma",  # "Malignant neoplasm of breast"
-        109989006: "Any tumour, leukaemia, lymphoma",  # "Multiple myeloma (disorder)"
-        93143009:  "Any tumour, leukaemia, lymphoma",  # "Leukemia disease (disorder)"
-        91861009:  "Any tumour, leukaemia, lymphoma",  # "Acute myeloid leukemia (disorder)"
-        #
-        # MODERATE OR SEVERE LIVER DISEASE (weight 3)
-        #
-        # -- None in your list mention cirrhosis or advanced hepatic failure 
-        #    that we'd classify as 'moderate/severe liver disease'.
-        #
-        # METASTATIC SOLID TUMOUR (weight 6)
-        #
-        94503003: "Metastatic solid tumour",    # "Metastatic malignant neoplasm to prostate"
-        94260004: "Metastatic solid tumour",    # "Metastatic malignant neoplasm to colon"
-        #
-        # AIDS/HIV (weight 6)
-        #
-        62479008: "AIDS/HIV",   # "Acquired immune deficiency syndrome (disorder)"
-        86406008: "AIDS/HIV",   # "Human immunodeficiency virus infection (disorder)"
-    }
+# Save the combined content to a text file
+with open('scripts.txt', 'w', encoding='utf-8') as output_file:
+    output_file.write(combined_content)
 
-
-    # 2. Merge conditions with cci_mapping on SNOMED code (left_on='CODE', right_on='code')
-    #    This way if a code is present in the CSV, it overrides or supplies CharlsonCategory
-    merged = conditions.merge(
-        cci_mapping[['code', 'CharlsonCategory']],
-        how='left',
-        left_on='CODE',
-        right_on='code'
-    )
-
-    # 3. Fallback: For rows where the CSV didn't provide a CharlsonCategory, try the SNOMED_TO_CHARLSON dict
-    #    If neither the CSV nor the dict have it, it remains None/NaN
-    def fallback_category(row):
-        if pd.notna(row['CharlsonCategory']):
-            return row['CharlsonCategory']
-        else:
-            # Attempt dictionary lookup
-            return SNOMED_TO_CHARLSON.get(row['CODE'], None)
-
-    merged['CharlsonCategory'] = merged.apply(fallback_category, axis=1)
-
-    # 4. Compute the Charlson weight for each row
-    merged['CCI_Weight'] = merged['CharlsonCategory'].apply(assign_cci_weights)
-
-    # 5. For each patient, sum the unique categories.
-    #    i.e. if a patient has multiple codes in the same category, only count once.
-    #    We do this by grouping on (PATIENT, CharlsonCategory) and taking the max weight
-    #    Then summing across categories for each patient
-    patient_cci = (
-        merged
-        .groupby(['PATIENT', 'CharlsonCategory'])['CCI_Weight']
-        .max()
-        .reset_index()
-    )
-
-    patient_cci_sum = (
-        patient_cci
-        .groupby('PATIENT')['CCI_Weight']
-        .sum()
-        .reset_index()
-    )
-
-    # Rename column to match the expected return type
-    patient_cci_sum.rename(columns={'CCI_Weight': 'CharlsonIndex'}, inplace=True)
-
-    return patient_cci_sum
-
-
-
-# vae_model.py
-# Author: Imran Feisal
-# Date: 31/10/2024
-# Description:
-# Updated script to address variable duplication warnings in TensorFlow.
-# This script trains a VAE model, now accepts an input_file and output_prefix parameters
-# so as to avoid overwriting model artifacts. 
-# 
-# UPDATe 19/01/2025 this script now saves a JSON file with final
-# training and validation losses, named <output_prefix>_vae_metrics.json.
-
-import numpy as np
 import pandas as pd
-import joblib
-import os
-import json
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-import logging
-from sklearn.preprocessing import LabelEncoder, StandardScaler
 
-# Set random seeds for reproducibility
-np.random.seed(42)
-tf.random.set_seed(42)
+# Replace 'your_file.pkl' with the path to your .pkl file
+file_path = 'Data/patient_data_with_health_index_cci.pkl'
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Read the .pkl file into a DataFrame
+df = pd.read_pickle(file_path)
 
-def load_data(output_dir, input_file):
-    patient_data = pd.read_pickle(os.path.join(output_dir, input_file))
-    return patient_data
 
-def prepare_data(patient_data):
-    features = patient_data[[
-        'AGE', 'GENDER', 'RACE', 'ETHNICITY', 'MARITAL',
-        'HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME',
-        'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count'
-    ]].copy()
-
-    patient_ids = patient_data['Id'].values
-    categorical_features = ['GENDER', 'RACE', 'ETHNICITY', 'MARITAL']
-    continuous_features = [col for col in features.columns if col not in categorical_features]
-
-    embedding_info = {}
-    input_data = {}
-
-    for col in categorical_features:
-        le = LabelEncoder()
-        features[col] = le.fit_transform(features[col].astype(str))
-        joblib.dump(le, f'label_encoder_{col}.joblib')
-        vocab_size = features[col].nunique()
-        embedding_dim = min(50, (vocab_size + 1)//2)
-        embedding_info[col] = {'vocab_size': vocab_size, 'embedding_dim': embedding_dim}
-        input_data[col] = features[col].values
-
-    scaler = StandardScaler()
-    scaled_continuous = scaler.fit_transform(features[continuous_features])
-    joblib.dump(scaler, 'scaler_vae.joblib')
-    input_data['continuous'] = scaled_continuous
-
-    logger.info("Data prepared for VAE.")
-    return input_data, embedding_info, patient_ids, continuous_features, categorical_features
-
-def build_vae(input_dim, embedding_info, continuous_dim, latent_dim=20):
-    inputs = {}
-    encoded_features = []
-
-    # Embeddings for categorical
-    for col, info in embedding_info.items():
-        input_cat = keras.Input(shape=(1,), name=f'input_{col}')
-        embedding_layer = layers.Embedding(
-            input_dim=info['vocab_size'], 
-            output_dim=info['embedding_dim'], 
-            name=f'embedding_{col}'
-        )(input_cat)
-        flat_embedding = layers.Flatten()(embedding_layer)
-        inputs[f'input_{col}'] = input_cat
-        encoded_features.append(flat_embedding)
-
-    # Continuous input
-    input_cont = keras.Input(shape=(continuous_dim,), name='input_continuous')
-    inputs['input_continuous'] = input_cont
-    encoded_features.append(input_cont)
-
-    concatenated_features = layers.concatenate(encoded_features)
-    h = layers.Dense(256, activation='relu')(concatenated_features)
-    h = layers.Dense(128, activation='relu')(h)
-    z_mean = layers.Dense(latent_dim, name='z_mean')(h)
-    z_log_var = layers.Dense(latent_dim, name='z_log_var')(h)
-
-    def sampling(args):
-        z_mean, z_log_var = args
-        epsilon = tf.keras.backend.random_normal(shape=(tf.shape(z_mean)[0], latent_dim))
-        return z_mean + tf.exp(0.5*z_log_var)*epsilon
-
-    z = layers.Lambda(sampling, name='z')([z_mean, z_log_var])
-
-    # Decoder
-    decoder_inputs = keras.Input(shape=(latent_dim,), name='z_sampling')
-    h_decoder = layers.Dense(128, activation='relu')(decoder_inputs)
-    h_decoder = layers.Dense(256, activation='relu')(h_decoder)
-    reconstructed = layers.Dense(input_dim, activation='linear')(h_decoder)
-
-    encoder = keras.Model(inputs=inputs, outputs=[z_mean, z_log_var, z], name='encoder')
-    decoder = keras.Model(inputs=decoder_inputs, outputs=reconstructed, name='decoder')
-
-    outputs = decoder(encoder(inputs)[2])
-    vae = keras.Model(inputs=inputs, outputs=outputs, name='vae')
-
-    reconstruction_loss = tf.reduce_mean(tf.square(concatenated_features - outputs))
-    kl_loss = -0.5 * tf.reduce_mean(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
-    vae_loss = reconstruction_loss + kl_loss
-    vae.add_loss(vae_loss)
-    vae.compile(optimizer='adam')
-
-    logger.info("VAE model built.")
-    return vae, encoder, decoder
-
-def train_vae(vae, input_data, output_prefix='vae'):
-    x_train = {
-        f'input_{key}': value for key, value in input_data.items() 
-        if key != 'continuous'
-    }
-    x_train['input_continuous'] = input_data['continuous']
-
-    early_stopping = keras.callbacks.EarlyStopping(
-        monitor='val_loss', patience=10, restore_best_weights=True
-    )
-    checkpoint = keras.callbacks.ModelCheckpoint(
-        f'{output_prefix}_best_model.h5', 
-        monitor='val_loss', 
-        save_best_only=True
-    )
-
-    # Fit returns a History object with training & validation losses
-    history = vae.fit(
-        x_train, 
-        epochs=100, 
-        batch_size=512, 
-        validation_split=0.2, 
-        callbacks=[early_stopping, checkpoint],
-        verbose=1
-    )
-    vae.save(f'{output_prefix}_model', save_format='tf')
-    logger.info(f"VAE trained and saved with prefix={output_prefix}.")
-
-    # Extract final losses from history
-    # Because of early stopping, 'val_loss' might not correspond to the final epoch
-    # We take the minimal val_loss across epochs as a reference
-    final_train_loss = float(history.history['loss'][-1])  # last epoch's training loss
-    final_val_loss = float(min(history.history['val_loss']))  # best validation loss
-
-    # Save them to a JSON for easier retrieval
-    metrics_json = {
-        "final_train_loss": final_train_loss,
-        "best_val_loss": final_val_loss
-    }
-    with open(f"{output_prefix}_vae_metrics.json", "w") as f:
-        json.dump(metrics_json, f, indent=2)
-    logger.info(f"[METRICS] VAE training/validation losses saved to {output_prefix}_vae_metrics.json")
-
-def save_latent_features(encoder, input_data, patient_ids, output_prefix='vae'):
-    x_pred = {
-        f'input_{key}': value for key, value in input_data.items() 
-        if key != 'continuous'
-    }
-    x_pred['input_continuous'] = input_data['continuous']
-    z_mean, _, _ = encoder.predict(x_pred)
-
-    df = pd.DataFrame(z_mean)
-    df['Id'] = patient_ids
-    csv_name = f'{output_prefix}_latent_features.csv'
-    df.to_csv(csv_name, index=False)
-    logger.info(f"Latent features saved to {csv_name}.")
-
-def main(input_file='patient_data_with_health_index.pkl', output_prefix='vae'):
-    """
-    Args:
-        input_file (str): Name of the input pickle file containing patient data.
-        output_prefix (str): A unique prefix for saving model artifacts 
-                             (latent CSV, model files, etc.).
-    """
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    output_dir = os.path.join(script_dir, 'Data')
-    patient_data = load_data(output_dir, input_file)
-    input_data, embedding_info, patient_ids, continuous_features, categorical_features = prepare_data(patient_data)
-
-    input_dim = sum(info['embedding_dim'] for info in embedding_info.values()) + len(continuous_features)
-    continuous_dim = len(continuous_features)
-    vae, encoder, decoder = build_vae(input_dim, embedding_info, continuous_dim)
-
-    train_vae(vae, input_data, output_prefix=output_prefix)
-    encoder.save(f'{output_prefix}_encoder', save_format='tf')
-    decoder.save(f'{output_prefix}_decoder', save_format='tf')
-
-    save_latent_features(encoder, input_data, patient_ids, output_prefix=output_prefix)
-
-if __name__ == '__main__':
-    main()
+#save top 5 rows of the dataframe to a csv file named temp_composite_none_tabnet_20250113_001634.csv
+df.head().to_csv('Data/hghgh.csv')
 
 # tabnet_model.py
 # Author: Imran Feisal
@@ -1167,6 +1284,217 @@ def main(input_file='patient_data_with_health_index.pkl',
     with open(metrics_file, "w") as f:
         json.dump(metrics, f)
     logger.info(f"TabNet metrics saved -> {metrics_file}")
+
+if __name__ == '__main__':
+    main()
+
+import pandas as pd
+
+# Read the CSV file
+df = pd.read_csv('Data/patients.csv')
+
+# Get the first 5 rows
+sample_df = df.head(5)
+
+# Save the sample data to a new CSV file
+sample_df.to_csv('sample_data.csv', index=False)
+# vae_model.py
+# Author: Imran Feisal
+# Date: 31/10/2024
+# Description:
+# Updated script to address variable duplication warnings in TensorFlow.
+# This script trains a VAE model, now accepts an input_file and output_prefix parameters
+# so as to avoid overwriting model artifacts. 
+# 
+# UPDATe 19/01/2025 this script now saves a JSON file with final
+# training and validation losses, named <output_prefix>_vae_metrics.json.
+
+import numpy as np
+import pandas as pd
+import joblib
+import os
+import json
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+import logging
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+
+# Set random seeds for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def load_data(output_dir, input_file):
+    patient_data = pd.read_pickle(os.path.join(output_dir, input_file))
+    return patient_data
+
+def prepare_data(patient_data):
+    features = patient_data[[
+        'AGE', 'GENDER', 'RACE', 'ETHNICITY', 'MARITAL',
+        'HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME',
+        'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count'
+    ]].copy()
+
+    patient_ids = patient_data['Id'].values
+    categorical_features = ['GENDER', 'RACE', 'ETHNICITY', 'MARITAL']
+    continuous_features = [col for col in features.columns if col not in categorical_features]
+
+    embedding_info = {}
+    input_data = {}
+
+    for col in categorical_features:
+        le = LabelEncoder()
+        features[col] = le.fit_transform(features[col].astype(str))
+        joblib.dump(le, f'label_encoder_{col}.joblib')
+        vocab_size = features[col].nunique()
+        embedding_dim = min(50, (vocab_size + 1)//2)
+        embedding_info[col] = {'vocab_size': vocab_size, 'embedding_dim': embedding_dim}
+        input_data[col] = features[col].values
+
+    scaler = StandardScaler()
+    scaled_continuous = scaler.fit_transform(features[continuous_features])
+    joblib.dump(scaler, 'scaler_vae.joblib')
+    input_data['continuous'] = scaled_continuous
+
+    logger.info("Data prepared for VAE.")
+    return input_data, embedding_info, patient_ids, continuous_features, categorical_features
+
+def build_vae(input_dim, embedding_info, continuous_dim, latent_dim=20):
+    inputs = {}
+    encoded_features = []
+
+    # Embeddings for categorical
+    for col, info in embedding_info.items():
+        input_cat = keras.Input(shape=(1,), name=f'input_{col}')
+        embedding_layer = layers.Embedding(
+            input_dim=info['vocab_size'], 
+            output_dim=info['embedding_dim'], 
+            name=f'embedding_{col}'
+        )(input_cat)
+        flat_embedding = layers.Flatten()(embedding_layer)
+        inputs[f'input_{col}'] = input_cat
+        encoded_features.append(flat_embedding)
+
+    # Continuous input
+    input_cont = keras.Input(shape=(continuous_dim,), name='input_continuous')
+    inputs['input_continuous'] = input_cont
+    encoded_features.append(input_cont)
+
+    concatenated_features = layers.concatenate(encoded_features)
+    h = layers.Dense(256, activation='relu')(concatenated_features)
+    h = layers.Dense(128, activation='relu')(h)
+    z_mean = layers.Dense(latent_dim, name='z_mean')(h)
+    z_log_var = layers.Dense(latent_dim, name='z_log_var')(h)
+
+    def sampling(args):
+        z_mean, z_log_var = args
+        epsilon = tf.keras.backend.random_normal(shape=(tf.shape(z_mean)[0], latent_dim))
+        return z_mean + tf.exp(0.5*z_log_var)*epsilon
+
+    z = layers.Lambda(sampling, name='z')([z_mean, z_log_var])
+
+    # Decoder
+    decoder_inputs = keras.Input(shape=(latent_dim,), name='z_sampling')
+    h_decoder = layers.Dense(128, activation='relu')(decoder_inputs)
+    h_decoder = layers.Dense(256, activation='relu')(h_decoder)
+    reconstructed = layers.Dense(input_dim, activation='linear')(h_decoder)
+
+    encoder = keras.Model(inputs=inputs, outputs=[z_mean, z_log_var, z], name='encoder')
+    decoder = keras.Model(inputs=decoder_inputs, outputs=reconstructed, name='decoder')
+
+    outputs = decoder(encoder(inputs)[2])
+    vae = keras.Model(inputs=inputs, outputs=outputs, name='vae')
+
+    reconstruction_loss = tf.reduce_mean(tf.square(concatenated_features - outputs))
+    kl_loss = -0.5 * tf.reduce_mean(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
+    vae_loss = reconstruction_loss + kl_loss
+    vae.add_loss(vae_loss)
+    vae.compile(optimizer='adam')
+
+    logger.info("VAE model built.")
+    return vae, encoder, decoder
+
+def train_vae(vae, input_data, output_prefix='vae'):
+    x_train = {
+        f'input_{key}': value for key, value in input_data.items() 
+        if key != 'continuous'
+    }
+    x_train['input_continuous'] = input_data['continuous']
+
+    early_stopping = keras.callbacks.EarlyStopping(
+        monitor='val_loss', patience=10, restore_best_weights=True
+    )
+    checkpoint = keras.callbacks.ModelCheckpoint(
+        f'{output_prefix}_best_model.h5', 
+        monitor='val_loss', 
+        save_best_only=True
+    )
+
+    # Fit returns a History object with training & validation losses
+    history = vae.fit(
+        x_train, 
+        epochs=100, 
+        batch_size=512, 
+        validation_split=0.2, 
+        callbacks=[early_stopping, checkpoint],
+        verbose=1
+    )
+    vae.save(f'{output_prefix}_model', save_format='tf')
+    logger.info(f"VAE trained and saved with prefix={output_prefix}.")
+
+    # Extract final losses from history
+    # Because of early stopping, 'val_loss' might not correspond to the final epoch
+    # We take the minimal val_loss across epochs as a reference
+    final_train_loss = float(history.history['loss'][-1])  # last epoch's training loss
+    final_val_loss = float(min(history.history['val_loss']))  # best validation loss
+
+    # Save them to a JSON for easier retrieval
+    metrics_json = {
+        "final_train_loss": final_train_loss,
+        "best_val_loss": final_val_loss
+    }
+    with open(f"{output_prefix}_vae_metrics.json", "w") as f:
+        json.dump(metrics_json, f, indent=2)
+    logger.info(f"[METRICS] VAE training/validation losses saved to {output_prefix}_vae_metrics.json")
+
+def save_latent_features(encoder, input_data, patient_ids, output_prefix='vae'):
+    x_pred = {
+        f'input_{key}': value for key, value in input_data.items() 
+        if key != 'continuous'
+    }
+    x_pred['input_continuous'] = input_data['continuous']
+    z_mean, _, _ = encoder.predict(x_pred)
+
+    df = pd.DataFrame(z_mean)
+    df['Id'] = patient_ids
+    csv_name = f'{output_prefix}_latent_features.csv'
+    df.to_csv(csv_name, index=False)
+    logger.info(f"Latent features saved to {csv_name}.")
+
+def main(input_file='patient_data_with_health_index.pkl', output_prefix='vae'):
+    """
+    Args:
+        input_file (str): Name of the input pickle file containing patient data.
+        output_prefix (str): A unique prefix for saving model artifacts 
+                             (latent CSV, model files, etc.).
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(script_dir, 'Data')
+    patient_data = load_data(output_dir, input_file)
+    input_data, embedding_info, patient_ids, continuous_features, categorical_features = prepare_data(patient_data)
+
+    input_dim = sum(info['embedding_dim'] for info in embedding_info.values()) + len(continuous_features)
+    continuous_dim = len(continuous_features)
+    vae, encoder, decoder = build_vae(input_dim, embedding_info, continuous_dim)
+
+    train_vae(vae, input_data, output_prefix=output_prefix)
+    encoder.save(f'{output_prefix}_encoder', save_format='tf')
+    decoder.save(f'{output_prefix}_decoder', save_format='tf')
+
+    save_latent_features(encoder, input_data, patient_ids, output_prefix=output_prefix)
 
 if __name__ == '__main__':
     main()
@@ -1876,4 +2204,1000 @@ def filter_subpopulation(df: pd.DataFrame, subset_type: str, data_dir: str) -> p
     else:
         logger.warning(f"Unknown subset='{subset_type}', returning full dataset.")
         return df
+
+# final_three_tabnet.py
+# Author: You
+# Date: 21/01/2025
+#
+# Description:
+#   A script that runs our three final TabNet models on the entire dataset,
+#   each restricted to one subpopulation:
+#     1) "combined_diabetes_tabnet"   -> subset: diabetes,      feature_config: "combined"
+#     2) "combined_all_ckd_tabnet"    -> subset: ckd,           feature_config: "combined_all"
+#     3) "combined_none_tabnet"       -> subset: none,          feature_config: "combined"
+#   We tune hyperparameters briefly, then train a final model with bigger max_epochs.
+#   We do clustering (K-Means + optional t-SNE/UMAP) on the final predicted subpopulation.
+#   Outputs are saved under Data/finals/<model_id>/.
+#
+# Usage:
+#   python final_three_tabnet.py
+
+import os
+import json
+import logging
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+import os
+import sys 
+
+#---------------------------------------------------
+# Add the root directory to PYTHONPATH
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+sys.path.append(ROOT_DIR)
+
+# Add `vitai_scripts` to PYTHONPATH
+VITAI_SCRIPTS_DIR = os.path.join(ROOT_DIR, "vitai_scripts")
+sys.path.append(VITAI_SCRIPTS_DIR)
+
+
+
+#---------------------------------------------------
+
+# TabNet, tuning, training
+import torch
+from pytorch_tabnet.tab_model import TabNetRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.metrics import (
+    silhouette_score,
+    calinski_harabasz_score,
+    davies_bouldin_score
+)
+from sklearn.manifold import TSNE
+import umap.umap_ as umap
+
+# Import  existing logic
+# Adjust these paths to match your actual project structure
+from tabnet_model import load_data, prepare_data, hyperparameter_tuning
+from subset_utils import filter_subpopulation
+from feature_utils import select_features
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(SCRIPT_DIR, "..", "Data")   # Root-level "Data" folder
+FINALS_DIR = os.path.join(DATA_DIR, "finals")
+os.makedirs(FINALS_DIR, exist_ok=True)
+
+# We’ll load all patients from the final combined file
+INPUT_PICKLE = "patient_data_with_all_indices.pkl"
+
+# Here are the three final configs we want:
+FINAL_CONFIGS = [
+    {
+        "model_id": "combined_diabetes_tabnet",
+        "subset": "diabetes",
+        "feature_config": "combined"
+    },
+    {
+        "model_id": "combined_all_ckd_tabnet",
+        "subset": "ckd",
+        "feature_config": "combined_all"
+    },
+    {
+        "model_id": "combined_none_tabnet",
+        "subset": "none",
+        "feature_config": "combined"
+    },
+]
+
+# The target column for all three is your Health Index
+TARGET_COL = "Health_Index"
+
+# Final training epochs
+FINAL_MAX_EPOCHS = 400
+FINAL_PATIENCE = 50
+
+def run_final_model(model_id: str, subset_type: str, feature_config: str, full_df: pd.DataFrame):
+    """
+    1) Filter the DataFrame by subpopulation (subset_type)
+    2) Select features by feature_config
+    3) Hyperparameter tune with moderate epochs
+    4) Re-train with final large epochs
+    5) Predict on subpopulation
+    6) Clustering on that subpopulation
+    7) Save artifacts to Data/finals/<model_id>/
+    """
+    logger.info(f"[{model_id}] Starting final run. subset={subset_type}, features={feature_config}")
+
+    # Prepare subfolder
+    out_dir = os.path.join(FINALS_DIR, model_id)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # 1) Filter subpopulation
+    sub_df = filter_subpopulation(full_df, subset_type, DATA_DIR)
+    if sub_df.empty:
+        logger.warning(f"[{model_id}] No patients in subset={subset_type}. Skipping.")
+        return
+
+    # 2) Pick the right features
+    feats_df = select_features(sub_df, feature_config)
+
+    # 3) Prepare data for TabNet
+    #    (We assume prepare_data can accept a 'target_col' for the final col)
+    X, y, cat_idxs, cat_dims, feature_columns = prepare_data(feats_df, target_col=TARGET_COL)
+
+    # Train/test split
+    X_train_full, X_test, y_train_full, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
+    X_train, X_valid, y_train, y_valid = train_test_split(X_train_full, y_train_full, test_size=0.2, random_state=42)
+
+    # 4) Hyperparameter tuning (short-run)
+    best_params = hyperparameter_tuning(X_train, y_train, cat_idxs, cat_dims)
+    logger.info(f"[{model_id}] Best hyperparams from tuning: {best_params}")
+
+    # 5) Build final regressor with big epochs
+    saved_lr = best_params.pop("lr")
+    best_params.update({
+        "optimizer_fn": torch.optim.Adam,
+        "optimizer_params": dict(lr=saved_lr),
+        "device_name": "cuda" if torch.cuda.is_available() else "cpu",
+        "verbose": 1
+    })
+
+    regressor = TabNetRegressor(cat_idxs=cat_idxs, cat_dims=cat_dims, **best_params)
+    regressor.fit(
+        X_train=X_train,
+        y_train=y_train,
+        eval_set=[(X_valid, y_valid)],
+        eval_metric=["rmse"],
+        max_epochs=FINAL_MAX_EPOCHS,
+        patience=FINAL_PATIENCE,
+        batch_size=8192,
+        virtual_batch_size=1024
+    )
+
+    # Save the model
+    regressor.save_model(os.path.join(out_dir, f"{model_id}_model"))
+    logger.info(f"[{model_id}] Final TabNet model saved.")
+
+    # Evaluate on test set
+    test_preds = regressor.predict(X_test).flatten()
+    test_mse = mean_squared_error(y_test, test_preds)
+    test_r2 = r2_score(y_test, test_preds)
+    logger.info(f"[{model_id}] Test MSE: {test_mse:.6f}")
+    logger.info(f"[{model_id}] Test R2:  {test_r2:.6f}")
+
+    # Save final metrics to JSON
+    metrics_dict = {
+        "test_mse": float(test_mse),
+        "test_r2": float(test_r2)
+    }
+    with open(os.path.join(out_dir, f"{model_id}_metrics.json"), "w") as f:
+        json.dump(metrics_dict, f, indent=2)
+
+    # 6) Predict on entire subpopulation (for clustering)
+    all_preds = regressor.predict(X).flatten()
+    # If 'Id' in feats_df, use it; else fallback
+    if "Id" in feats_df.columns:
+        pid = feats_df["Id"].values
+    else:
+        pid = np.arange(len(X))
+
+    pred_df = pd.DataFrame({
+        "Id": pid,
+        f"Predicted_{TARGET_COL}": all_preds
+    })
+    pred_csv = os.path.join(out_dir, f"{model_id}_predictions.csv")
+    pred_df.to_csv(pred_csv, index=False)
+    logger.info(f"[{model_id}] Full subpopulation predictions saved.")
+
+    # 7) Clustering
+    #    Merge predicted values with feature columns used for clustering
+    cluster_df = pd.DataFrame(X, columns=feature_columns)
+    cluster_df[f"Predicted_{TARGET_COL}"] = all_preds
+    cluster_df["Id"] = pid
+
+    # Scale everything except 'Id'
+    cluster_cols = [c for c in cluster_df.columns if c != "Id"]
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(cluster_df[cluster_cols])
+
+    # K-Means [6..9], pick best by silhouette
+    best_k, best_sil = None, -1
+    for k in range(6, 10):
+        km = KMeans(n_clusters=k, random_state=42)
+        labels = km.fit_predict(X_scaled)
+        s = silhouette_score(X_scaled, labels)
+        if s > best_sil:
+            best_sil = s
+            best_k = k
+
+    final_km = KMeans(n_clusters=best_k, random_state=42)
+    final_labels = final_km.fit_predict(X_scaled)
+    cluster_df["Cluster"] = final_labels
+
+    # Evaluate cluster metrics
+    sil = silhouette_score(X_scaled, final_labels)
+    cal = calinski_harabasz_score(X_scaled, final_labels)
+    dav = davies_bouldin_score(X_scaled, final_labels)
+
+    # DBSCAN for reference
+    db = DBSCAN(eps=0.5, min_samples=5).fit(X_scaled)
+    db_labels = db.labels_
+    if len(set(db_labels)) < 2:
+        db_sil = np.nan
+        db_cal = np.nan
+        db_dav = np.nan
+    else:
+        db_sil = silhouette_score(X_scaled, db_labels)
+        db_cal = calinski_harabasz_score(X_scaled, db_labels)
+        db_dav = davies_bouldin_score(X_scaled, db_labels)
+
+    cluster_metrics = {
+        "chosen_k": best_k,
+        "silhouette": float(sil),
+        "calinski": float(cal),
+        "davies_bouldin": float(dav),
+        "dbscan_silhouette": float(db_sil),
+        "dbscan_calinski": float(db_cal),
+        "dbscan_davies_bouldin": float(db_dav)
+    }
+    with open(os.path.join(out_dir, f"{model_id}_clusters.json"), "w") as f:
+        json.dump(cluster_metrics, f, indent=2)
+    logger.info(f"[{model_id}] Clustering metrics: {cluster_metrics}")
+
+    # Save cluster assignments
+    clusters_csv = os.path.join(out_dir, f"{model_id}_clusters.csv")
+    cluster_df[["Id", f"Predicted_{TARGET_COL}", "Cluster"]].to_csv(clusters_csv, index=False)
+
+    # Optional: t-SNE & UMAP
+    # t-SNE
+    tsne = TSNE(n_components=2, random_state=42)
+    X_tsne = tsne.fit_transform(X_scaled)
+    plt.figure(figsize=(7,5))
+    sns.scatterplot(x=X_tsne[:,0], y=X_tsne[:,1], hue=cluster_df["Cluster"], palette="viridis")
+    plt.title(f"t-SNE ({model_id}) - K={best_k}")
+    tsne_path = os.path.join(out_dir, f"{model_id}_tsne.png")
+    plt.savefig(tsne_path, bbox_inches="tight")
+    plt.close()
+
+    # UMAP
+    reducer = umap.UMAP(n_components=2, random_state=42)
+    X_umap = reducer.fit_transform(X_scaled)
+    plt.figure(figsize=(7,5))
+    sns.scatterplot(x=X_umap[:,0], y=X_umap[:,1], hue=cluster_df["Cluster"], palette="viridis")
+    plt.title(f"UMAP ({model_id}) - K={best_k}")
+    umap_path = os.path.join(out_dir, f"{model_id}_umap.png")
+    plt.savefig(umap_path, bbox_inches="tight")
+    plt.close()
+
+    logger.info(f"[{model_id}] Clustering plots saved.")
+    logger.info(f"[{model_id}] Done.\n")
+
+
+def main():
+    # Load the full dataset
+    full_path = os.path.join(DATA_DIR, INPUT_PICKLE)
+    if not os.path.exists(full_path):
+        raise FileNotFoundError(f"Cannot find {full_path} - ensure data prep is complete.")
+
+    full_df = pd.read_pickle(full_path)
+    logger.info(f"Loaded dataset: {full_df.shape} rows, from {full_path}")
+
+    # Run each final config in turn
+    for cfg in FINAL_CONFIGS:
+        run_final_model(
+            model_id=cfg["model_id"],
+            subset_type=cfg["subset"],
+            feature_config=cfg["feature_config"],
+            full_df=full_df
+        )
+
+    logger.info("[All Done] final_three_tabnet pipeline completed successfully.")
+
+
+if __name__ == "__main__":
+    main()
+
+# validate_final_tabnet_models.py
+# Author: Imran Feisal
+# Date: 21/01/2025
+#
+# Description:
+#   A validation script that compares each of the three final TabNet models'
+#   predictions/clusters against Charlson (CCI) & Elixhauser (ECI) indices.
+#
+#   Specifically, for each final model:
+#     1) Load its final cluster CSV (e.g. "Id", "Predicted_Health_Index", "Cluster").
+#     2) Compute Charlson & Elixhauser from "conditions.csv" using your existing
+#        "charlson_comorbidity.py" & "elixhauser_comorbidity.py".
+#     3) Merge them on patient ID ("Id" vs. "PATIENT").
+#     4) Perform correlations, descriptive stats, ANOVA/Kruskal across clusters.
+#     5) Generate scatter/box/violin plots.
+#     6) Save everything in "Data/validations/<model_id>/".
+#
+# Usage:
+#   python validate_final_tabnet_models.py
+
+import os
+import logging
+import json
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+from scipy.stats import pearsonr, spearmanr, f_oneway, kruskal
+from sklearn.metrics import (
+    silhouette_score,
+    calinski_harabasz_score,
+    davies_bouldin_score
+)
+
+# Local imports for CCI/ECI. Adjust the path as needed.
+import sys
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.join(SCRIPT_DIR, "..")
+sys.path.append(PROJECT_ROOT)
+
+import charlson_comorbidity
+import elixhauser_comorbidity
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+########################
+# CONFIG
+########################
+
+DATA_DIR = os.path.join(PROJECT_ROOT, "Data")
+VALIDATIONS_DIR = os.path.join(DATA_DIR, "validations")
+os.makedirs(VALIDATIONS_DIR, exist_ok=True)
+
+# Where your conditions.csv lives
+CONDITIONS_CSV = os.path.join(DATA_DIR, "conditions.csv")
+
+# These are the three final model outputs for "diabetes", "ckd", and "none".
+# Adjust names/paths if needed. Each CSV must have: "Id", "Predicted_Health_Index", "Cluster" (optional).
+FINAL_MODEL_CSVS = {
+    "combined_diabetes_tabnet":    "finals/combined_diabetes_tabnet/combined_diabetes_tabnet_clusters.csv",
+    "combined_all_ckd_tabnet":     "finals/combined_all_ckd_tabnet/combined_all_ckd_tabnet_clusters.csv",
+    "combined_none_tabnet":        "finals/combined_none_tabnet/combined_none_tabnet_clusters.csv"
+}
+
+########################
+# FUNCTIONS
+########################
+
+def load_and_merge_comorbidity(final_csv: str) -> pd.DataFrame:
+    """
+    Loads a final model's cluster CSV, merges with Charlson & Elixhauser indices
+    computed from conditions.csv, then returns the merged DataFrame.
+    """
+
+    # 1) Load final TabNet predictions/clusters
+    df_model = pd.read_csv(final_csv)
+    logger.info(f"Loaded model output from {final_csv}: shape={df_model.shape}")
+
+    # Check for required columns
+    if "Id" not in df_model.columns or "Predicted_Health_Index" not in df_model.columns:
+        raise KeyError(f"{final_csv} must contain 'Id' and 'Predicted_Health_Index' columns.")
+    # 'Cluster' is optional, but let's check
+    has_cluster = ("Cluster" in df_model.columns)
+
+    # 2) Compute Charlson & Elixhauser from conditions
+    if not os.path.exists(CONDITIONS_CSV):
+        raise FileNotFoundError(f"Cannot find conditions.csv at {CONDITIONS_CSV}")
+
+    conditions = pd.read_csv(CONDITIONS_CSV)
+    if "PATIENT" not in conditions.columns or "CODE" not in conditions.columns:
+        raise KeyError("conditions.csv must have 'PATIENT' and 'CODE' columns.")
+
+    # Compute Charlson
+    cci_map = charlson_comorbidity.load_cci_mapping(DATA_DIR)
+    df_cci = charlson_comorbidity.compute_cci(conditions, cci_map)
+
+    # Compute Elixhauser
+    df_eci = elixhauser_comorbidity.compute_eci(conditions)
+
+    # Merge
+    df_merged = df_model.merge(df_cci, how="left", left_on="Id", right_on="PATIENT")
+    df_merged.drop(columns=["PATIENT"], inplace=True, errors="ignore")
+    df_merged = df_merged.merge(df_eci, how="left", left_on="Id", right_on="PATIENT")
+    df_merged.drop(columns=["PATIENT"], inplace=True, errors="ignore")
+
+    # Fill missing
+    df_merged["CharlsonIndex"] = df_merged["CharlsonIndex"].fillna(0)
+    df_merged["ElixhauserIndex"] = df_merged["ElixhauserIndex"].fillna(0)
+
+    logger.info(f"Merged shape={df_merged.shape} after adding CCI/ECI.")
+    return df_merged
+
+
+def save_correlations(df: pd.DataFrame, out_path: str):
+    """
+    Computes Pearson & Spearman correlations among:
+      - Predicted_Health_Index
+      - CharlsonIndex
+      - ElixhauserIndex
+    Saves them to a CSV at out_path.
+    Also returns the correlation DataFrame.
+    """
+    pairs = [
+        ("Predicted_Health_Index", "CharlsonIndex"),
+        ("Predicted_Health_Index", "ElixhauserIndex"),
+        ("CharlsonIndex", "ElixhauserIndex"),
+    ]
+    corrs = []
+    for (xcol, ycol) in pairs:
+        data_xy = df[[xcol, ycol]].dropna()
+        if len(data_xy) < 2:
+            corrs.append({
+                "VarX": xcol, "VarY": ycol,
+                "Pearson_R": np.nan, "Pearson_pvalue": np.nan,
+                "Spearman_R": np.nan, "Spearman_pvalue": np.nan
+            })
+            continue
+        pear_r, pear_p = pearsonr(data_xy[xcol], data_xy[ycol])
+        spear_r, spear_p = spearmanr(data_xy[xcol], data_xy[ycol])
+        corrs.append({
+            "VarX": xcol, "VarY": ycol,
+            "Pearson_R": pear_r, "Pearson_pvalue": pear_p,
+            "Spearman_R": spear_r, "Spearman_pvalue": spear_p
+        })
+
+    df_corrs = pd.DataFrame(corrs)
+    df_corrs.to_csv(out_path, index=False)
+    return df_corrs
+
+
+def boxplot_by_cluster(df: pd.DataFrame, column: str, cluster_col: str, out_file: str):
+    """
+    Generates a boxplot of 'column' grouped by 'cluster_col' in df,
+    saves it to out_file. If cluster_col not present or only one cluster,
+    it does nothing.
+    """
+    if cluster_col not in df.columns or df[cluster_col].nunique() < 2:
+        return
+
+    plt.figure(figsize=(7,5))
+    sns.boxplot(data=df, x=cluster_col, y=column, palette="Set2")
+    plt.title(f"{column} by {cluster_col}")
+    plt.tight_layout()
+    plt.savefig(out_file)
+    plt.close()
+
+
+def scatter_plot(df: pd.DataFrame, xcol: str, ycol: str, out_file: str, hue_col: str = None):
+    """
+    Generates a scatter plot of df[xcol] vs df[ycol], optional hue_col.
+    """
+    if xcol not in df.columns or ycol not in df.columns:
+        return
+
+    plt.figure(figsize=(6,5))
+    if hue_col and hue_col in df.columns:
+        sns.scatterplot(data=df, x=xcol, y=ycol, hue=hue_col, palette="viridis")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    else:
+        sns.scatterplot(data=df, x=xcol, y=ycol)
+    plt.title(f"{ycol} vs {xcol}")
+    plt.tight_layout()
+    plt.savefig(out_file)
+    plt.close()
+
+
+def distribution_plot(df: pd.DataFrame, column: str, out_file: str):
+    """
+    Generates a simple histogram + KDE of the given column.
+    """
+    if column not in df.columns:
+        return
+
+    plt.figure(figsize=(7,5))
+    sns.histplot(df[column], kde=True, color="blue")
+    plt.title(f"Distribution of {column}")
+    plt.tight_layout()
+    plt.savefig(out_file)
+    plt.close()
+
+
+def anova_kruskal_across_clusters(df: pd.DataFrame, cluster_col: str, measure: str):
+    """
+    If 'cluster_col' is in df, perform one-way ANOVA and Kruskal-Wallis on the
+    given 'measure' across cluster groups. Return a dict of stats.
+    """
+    if cluster_col not in df.columns or df[cluster_col].nunique() < 2:
+        return {"Measure": measure, "Test": "ANOVA", "F_stat": np.nan, "p_value": np.nan}
+
+    groups = [grp[measure].dropna().values for _, grp in df.groupby(cluster_col)]
+    if len(groups) < 2:
+        return {"Measure": measure, "Test": "ANOVA", "F_stat": np.nan, "p_value": np.nan}
+
+    # ANOVA
+    f_stat, p_val = f_oneway(*groups)
+    # Kruskal
+    h_stat, p_val2 = kruskal(*groups)
+
+    return {
+        "ANOVA_F": f_stat, "ANOVA_p": p_val,
+        "Kruskal_H": h_stat, "Kruskal_p": p_val2
+    }
+
+
+def main():
+    # Ensure conditions.csv is present
+    if not os.path.exists(CONDITIONS_CSV):
+        raise FileNotFoundError(f"Cannot find conditions.csv at {CONDITIONS_CSV}")
+
+    # Loop over each final model CSV
+    for model_id, rel_path in FINAL_MODEL_CSVS.items():
+        logger.info(f"=== Validating model: {model_id} ===")
+        csv_path = os.path.join(DATA_DIR, rel_path)
+        if not os.path.exists(csv_path):
+            logger.warning(f"[{model_id}] Missing final cluster CSV at {csv_path} - skipping.")
+            continue
+
+        # Subfolder for this model's validation outputs
+        model_val_dir = os.path.join(VALIDATIONS_DIR, model_id)
+        os.makedirs(model_val_dir, exist_ok=True)
+
+        # Merge final predictions/clusters with CCI/ECI
+        df_merged = load_and_merge_comorbidity(csv_path)
+
+        # Basic descriptive stats
+        numeric_cols = ["Predicted_Health_Index", "CharlsonIndex", "ElixhauserIndex"]
+        desc_stats = df_merged[numeric_cols].describe().T
+        desc_stats_file = os.path.join(model_val_dir, f"{model_id}_desc_stats.csv")
+        desc_stats.to_csv(desc_stats_file)
+        logger.info(f"[{model_id}] Descriptive stats saved -> {desc_stats_file}")
+
+        # Correlations
+        corr_file = os.path.join(model_val_dir, f"{model_id}_correlations.csv")
+        df_corrs = save_correlations(df_merged, corr_file)
+        logger.info(f"[{model_id}] Correlations saved -> {corr_file}")
+
+        # ANOVA / Kruskal across clusters
+        # (if "Cluster" is present & >1 unique value)
+        anova_results = []
+        if "Cluster" in df_merged.columns and df_merged["Cluster"].nunique() > 1:
+            for measure in ["Predicted_Health_Index", "CharlsonIndex", "ElixhauserIndex"]:
+                stats_dict = anova_kruskal_across_clusters(df_merged, "Cluster", measure)
+                stats_dict["Measure"] = measure
+                anova_results.append(stats_dict)
+
+            df_anova = pd.DataFrame(anova_results)
+            anova_file = os.path.join(model_val_dir, f"{model_id}_anova.csv")
+            df_anova.to_csv(anova_file, index=False)
+            logger.info(f"[{model_id}] ANOVA/Kruskal results -> {anova_file}")
+
+        # Visualisations
+        # 1) Distribution of predicted HI, CCI, ECI
+        for c in numeric_cols:
+            dist_file = os.path.join(model_val_dir, f"{model_id}_dist_{c}.png")
+            distribution_plot(df_merged, c, dist_file)
+
+        # 2) Boxplot of each measure by cluster
+        if "Cluster" in df_merged.columns and df_merged["Cluster"].nunique() > 1:
+            for c in numeric_cols:
+                box_file = os.path.join(model_val_dir, f"{model_id}_box_{c}.png")
+                boxplot_by_cluster(df_merged, c, "Cluster", box_file)
+
+        # 3) Scatter plots (HI vs. Charlson, HI vs. ECI, Charlson vs. ECI)
+        scatter_pairs = [
+            ("Predicted_Health_Index", "CharlsonIndex"),
+            ("Predicted_Health_Index", "ElixhauserIndex"),
+            ("CharlsonIndex", "ElixhauserIndex")
+        ]
+        for xcol, ycol in scatter_pairs:
+            scatter_path = os.path.join(model_val_dir, f"{model_id}_scatter_{xcol}_vs_{ycol}.png")
+            scatter_plot(df_merged, xcol, ycol, scatter_path, hue_col="Cluster")
+
+        logger.info(f"[{model_id}] Validation visuals saved in {model_val_dir}\n")
+
+    logger.info("[All Done] Validation across final TabNet models completed.")
+
+
+if __name__ == "__main__":
+    main()
+
+# final_explain_xai_full.py
+# Author: Imran Feisal
+# Date: 21/01/2025
+#
+# Description:
+#   This script generates advanced global and local explanations for each of your
+#   TabNet models (diabetes, CKD, none). It now uses:
+#     - SHAP (KernelExplainer) for global attributions
+#     - Integrated Gradients, TabNet Masks for additional global insights
+#     - Anchors (rule-based) for critical local cases, DeepLIFT for outliers
+#   for all patients in each subpopulation.
+#
+# Usage:
+#   python final_explain_xai_full.py
+#
+# Requirements:
+#   - final TabNet models in Data/finals/<model_id>/<model_id>_model.zip
+#   - "tabnet_model.py", "subset_utils.py", "feature_utils.py" in your project.
+#   - The full dataset "patient_data_with_all_indices.pkl" for subpopulation filtering.
+#   - pip install shap, alibi, captum
+#
+# Outputs:
+#   In "Data/explain_xai/<model_id>/", the script saves:
+#     - <model_id>_shap_values.npy             (global SHAP attributions)
+#     - <model_id>_shap_summary.png            (barplot of mean |SHAP| values)
+#     - <model_id>_ig_values.npy               (integrated gradient attributions)
+#     - <model_id>_deeplift_values.npy         (outlier attributions)
+#     - <model_id>_anchors_local.csv           (critical-case anchor rules)
+#     - <model_id>_tabnet_mask_step0.png       (barplot of average mask)
+#     - <model_id>_mask_step0.npy              (raw step 0 mask array)
+#   and so on.
+
+import os
+import sys
+import csv
+import pickle
+import logging
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# PyTorch
+import torch
+
+# SHAP for model-agnostic shap values
+# pip install shap
+import shap
+
+# Captum for gradient-based methods (Integrated Gradients, DeepLIFT)
+# pip install captum
+from captum.attr import IntegratedGradients, DeepLift
+
+# Alibi for Anchors (local rule-based explanations)
+# pip install alibi
+from alibi.explainers import AnchorTabular
+
+# TabNet
+from pytorch_tabnet.tab_model import TabNetRegressor
+
+# Add root and vitai_scripts directories to PYTHONPATH
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+VITAI_SCRIPTS_DIR = os.path.join(PROJECT_ROOT, "vitai_scripts")
+
+sys.path.append(PROJECT_ROOT)
+sys.path.append(VITAI_SCRIPTS_DIR)
+
+# Project utility scripts
+from subset_utils import filter_subpopulation
+from feature_utils import select_features
+from tabnet_model import prepare_data
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+###########################################
+# Configuration
+###########################################
+
+DATA_DIR = os.path.join(PROJECT_ROOT, "Data")
+FINALS_DIR = os.path.join(DATA_DIR, "finals")
+EXPLAIN_DIR = os.path.join(DATA_DIR, "explain_xai")
+os.makedirs(EXPLAIN_DIR, exist_ok=True)
+
+FULL_DATA_PKL = os.path.join(DATA_DIR, "patient_data_with_all_indices.pkl")
+
+FINAL_MODELS = [
+    {
+        "model_id": "combined_diabetes_tabnet",
+        "subset": "diabetes",
+        "feature_config": "combined"
+    },
+    {
+        "model_id": "combined_all_ckd_tabnet",
+        "subset": "ckd",
+        "feature_config": "combined_all"
+    },
+    {
+        "model_id": "combined_none_tabnet",
+        "subset": "none",
+        "feature_config": "combined"
+    },
+]
+
+TARGET_COL = "Health_Index"
+
+# SHAP config
+BACKGROUND_SAMPLE_SIZE = 2000  # sample a background subset for KernelExplainer
+
+# Local explanation config
+CRITICAL_PERCENTILE = 90   # top 10% residual => "critical" cases
+ZSCORE_THRESHOLD = 3.0     # outlier threshold for DeepLIFT
+
+###########################################
+# Helper Functions
+###########################################
+
+def load_tabnet_model(model_path: str) -> TabNetRegressor:
+    """
+    Loads a TabNetRegressor from <model_path>.zip
+    """
+    regressor = TabNetRegressor()
+    regressor.load_model(model_path + ".zip")
+    return regressor
+
+def compute_residuals(model, X, y):
+    """
+    Returns absolute residuals per row, used for identifying critical cases
+    """
+    preds = model.predict(X).flatten()
+    return np.abs(preds - y.flatten())
+
+def compute_outliers(X, zscore_threshold=3.0):
+    """
+    Basic outlier detection using a naive z-score rule across features.
+    If any feature's z-score > threshold, mark as outlier.
+    """
+    mean_ = X.mean(axis=0)
+    std_ = X.std(axis=0) + 1e-9
+    zscores = np.abs((X - mean_) / std_)
+    outlier_mask = np.any(zscores > zscore_threshold, axis=1)
+    return np.where(outlier_mask)[0]
+
+def train_kernel_explainer(model_predict_fn, X, background_size=2000):
+    """
+    Builds a SHAP KernelExplainer with a background (reference) sample.
+    """
+    # Subsample background if dataset is large
+    if len(X) > background_size:
+        idxs = np.random.choice(len(X), size=background_size, replace=False)
+        background_data = X[idxs]
+    else:
+        background_data = X
+
+    logger.info(f"[SHAP] Using {len(background_data)} background samples.")
+    explainer = shap.KernelExplainer(model_predict_fn, background_data)
+    return explainer
+
+def compute_shap_values(explainer, X):
+    """
+    Compute SHAP values for X using KernelExplainer.
+    Returns a NumPy array of shape (n_samples, n_features).
+    """
+    # shap_values can be returned as a list (classification) or array (regression)
+    shap_values = explainer.shap_values(X)
+    # If using a single output (regression), ensure shap_values is an array
+    if isinstance(shap_values, list):
+        shap_values = shap_values[0]
+    return np.array(shap_values)
+
+def integrated_gradients(model, X, baseline=None, device="cpu"):
+    """
+    Compute Integrated Gradients attributions for all rows in X.
+    If no baseline is given, use the median of X as the reference.
+    """
+    ig = IntegratedGradients(model.pytorch_model)
+    X_t = torch.tensor(X, dtype=torch.float, device=device)
+
+    if baseline is None:
+        baseline_array = np.median(X, axis=0)
+        baseline_t = torch.tensor(baseline_array, dtype=torch.float, device=device)
+    else:
+        baseline_t = torch.tensor(baseline, dtype=torch.float, device=device)
+
+    attrs_t = ig.attribute(X_t, baseline=baseline_t, n_steps=50)
+    return attrs_t.detach().cpu().numpy()
+
+def deep_lift_attributions(model, X, baseline=None, device="cpu"):
+    """
+    Compute DeepLIFT attributions for outlier rows (or any subset).
+    If no baseline is given, use the median of X as the reference.
+    """
+    dl = DeepLift(model.pytorch_model)
+    X_t = torch.tensor(X, dtype=torch.float, device=device)
+
+    if baseline is None:
+        baseline_array = np.median(X, axis=0)
+        baseline_t = torch.tensor(baseline_array, dtype=torch.float, device=device)
+    else:
+        baseline_t = torch.tensor(baseline, dtype=torch.float, device=device)
+
+    attrs_t = dl.attribute(X_t, baseline=baseline_t)
+    return attrs_t.detach().cpu().numpy()
+
+def anchors_local_explanations(model_predict_fn, X, feature_cols, subset_indices, out_csv):
+    """
+    Use AnchorTabular for local rule-based explanations on a subset of rows (critical).
+    """
+    anchor_exp = AnchorTabular(
+        predictor=model_predict_fn,
+        feature_names=feature_cols
+    )
+    anchor_exp.fit(X)  # fit a sampling strategy to X
+
+    with open(out_csv, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(["RowIndex", "Precision", "Coverage", "Anchors"])
+
+        for idx in subset_indices:
+            explanation = anchor_exp.explain(X[idx], threshold=0.95)
+            anchor_str = " AND ".join(explanation.names())
+            writer.writerow([
+                idx,
+                f"{explanation.precision:.2f}",
+                f"{explanation.coverage:.2f}",
+                anchor_str
+            ])
+
+def plot_feature_bar(data, feature_cols, title, out_png):
+    """
+    Create a simple bar plot of mean absolute attributions or feature usage.
+    """
+    mean_abs = np.mean(np.abs(data), axis=0)
+    sorted_idx = np.argsort(mean_abs)[::-1]
+    sorted_feats = [feature_cols[i] for i in sorted_idx]
+    sorted_vals = mean_abs[sorted_idx]
+
+    plt.figure(figsize=(8,5))
+    sns.barplot(x=sorted_vals, y=sorted_feats, orient='h', color="cornflowerblue")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=300)
+    plt.close()
+
+def main():
+    if not os.path.exists(FULL_DATA_PKL):
+        raise FileNotFoundError(f"{FULL_DATA_PKL} not found. Ensure data prep is complete.")
+    full_df = pd.read_pickle(FULL_DATA_PKL)
+    logger.info(f"Loaded dataset: shape={full_df.shape} from {FULL_DATA_PKL}")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"Using device={device} for advanced XAI computations.")
+
+    for cfg in FINAL_MODELS:
+        model_id = cfg["model_id"]
+        subset_type = cfg["subset"]
+        feature_config = cfg["feature_config"]
+        logger.info(f"\n=== EXPLAINING MODEL: {model_id} (subset={subset_type}, features={feature_config}) ===")
+
+        model_out_dir = os.path.join(EXPLAIN_DIR, model_id)
+        os.makedirs(model_out_dir, exist_ok=True)
+
+        # 1) Filter subpopulation
+        sub_df = filter_subpopulation(full_df, subset_type, DATA_DIR)
+        if sub_df.empty:
+            logger.warning(f"[{model_id}] No patients in subpop '{subset_type}'. Skipping.")
+            continue
+
+        # 2) Select features
+        feats_df = select_features(sub_df, feature_config)
+        if feats_df.empty:
+            logger.warning(f"[{model_id}] No data after feature config '{feature_config}'. Skipping.")
+            continue
+
+        # 3) Prepare data
+        X, y, cat_idxs, cat_dims, feature_cols = prepare_data(feats_df, target_col=TARGET_COL)
+        logger.info(f"[{model_id}] Prepared shape={X.shape} with columns={feature_cols}")
+
+        if "Id" in feats_df.columns:
+            patient_ids = feats_df["Id"].values
+        else:
+            patient_ids = np.arange(len(X))
+
+        # 4) Load final TabNet model
+        model_path = os.path.join(FINALS_DIR, model_id, f"{model_id}_model")
+        if not os.path.exists(model_path + ".zip"):
+            logger.warning(f"[{model_id}] Could not find {model_path}.zip - skipping.")
+            continue
+
+        tabnet_regressor = load_tabnet_model(model_path)
+        logger.info(f"[{model_id}] Model loaded -> {model_path}")
+
+        # A simple predict function that returns NumPy arrays (required by SHAP)
+        def predict_fn(data):
+            if isinstance(data, torch.Tensor):
+                data = data.cpu().numpy()
+            return tabnet_regressor.predict(data)
+
+        ########################################################
+        # (A) GLOBAL EXPLANATIONS
+        ########################################################
+
+        # A1) SHAP (KernelExplainer)
+        logger.info(f"[{model_id}][SHAP] Building explainer with KernelExplainer...")
+        shap_expl = train_kernel_explainer(
+            model_predict_fn=predict_fn,
+            X=X,
+            background_size=BACKGROUND_SAMPLE_SIZE
+        )
+
+        logger.info(f"[{model_id}][SHAP] Computing SHAP values for entire subset...")
+        shap_vals = compute_shap_values(shap_expl, X)
+        shap_npy = os.path.join(model_out_dir, f"{model_id}_shap_values.npy")
+        np.save(shap_npy, shap_vals)
+        logger.info(f"[{model_id}][SHAP] Saved -> {shap_npy}")
+
+        # Optional barplot of mean(|SHAP|)
+        shap_png = os.path.join(model_out_dir, f"{model_id}_shap_summary.png")
+        plot_feature_bar(shap_vals, feature_cols, f"{model_id} - SHAP", shap_png)
+        logger.info(f"[{model_id}][SHAP] Bar plot -> {shap_png}")
+
+        # A2) Integrated Gradients
+        logger.info(f"[{model_id}][IG] Computing Integrated Gradients (Captum)...")
+        ig_vals = integrated_gradients(tabnet_regressor, X, baseline=None, device=device)
+        ig_npy = os.path.join(model_out_dir, f"{model_id}_ig_values.npy")
+        np.save(ig_npy, ig_vals)
+        logger.info(f"[{model_id}][IG] Saved -> {ig_npy}")
+
+        # A3) TabNet Masks
+        logger.info(f"[{model_id}][MASKS] Extracting intrinsic TabNet masks for all rows...")
+        masks_result = tabnet_regressor.explain(X)
+        if isinstance(masks_result, dict) and "masks" in masks_result:
+            masks_list = masks_result["masks"]
+        else:
+            masks_list = masks_result
+
+        if masks_list and len(masks_list) > 0:
+            step_0_mask = masks_list[0]
+            avg_mask = step_0_mask.mean(axis=0)
+
+            mask_npy = os.path.join(model_out_dir, f"{model_id}_mask_step0.npy")
+            np.save(mask_npy, step_0_mask)
+
+            mask_png = os.path.join(model_out_dir, f"{model_id}_tabnet_mask_step0.png")
+            plt.figure(figsize=(8,5))
+            sns.barplot(x=avg_mask, y=feature_cols, orient='h', color="cornflowerblue")
+            plt.title(f"{model_id} - Mean Feature Mask (Step 0)")
+            plt.tight_layout()
+            plt.savefig(mask_png, dpi=300)
+            plt.close()
+            logger.info(f"[{model_id}][MASKS] Mean mask plot -> {mask_png}")
+
+        ########################################################
+        # (B) LOCAL EXPLANATIONS
+        ########################################################
+
+        # B1) Critical Cases -> Anchors
+        residuals = compute_residuals(tabnet_regressor, X, y)
+        threshold = np.percentile(residuals, CRITICAL_PERCENTILE)
+        critical_indices = np.where(residuals > threshold)[0]
+        if len(critical_indices) > 0:
+            anchors_csv = os.path.join(model_out_dir, f"{model_id}_anchors_local.csv")
+            anchors_local_explanations(
+                model_predict_fn=predict_fn,
+                X=X,
+                feature_cols=feature_cols,
+                subset_indices=critical_indices,
+                out_csv=anchors_csv
+            )
+            logger.info(f"[{model_id}][Anchors] Explanations -> {anchors_csv}")
+        else:
+            logger.info(f"[{model_id}][Anchors] No critical cases found, skipping anchors.")
+
+        # B2) Outliers -> DeepLIFT
+        outlier_indices = compute_outliers(X, ZSCORE_THRESHOLD)
+        if len(outlier_indices) > 0:
+            outlier_data = X[outlier_indices]
+            dl_vals = deep_lift_attributions(tabnet_regressor, outlier_data, baseline=None, device=device)
+            dl_npy = os.path.join(model_out_dir, f"{model_id}_deeplift_values.npy")
+            np.save(dl_npy, dl_vals)
+            logger.info(f"[{model_id}][DeepLIFT] Outlier attributions saved -> {dl_npy}")
+        else:
+            logger.info(f"[{model_id}][DeepLIFT] No outliers found, skipping.")
+
+        logger.info(f"[{model_id}] Explanations complete. Outputs in {model_out_dir}")
+
+    logger.info("\n[ALL DONE] Full advanced XAI (with SHAP, IG, TabNet Masks, Anchors, DeepLIFT) is complete.\n")
+
+
+if __name__ == "__main__":
+    main()
 

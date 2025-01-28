@@ -1,35 +1,33 @@
 import os
 
-# List of .py files to read
-py_files = [
-    'data_preprocessing.py',
-    'health_index.py',
-    'charlson_comorbidity.py',
-    'vae_model.py',
-    'tabnet_model.py',
-    'vitai_scripts/cluster_utils.py',
-    'vitai_scripts/data_prep.py',
-    'vitai_scripts/feature_utils.py',
-    'vitai_scripts/model_utils.py',
-    'vitai_scripts/run_vitai_tests_main.py',
-    'vitai_scripts/subset_utils.py'
+# List of directories to read .py files from
+directories = [
+    '.',
+    'vitai_scripts',
+    'Finals',
+    'Validations',
+    'Explain_Xai'
 ]
 
 # Initialize an empty string to hold the combined content
 combined_content = ""
 
-# Iterate over each file in the list
-for file_name in py_files:
-    # Check if the file exists
-    if os.path.exists(file_name):
-        # Open the file and read its content
-        with open(file_name, 'r', encoding='utf-8') as file:
-            combined_content += file.read() + "\n"
-    else:
-        print(f"File {file_name} does not exist.")
-        # Save the combined content to a text file
+# Iterate over each directory in the list
+for directory in directories:
+    # Iterate over each file in the directory
+    for file_name in os.listdir(directory):
+        # Check if the file is a .py file
+        if file_name.endswith('.py'):
+            file_path = os.path.join(directory, file_name)
+            print(f"Reading file {file_path}...")
+            # Check if the file exists
+            if os.path.exists(file_path):
+                # Open the file and read its content
+                with open(file_path, 'r', encoding='utf-8') as file:
+                    combined_content += file.read() + "\n"
+            else:
+                print(f"File {file_path} does not exist.")
 
-# Print the combined content
-#print(combined_content)
+# Save the combined content to a text file
 with open('scripts.txt', 'w', encoding='utf-8') as output_file:
     output_file.write(combined_content)
