@@ -56,7 +56,6 @@ from sklearn.manifold import TSNE
 import umap.umap_ as umap
 
 # Import  existing logic
-# Adjust these paths to match your actual project structure
 from tabnet_model import load_data, prepare_data, hyperparameter_tuning
 from subset_utils import filter_subpopulation
 from feature_utils import select_features
@@ -91,7 +90,7 @@ FINAL_CONFIGS = [
     },
 ]
 
-# The target column for all three is your Health Index
+# The target column for all three is Health Index
 TARGET_COL = "Health_Index"
 
 # Final training epochs
