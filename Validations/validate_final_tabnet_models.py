@@ -33,7 +33,7 @@ from sklearn.metrics import (
     davies_bouldin_score
 )
 
-# Local imports for CCI/ECI. Adjust the path as needed.
+# Local imports for CCI/ECI.
 import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.join(SCRIPT_DIR, "..")
