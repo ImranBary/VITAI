@@ -1,19 +1,40 @@
 # final_three_tabnet.py
-# Author: You
+# Author: Imran Feisal
 # Date: 21/01/2025
-#
+
 # Description:
-#   A script that runs our three final TabNet models on the entire dataset,
-#   each restricted to one subpopulation:
+#   This script runs our three final TabNet models on the entire dataset, each restricted to a specific
+#   subpopulation:
 #     1) "combined_diabetes_tabnet"   -> subset: diabetes,      feature_config: "combined"
 #     2) "combined_all_ckd_tabnet"    -> subset: ckd,           feature_config: "combined_all"
 #     3) "combined_none_tabnet"       -> subset: none,          feature_config: "combined"
-#   We tune hyperparameters briefly, then train a final model with bigger max_epochs.
-#   We do clustering (K-Means + optional t-SNE/UMAP) on the final predicted subpopulation.
-#   Outputs are saved under Data/finals/<model_id>/.
-#
+
+#   For each model, the script performs the following steps:
+#     - Hyperparameter tuning on a training split and final model training with increased epochs.
+#     - Generation of a continuous predicted Health Index for each patient. This Health Index is a 
+#       composite score reflecting the overall clinical status based on demographics, comorbidities,
+#       and other health indicators.
+#     - Clustering (using K-Means, with additional visualisation via t-SNE/UMAP) on the predicted 
+#       subpopulation. The clustering groups patients with similar clinical profiles together, yielding
+#       a discrete cluster label for each patient.
+
+#   Output:
+#     Each patient is assigned two key outputs:
+#       1. A Predicted Health Index – a continuous measure representing the patient’s overall health.
+#       2. A Cluster label – a discrete, data-driven categorisation indicating the group to which the 
+#          patient belongs, based on similarities in the predicted Health Index and other selected features.
+  
+#   Classification Approach:
+#     - You may use the continuous Health Index directly by defining clinical thresholds (e.g. low, 
+#       medium, high risk) to categorise patients.
+#     - Alternatively, the cluster label provides a natural classification as it groups similar patients 
+#       together. In a dashboard, you might display both: the continuous Health Index for detailed analysis 
+#       and the cluster label for a quick overview of the patient’s risk group.
+
 # Usage:
 #   python final_three_tabnet.py
+
+
 
 import os
 import json
