@@ -1,0 +1,14 @@
+conda create -n tf_gpu_env python=3.9 cudatoolkit=11.2 cudnn=8.1.0 -c conda-forge
+
+conda activate tf_gpu_env
+
+conda install asttokens=2.4.1 colorama=0.4.6 comm=0.2.2 ipykernel=6.29.5 ipython=8.18.1 matplotlib-inline=0.1.7 -c conda-forge
+
+
+pip install torch==2.0.1+cu118 torchvision==0.15.2+cu118 torchaudio==2.0.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+
+conda install -c conda-forge graphviz
+
+pip install -r requirements.txt
+
+
