@@ -17,35 +17,35 @@ def explore_conditions(conditions):
     """Explore conditions data."""
     print("Conditions Data Sample:")
     print(conditions.head())
-    print("\nUnique Condition Descriptions:")
-    print(conditions['DESCRIPTION'].unique())
+    #print("\nUnique Condition Descriptions:")
+    #print(conditions['DESCRIPTION'].unique())
 
 def explore_encounters(encounters):
     """Explore encounters data."""
     print("Encounters Data Sample:")
     print(encounters.head())
-    print("\nEncounter Classes:")
-    print(encounters['ENCOUNTERCLASS'].unique())
+    #print("\nEncounter Classes:")
+    #print(encounters['ENCOUNTERCLASS'].unique())
 
 def explore_medications(medications):
     """Explore medications data."""
     print("Medications Data Sample:")
     print(medications.head())
-    print("\nUnique Medication Descriptions:")
-    print(medications['DESCRIPTION'].unique())
+    #print("\nUnique Medication Descriptions:")
+    #print(medications['DESCRIPTION'].unique())
 
 def explore_observations(observations):
     """Explore observations data."""
     print("Observations Data Sample:")
     print(observations.head())
-    print("\nUnique Observation Descriptions:")
-    print(observations['DESCRIPTION'].unique())
+    #print("\nUnique Observation Descriptions:")
+    #print(observations['DESCRIPTION'].unique())
     
 def explore_patients(patients):
     """Explore patients data."""
     print("Patients Data Sample:")
-    #print(patients.head())
-    #patients.head().to_csv("patients_sample.csv")
+    print(patients.head())
+    
     
 def explore_procedures(procedures):
     """Explore procedures data."""
@@ -54,17 +54,16 @@ def explore_procedures(procedures):
 
 def main():
     data_dir =  'Data'  
-    #conditions, encounters, medications, observations, patients, procedures = load_data(data_dir)
-    patients = load_data(data_dir)
-    patients.head().to_csv("patients_sample.csv")
+    conditions, encounters, medications, observations, patients, procedures = load_data(data_dir)
 
 
-    #explore_conditions(conditions)
-    #explore_encounters(encounters)
-    #explore_medications(medications)
-    #explore_observations(observations)
+
+    explore_conditions(conditions)
+    explore_encounters(encounters)
+    explore_medications(medications)
+    explore_observations(observations)
     explore_patients(patients)
-    #explore_procedures(procedures)
+    explore_procedures(procedures)
 
 if __name__ == '__main__':
     main()

@@ -5,11 +5,11 @@
 #
 # Description:
 #   This script generates advanced global and local explanations for each of your
-#   TabNet models (for diabetes, CKD, and the full population) and integrates a
-#   cluster‐based LIME explanation approach. Instead of running LIME on every single
-#   patient, patients are first clustered by their clinical profiles (e.g. Health Index
-#   and other key features) and a representative patient from each cluster is chosen.
-#   LIME is then run on these representatives to produce cluster‐level local explanations.
+#   TabNet models (for diabetes, CKD, and the full population) using a cluster‐based LIME
+#   approach. To reduce runtime while maintaining good explanation quality, the script now:
+#     - Samples a fixed number of instances for global explanation (SHAP and Integrated Gradients)
+#     - Reduces the number of steps in Integrated Gradients.
+#   The cluster‐based LIME explanations remain as before.
 #
 # Requirements:
 #   - Final TabNet models in Data/finals/<model_id>/<model_id>_model.zip
@@ -19,9 +19,9 @@
 #
 # Outputs:
 #   In "Data/explain_xai/<model_id>/", the script saves:
-#     - <model_id>_shap_values.npy             (global SHAP attributions)
+#     - <model_id>_shap_values.npy             (global SHAP attributions computed on a subset)
 #     - <model_id>_shap_summary.png            (bar plot of mean |SHAP| values)
-#     - <model_id>_ig_values.npy               (Integrated Gradients attributions)
+#     - <model_id>_ig_values.npy               (Integrated Gradients attributions computed on a subset)
 #     - <model_id>_deeplift_values.npy         (DeepLIFT attributions for outliers)
 #     - <model_id>_anchors_local.csv           (Anchors explanations for critical cases)
 #     - <model_id>_tabnet_mask_step0.png       (Bar plot of average TabNet mask)
@@ -113,6 +113,12 @@ TARGET_COL = "Health_Index"
 # SHAP configuration
 BACKGROUND_SAMPLE_SIZE = 2000  # Background subsample for KernelExplainer
 
+# Global explanation sampling configuration:
+GLOBAL_SAMPLE_SIZE = 500       # Number of instances to sample for global explanations (SHAP & IG)
+
+# Integrated Gradients configuration
+IG_N_STEPS = 35                # Reduced number of integration steps to speed up IG computations
+
 # Local explanation configuration
 CRITICAL_PERCENTILE = 90       # Top 10% residuals considered critical
 ZSCORE_THRESHOLD = 3.0         # Outlier threshold for DeepLIFT
@@ -151,7 +157,7 @@ def compute_outliers(X, zscore_threshold=3.0):
     outlier_mask = np.any(zscores > zscore_threshold, axis=1)
     return np.where(outlier_mask)[0]
 
-def train_kernel_explainer(model_predict_fn, X, background_size=2000):
+def train_kernel_explainer(model_predict_fn, X, background_size=BACKGROUND_SAMPLE_SIZE):
     """
     Builds a SHAP KernelExplainer using a background (reference) sample.
     """
@@ -160,7 +166,6 @@ def train_kernel_explainer(model_predict_fn, X, background_size=2000):
         background_data = X[idxs]
     else:
         background_data = X
-
     logger.info(f"[SHAP] Using {len(background_data)} background samples.")
     explainer = shap.KernelExplainer(model_predict_fn, background_data)
     return explainer
@@ -177,19 +182,17 @@ def compute_shap_values(explainer, X):
 
 def integrated_gradients(model, X, baseline=None, device="cpu"):
     """
-    Compute Integrated Gradients attributions for all rows in X.
+    Compute Integrated Gradients attributions for all rows in X using IG_N_STEPS steps.
     If no baseline is provided, use the median of X as reference.
     """
     ig = IntegratedGradients(model.pytorch_model)
     X_t = torch.tensor(X, dtype=torch.float, device=device)
-
     if baseline is None:
         baseline_array = np.median(X, axis=0)
         baseline_t = torch.tensor(baseline_array, dtype=torch.float, device=device)
     else:
         baseline_t = torch.tensor(baseline, dtype=torch.float, device=device)
-
-    attrs_t = ig.attribute(X_t, baseline=baseline_t, n_steps=50)
+    attrs_t = ig.attribute(X_t, baseline=baseline_t, n_steps=IG_N_STEPS)
     return attrs_t.detach().cpu().numpy()
 
 def deep_lift_attributions(model, X, baseline=None, device="cpu"):
@@ -199,13 +202,11 @@ def deep_lift_attributions(model, X, baseline=None, device="cpu"):
     """
     dl = DeepLift(model.pytorch_model)
     X_t = torch.tensor(X, dtype=torch.float, device=device)
-
     if baseline is None:
         baseline_array = np.median(X, axis=0)
         baseline_t = torch.tensor(baseline_array, dtype=torch.float, device=device)
     else:
         baseline_t = torch.tensor(baseline, dtype=torch.float, device=device)
-
     attrs_t = dl.attribute(X_t, baseline=baseline_t)
     return attrs_t.detach().cpu().numpy()
 
@@ -218,7 +219,6 @@ def anchors_local_explanations(model_predict_fn, X, feature_cols, subset_indices
         feature_names=feature_cols
     )
     anchor_exp.fit(X)  # Fit sampling strategy on X
-
     with open(out_csv, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(["RowIndex", "Precision", "Coverage", "Anchors"])
@@ -251,12 +251,10 @@ def cluster_based_lime_explanations(X, feature_cols, model_predict_fn, num_clust
     """
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-
     # Cluster the scaled data
     kmeans = KMeans(n_clusters=num_clusters, random_state=42)
     cluster_labels = kmeans.fit_predict(X_scaled)
     centroids = kmeans.cluster_centers_
-
     # For each cluster, find the representative index (closest to the centroid)
     rep_indices = {}
     for cluster in range(num_clusters):
@@ -266,7 +264,6 @@ def cluster_based_lime_explanations(X, feature_cols, model_predict_fn, num_clust
         distances = np.linalg.norm(cluster_points - centroid, axis=1)
         rep_idx = cluster_idxs[np.argmin(distances)]
         rep_indices[cluster] = rep_idx
-
     # Create a LIME explainer using the entire dataset as background
     lime_explainer = LimeTabularExplainer(
         training_data=X,
@@ -274,7 +271,6 @@ def cluster_based_lime_explanations(X, feature_cols, model_predict_fn, num_clust
         mode='regression',
         discretize_continuous=True
     )
-
     # Generate explanations for each representative
     cluster_explanations = {}
     for cluster, rep_idx in rep_indices.items():
@@ -285,7 +281,6 @@ def cluster_based_lime_explanations(X, feature_cols, model_predict_fn, num_clust
         )
         cluster_explanations[cluster] = explanation.as_list()
         logger.info(f"[LIME][Cluster {cluster}] Representative index: {rep_idx}, Explanation: {cluster_explanations[cluster]}")
-
     return cluster_explanations, cluster_labels
 
 ###########################################
@@ -351,11 +346,18 @@ def main():
         # (A) GLOBAL EXPLANATIONS
         ########################################################
 
-        # A1) SHAP (KernelExplainer)
-        logger.info(f"[{model_id}][SHAP] Building KernelExplainer...")
-        shap_expl = train_kernel_explainer(model_predict_fn=predict_fn, X=X, background_size=BACKGROUND_SAMPLE_SIZE)
-        logger.info(f"[{model_id}][SHAP] Computing SHAP values for the dataset...")
-        shap_vals = compute_shap_values(shap_expl, X)
+        # To speed up global explanation computations (SHAP and IG), sample a subset of the data.
+        if X.shape[0] > GLOBAL_SAMPLE_SIZE:
+            sample_idxs = np.random.choice(X.shape[0], size=GLOBAL_SAMPLE_SIZE, replace=False)
+            X_sample = X[sample_idxs]
+        else:
+            X_sample = X
+
+        # A1) SHAP (KernelExplainer) on sampled data
+        logger.info(f"[{model_id}][SHAP] Building KernelExplainer on {X_sample.shape[0]} samples...")
+        shap_expl = train_kernel_explainer(model_predict_fn=predict_fn, X=X_sample)
+        logger.info(f"[{model_id}][SHAP] Computing SHAP values on sampled data...")
+        shap_vals = compute_shap_values(shap_expl, X_sample)
         shap_npy = os.path.join(model_out_dir, f"{model_id}_shap_values.npy")
         np.save(shap_npy, shap_vals)
         logger.info(f"[{model_id}][SHAP] Saved SHAP values -> {shap_npy}")
@@ -363,9 +365,9 @@ def main():
         plot_feature_bar(shap_vals, feature_cols, f"{model_id} - SHAP Summary", shap_png)
         logger.info(f"[{model_id}][SHAP] Saved SHAP summary plot -> {shap_png}")
 
-        # A2) Integrated Gradients
-        logger.info(f"[{model_id}][IG] Computing Integrated Gradients...")
-        ig_vals = integrated_gradients(tabnet_regressor, X, baseline=None, device=device)
+        # A2) Integrated Gradients on sampled data
+        logger.info(f"[{model_id}][IG] Computing Integrated Gradients with {IG_N_STEPS} steps on sampled data...")
+        ig_vals = integrated_gradients(tabnet_regressor, X_sample, baseline=None, device=device)
         ig_npy = os.path.join(model_out_dir, f"{model_id}_ig_values.npy")
         np.save(ig_npy, ig_vals)
         logger.info(f"[{model_id}][IG] Saved Integrated Gradients attributions -> {ig_npy}")
