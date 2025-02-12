@@ -185,7 +185,8 @@ def integrated_gradients(model, X, baseline=None, device="cpu"):
     Compute Integrated Gradients attributions for all rows in X using IG_N_STEPS steps.
     If no baseline is provided, use the median of X as reference.
     """
-    ig = IntegratedGradients(model.pytorch_model)
+    # Use the underlying PyTorch model from TabNetRegressor
+    ig = IntegratedGradients(model.model)
     X_t = torch.tensor(X, dtype=torch.float, device=device)
     if baseline is None:
         baseline_array = np.median(X, axis=0)
@@ -200,7 +201,8 @@ def deep_lift_attributions(model, X, baseline=None, device="cpu"):
     Compute DeepLIFT attributions for X.
     If no baseline is provided, use the median of X as reference.
     """
-    dl = DeepLift(model.pytorch_model)
+    # Use the underlying PyTorch model from TabNetRegressor
+    dl = DeepLift(model.model)
     X_t = torch.tensor(X, dtype=torch.float, device=device)
     if baseline is None:
         baseline_array = np.median(X, axis=0)
