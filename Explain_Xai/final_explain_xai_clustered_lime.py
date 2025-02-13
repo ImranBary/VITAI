@@ -185,15 +185,16 @@ def integrated_gradients(model, X, baseline=None, device="cpu"):
     Compute Integrated Gradients attributions for all rows in X using IG_N_STEPS steps.
     If no baseline is provided, use the median of X as reference.
     """
-    # Use the underlying PyTorch model from TabNetRegressor
-    ig = IntegratedGradients(model.model)
+    # Use the underlying PyTorch model stored in 'network'
+    ig = IntegratedGradients(model.network)
     X_t = torch.tensor(X, dtype=torch.float, device=device)
     if baseline is None:
         baseline_array = np.median(X, axis=0)
         baseline_t = torch.tensor(baseline_array, dtype=torch.float, device=device)
     else:
         baseline_t = torch.tensor(baseline, dtype=torch.float, device=device)
-    attrs_t = ig.attribute(X_t, baseline=baseline_t, n_steps=IG_N_STEPS)
+    # Use the correct keyword "baselines"
+    attrs_t = ig.attribute(X_t, baselines=baseline_t, n_steps=IG_N_STEPS)
     return attrs_t.detach().cpu().numpy()
 
 def deep_lift_attributions(model, X, baseline=None, device="cpu"):
@@ -201,15 +202,15 @@ def deep_lift_attributions(model, X, baseline=None, device="cpu"):
     Compute DeepLIFT attributions for X.
     If no baseline is provided, use the median of X as reference.
     """
-    # Use the underlying PyTorch model from TabNetRegressor
-    dl = DeepLift(model.model)
+    # Use the underlying PyTorch model stored in 'network'
+    dl = DeepLift(model.network)
     X_t = torch.tensor(X, dtype=torch.float, device=device)
     if baseline is None:
         baseline_array = np.median(X, axis=0)
         baseline_t = torch.tensor(baseline_array, dtype=torch.float, device=device)
     else:
         baseline_t = torch.tensor(baseline, dtype=torch.float, device=device)
-    attrs_t = dl.attribute(X_t, baseline=baseline_t)
+    attrs_t = dl.attribute(X_t, baselines=baseline_t)
     return attrs_t.detach().cpu().numpy()
 
 def anchors_local_explanations(model_predict_fn, X, feature_cols, subset_indices, out_csv):
