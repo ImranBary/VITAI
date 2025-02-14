@@ -193,8 +193,11 @@ def integrated_gradients(model, X, baseline=None, device="cpu"):
         baseline_t = torch.tensor(baseline_array, dtype=torch.float, device=device)
     else:
         baseline_t = torch.tensor(baseline, dtype=torch.float, device=device)
-    # Use the correct keyword "baselines"
-    attrs_t = ig.attribute(X_t, baselines=baseline_t, n_steps=IG_N_STEPS)
+    # Ensure baseline has a batch dimension for proper broadcasting
+    if baseline_t.ndim == 1:
+        baseline_t = baseline_t.unsqueeze(0)
+    # IMPORTANT: Specify target=0 so that the gradient is computed with respect to the first output dimension.
+    attrs_t = ig.attribute(X_t, baselines=baseline_t, n_steps=IG_N_STEPS, target=0)
     return attrs_t.detach().cpu().numpy()
 
 def deep_lift_attributions(model, X, baseline=None, device="cpu"):
@@ -210,7 +213,10 @@ def deep_lift_attributions(model, X, baseline=None, device="cpu"):
         baseline_t = torch.tensor(baseline_array, dtype=torch.float, device=device)
     else:
         baseline_t = torch.tensor(baseline, dtype=torch.float, device=device)
-    attrs_t = dl.attribute(X_t, baselines=baseline_t)
+    if baseline_t.ndim == 1:
+        baseline_t = baseline_t.unsqueeze(0)
+    # For DeepLIFT, also specify target=0 if necessary.
+    attrs_t = dl.attribute(X_t, baselines=baseline_t, target=0)
     return attrs_t.detach().cpu().numpy()
 
 def anchors_local_explanations(model_predict_fn, X, feature_cols, subset_indices, out_csv):
