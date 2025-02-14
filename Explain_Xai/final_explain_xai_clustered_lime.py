@@ -4,7 +4,7 @@
 # Date: 05/02/2025
 #
 # Description:
-#   This script generates advanced global and local explanations for each of your
+#   This script generates advanced global and local explanations for each of the final
 #   TabNet models (for diabetes, CKD, and the full population) using a cluster‐based LIME
 #   approach. To reduce runtime while maintaining good explanation quality, the script now:
 #     - Samples a fixed number of instances for global explanation (SHAP and Integrated Gradients)
@@ -28,7 +28,7 @@
 #     - <model_id>_mask_step0.npy              (Raw step 0 mask array)
 #     - <model_id>_cluster_lime_explanations.csv (Cluster-level aggregated LIME explanations)
 #
-#   These outputs are intended to feed your dashboard, where clinicians can view both global and
+#   These outputs are intended to feed the dashboard, where clinicians can view both global and
 #   representative local explanations.
 
 import os
