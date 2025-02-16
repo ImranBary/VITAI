@@ -141,15 +141,13 @@ def load_tabnet_model(model_path: str) -> TabNetRegressor:
 def compute_residuals(model, X, y):
     """
     Returns the absolute residuals per row (absolute difference between prediction and truth).
-    Used for identifying critical cases.
     """
     preds = model.predict(X).flatten()
     return np.abs(preds - y.flatten())
 
 def compute_outliers(X, zscore_threshold=3.0):
     """
-    Basic outlier detection using a naive z-score rule across features.
-    If any feature's z-score exceeds the threshold, the instance is flagged.
+    Flags instances with any feature z-score exceeding the threshold.
     """
     mean_ = X.mean(axis=0)
     std_ = X.std(axis=0) + 1e-9
@@ -173,7 +171,6 @@ def train_kernel_explainer(model_predict_fn, X, background_size=BACKGROUND_SAMPL
 def compute_shap_values(explainer, X):
     """
     Compute SHAP values for X using KernelExplainer.
-    Returns a NumPy array of shape (n_samples, n_features).
     """
     shap_values = explainer.shap_values(X)
     if isinstance(shap_values, list):
@@ -182,16 +179,13 @@ def compute_shap_values(explainer, X):
 
 def integrated_gradients(model, X, baseline=None, device="cpu"):
     """
-    Compute Integrated Gradients attributions for all rows in X using IG_N_STEPS steps.
-    If no baseline is provided, use the median of X as reference.
+    Compute Integrated Gradients attributions for X using IG_N_STEPS steps.
     """
-    # Wrap the network's forward pass to handle tuple outputs.
     def forward_fn(x):
         output = model.network(x)
         if isinstance(output, tuple):
             return output[0]
         return output
-
     ig = IntegratedGradients(forward_fn)
     X_t = torch.tensor(X, dtype=torch.float, device=device)
     if baseline is None:
@@ -201,28 +195,22 @@ def integrated_gradients(model, X, baseline=None, device="cpu"):
         baseline_t = torch.tensor(baseline, dtype=torch.float, device=device)
     if baseline_t.ndim == 1:
         baseline_t = baseline_t.unsqueeze(0)
-    # Compute attributions with target=0 (first output dimension)
     attrs_t = ig.attribute(X_t, baselines=baseline_t, n_steps=IG_N_STEPS, target=0)
     return attrs_t.detach().cpu().numpy()
-
 
 def deep_lift_attributions(model, X, baseline=None, device="cpu"):
     """
     Compute DeepLIFT attributions for X.
-    If no baseline is provided, use the median of X as reference.
     """
-    # Define a wrapper module for the model's network
     class WrappedModel(torch.nn.Module):
         def __init__(self, tabnet_model):
             super(WrappedModel, self).__init__()
             self.tabnet_model = tabnet_model
-
         def forward(self, x):
             output = self.tabnet_model.network(x)
             if isinstance(output, tuple):
                 return output[0]
             return output
-
     wrapped_model = WrappedModel(model)
     dl = DeepLift(wrapped_model)
     X_t = torch.tensor(X, dtype=torch.float, device=device)
@@ -233,14 +221,12 @@ def deep_lift_attributions(model, X, baseline=None, device="cpu"):
         baseline_t = torch.tensor(baseline, dtype=torch.float, device=device)
     if baseline_t.ndim == 1:
         baseline_t = baseline_t.unsqueeze(0)
-    # Compute attributions with target=0 if necessary.
     attrs_t = dl.attribute(X_t, baselines=baseline_t, target=0)
     return attrs_t.detach().cpu().numpy()
 
-
 def anchors_local_explanations(model_predict_fn, X, feature_cols, subset_indices, out_csv):
     """
-    Use AnchorTabular to generate rule-based local explanations on a subset of rows.
+    Generate rule-based local explanations using AnchorTabular.
     """
     anchor_exp = AnchorTabular(
         predictor=model_predict_fn,
@@ -252,7 +238,6 @@ def anchors_local_explanations(model_predict_fn, X, feature_cols, subset_indices
         writer.writerow(["RowIndex", "Precision", "Coverage", "Anchors"])
         for idx in subset_indices:
             explanation = anchor_exp.explain(X[idx], threshold=0.95)
-            # Use the 'anchor' attribute to get the explanation rules.
             anchor_str = " AND ".join(explanation.anchor)
             writer.writerow([idx, f"{explanation.precision:.2f}", f"{explanation.coverage:.2f}", anchor_str])
 
@@ -273,18 +258,13 @@ def plot_feature_bar(data, feature_cols, title, out_png):
 
 def cluster_based_lime_explanations(X, feature_cols, model_predict_fn, num_clusters=NUM_CLUSTERS):
     """
-    Cluster patients using KMeans and generate LIME explanations for each cluster representative.
-    The representative is chosen as the point closest to the cluster centroid.
-    Returns a dictionary mapping cluster labels to the explanation (list of (feature, weight) tuples)
-    and an array of cluster labels for each instance.
+    Cluster patients using KMeans and generate LIME explanations for the cluster representatives.
     """
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-    # Cluster the scaled data
     kmeans = KMeans(n_clusters=num_clusters, random_state=42)
     cluster_labels = kmeans.fit_predict(X_scaled)
     centroids = kmeans.cluster_centers_
-    # For each cluster, find the representative index (closest to the centroid)
     rep_indices = {}
     for cluster in range(num_clusters):
         cluster_idxs = np.where(cluster_labels == cluster)[0]
@@ -293,14 +273,12 @@ def cluster_based_lime_explanations(X, feature_cols, model_predict_fn, num_clust
         distances = np.linalg.norm(cluster_points - centroid, axis=1)
         rep_idx = cluster_idxs[np.argmin(distances)]
         rep_indices[cluster] = rep_idx
-    # Create a LIME explainer using the entire dataset as background
     lime_explainer = LimeTabularExplainer(
         training_data=X,
         feature_names=feature_cols,
         mode='regression',
         discretize_continuous=True
     )
-    # Generate explanations for each representative
     cluster_explanations = {}
     for cluster, rep_idx in rep_indices.items():
         explanation = lime_explainer.explain_instance(
@@ -313,7 +291,7 @@ def cluster_based_lime_explanations(X, feature_cols, model_predict_fn, num_clust
     return cluster_explanations, cluster_labels
 
 ###########################################
-# Main Function
+# Main Function with Resume Logic
 ###########################################
 
 def main():
@@ -350,22 +328,17 @@ def main():
         # 3) Prepare data
         X, y, cat_idxs, cat_dims, feature_cols = prepare_data(feats_df, target_col=TARGET_COL)
         logger.info(f"[{model_id}] Prepared data: X shape = {X.shape}, features = {feature_cols}")
-
-        if "Id" in feats_df.columns:
-            patient_ids = feats_df["Id"].values
-        else:
-            patient_ids = np.arange(len(X))
+        patient_ids = feats_df["Id"].values if "Id" in feats_df.columns else np.arange(len(X))
 
         # 4) Load final TabNet model
         model_path = os.path.join(FINALS_DIR, model_id, f"{model_id}_model")
         if not os.path.exists(model_path + ".zip"):
             logger.warning(f"[{model_id}] Could not find {model_path}.zip - skipping.")
             continue
-
         tabnet_regressor = load_tabnet_model(model_path)
         logger.info(f"[{model_id}] Loaded model from {model_path}")
 
-        # Define a simple prediction function (required by SHAP and LIME)
+        # Define a prediction function required by SHAP and LIME
         def predict_fn(data):
             if isinstance(data, torch.Tensor):
                 data = data.cpu().numpy()
@@ -373,122 +346,137 @@ def main():
 
         ########################################################
         # (A) GLOBAL EXPLANATIONS
-        ######################################################## 
-
-        # To speed up global explanation computations (SHAP and IG), sample a subset of the data.
+        ########################################################
+        # Sample subset for global explanations
         if X.shape[0] > GLOBAL_SAMPLE_SIZE:
             sample_idxs = np.random.choice(X.shape[0], size=GLOBAL_SAMPLE_SIZE, replace=False)
             X_sample = X[sample_idxs]
         else:
             X_sample = X
 
-        # A1) SHAP (KernelExplainer) on sampled data
-        logger.info(f"[{model_id}][SHAP] Building KernelExplainer on {X_sample.shape[0]} samples...")
-        shap_expl = train_kernel_explainer(model_predict_fn=predict_fn, X=X_sample)
-        logger.info(f"[{model_id}][SHAP] Computing SHAP values on sampled data...")
-        shap_vals = compute_shap_values(shap_expl, X_sample)
+        # A1) SHAP
         shap_npy = os.path.join(model_out_dir, f"{model_id}_shap_values.npy")
-        np.save(shap_npy, shap_vals)
-        logger.info(f"[{model_id}][SHAP] Saved SHAP values -> {shap_npy}")
-        shap_png = os.path.join(model_out_dir, f"{model_id}_shap_summary.png")
-        plot_feature_bar(shap_vals, feature_cols, f"{model_id} - SHAP Summary", shap_png)
-        logger.info(f"[{model_id}][SHAP] Saved SHAP summary plot -> {shap_png}")
-
-        # A2) Integrated Gradients on sampled data 
-        logger.info(f"[{model_id}][IG] Computing Integrated Gradients with {IG_N_STEPS} steps on sampled data...")
-        ig_vals = integrated_gradients(tabnet_regressor, X_sample, baseline=None, device=device)
-        ig_npy = os.path.join(model_out_dir, f"{model_id}_ig_values.npy")
-        np.save(ig_npy, ig_vals)
-        logger.info(f"[{model_id}][IG] Saved Integrated Gradients attributions -> {ig_npy}")
-
-        # A3) TabNet Masks (Intrinsic)
-        logger.info(f"[{model_id}][MASKS] Extracting TabNet masks...")
-        masks_result = tabnet_regressor.explain(X)
-        if isinstance(masks_result, dict) and "masks" in masks_result:
-            masks_list = masks_result["masks"]
+        if os.path.exists(shap_npy):
+            logger.info(f"[{model_id}][SHAP] Found existing SHAP values at {shap_npy}. Loading.")
+            shap_vals = np.load(shap_npy)
         else:
-            masks_list = masks_result
-        if masks_list and len(masks_list) > 0:
-            step_0_mask = masks_list[0]
-            avg_mask = step_0_mask.mean(axis=0)
-            mask_npy = os.path.join(model_out_dir, f"{model_id}_mask_step0.npy")
-            np.save(mask_npy, step_0_mask)
-            mask_png = os.path.join(model_out_dir, f"{model_id}_tabnet_mask_step0.png")
-            plt.figure(figsize=(8,5))
-            sns.barplot(x=avg_mask, y=feature_cols, orient='h', color="cornflowerblue")
-            plt.title(f"{model_id} - Mean Feature Mask (Step 0)")
-            plt.tight_layout()
-            plt.savefig(mask_png, dpi=300)
-            plt.close()
-            logger.info(f"[{model_id}][MASKS] Saved mean mask plot -> {mask_png}")
+            logger.info(f"[{model_id}][SHAP] Building KernelExplainer on {X_sample.shape[0]} samples...")
+            shap_expl = train_kernel_explainer(model_predict_fn=predict_fn, X=X_sample)
+            logger.info(f"[{model_id}][SHAP] Computing SHAP values on sampled data...")
+            shap_vals = compute_shap_values(shap_expl, X_sample)
+            np.save(shap_npy, shap_vals)
+            logger.info(f"[{model_id}][SHAP] Saved SHAP values -> {shap_npy}")
+
+        shap_png = os.path.join(model_out_dir, f"{model_id}_shap_summary.png")
+        if os.path.exists(shap_png):
+            logger.info(f"[{model_id}][SHAP] Found existing SHAP summary plot at {shap_png}.")
+        else:
+            plot_feature_bar(shap_vals, feature_cols, f"{model_id} - SHAP Summary", shap_png)
+            logger.info(f"[{model_id}][SHAP] Saved SHAP summary plot -> {shap_png}")
+
+        # A2) Integrated Gradients
+        ig_npy = os.path.join(model_out_dir, f"{model_id}_ig_values.npy")
+        if os.path.exists(ig_npy):
+            logger.info(f"[{model_id}][IG] Found existing IG values at {ig_npy}. Loading.")
+            ig_vals = np.load(ig_npy)
+        else:
+            logger.info(f"[{model_id}][IG] Computing Integrated Gradients with {IG_N_STEPS} steps on sampled data...")
+            ig_vals = integrated_gradients(tabnet_regressor, X_sample, baseline=None, device=device)
+            np.save(ig_npy, ig_vals)
+            logger.info(f"[{model_id}][IG] Saved Integrated Gradients attributions -> {ig_npy}")
+
+        # A3) TabNet Masks
+        mask_npy = os.path.join(model_out_dir, f"{model_id}_mask_step0.npy")
+        mask_png = os.path.join(model_out_dir, f"{model_id}_tabnet_mask_step0.png")
+        if os.path.exists(mask_npy) and os.path.exists(mask_png):
+            logger.info(f"[{model_id}][MASKS] Found existing TabNet mask files. Skipping extraction.")
+        else:
+            logger.info(f"[{model_id}][MASKS] Extracting TabNet masks...")
+            masks_result = tabnet_regressor.explain(X)
+            if isinstance(masks_result, dict) and "masks" in masks_result:
+                masks_list = masks_result["masks"]
+            else:
+                masks_list = masks_result
+            if masks_list and len(masks_list) > 0:
+                step_0_mask = masks_list[0]
+                avg_mask = step_0_mask.mean(axis=0)
+                np.save(mask_npy, step_0_mask)
+                plt.figure(figsize=(8,5))
+                sns.barplot(x=avg_mask, y=feature_cols, orient='h', color="cornflowerblue")
+                plt.title(f"{model_id} - Mean Feature Mask (Step 0)")
+                plt.tight_layout()
+                plt.savefig(mask_png, dpi=300)
+                plt.close()
+                logger.info(f"[{model_id}][MASKS] Saved mean mask plot -> {mask_png}")
 
         ########################################################
         # (B) LOCAL EXPLANATIONS
         ########################################################
-
-        # B1) Critical Cases -> Anchors (for rule-based explanations)
-        residuals = compute_residuals(tabnet_regressor, X, y)
-        threshold = np.percentile(residuals, CRITICAL_PERCENTILE)
-        critical_indices = np.where(residuals > threshold)[0]
-        if len(critical_indices) > 0:
-            anchors_csv = os.path.join(model_out_dir, f"{model_id}_anchors_local.csv")
-            anchors_local_explanations(model_predict_fn=predict_fn, X=X, feature_cols=feature_cols,
-                                        subset_indices=critical_indices, out_csv=anchors_csv)
-            logger.info(f"[{model_id}][Anchors] Saved local Anchors explanations -> {anchors_csv}")
+        # B1) Anchors for critical cases
+        anchors_csv = os.path.join(model_out_dir, f"{model_id}_anchors_local.csv")
+        if os.path.exists(anchors_csv):
+            logger.info(f"[{model_id}][Anchors] Found existing Anchors explanations at {anchors_csv}.")
         else:
-            logger.info(f"[{model_id}][Anchors] No critical cases identified; skipping Anchors.")
+            residuals = compute_residuals(tabnet_regressor, X, y)
+            threshold = np.percentile(residuals, CRITICAL_PERCENTILE)
+            critical_indices = np.where(residuals > threshold)[0]
+            if len(critical_indices) > 0:
+                anchors_local_explanations(model_predict_fn=predict_fn, X=X, feature_cols=feature_cols,
+                                            subset_indices=critical_indices, out_csv=anchors_csv)
+                logger.info(f"[{model_id}][Anchors] Saved local Anchors explanations -> {anchors_csv}")
+            else:
+                logger.info(f"[{model_id}][Anchors] No critical cases identified; skipping Anchors.")
 
-        # B2) Outliers -> DeepLIFT
-        outlier_indices = compute_outliers(X, ZSCORE_THRESHOLD)
-        if len(outlier_indices) > 0:
-            outlier_data = X[outlier_indices]
-            dl_vals = deep_lift_attributions(tabnet_regressor, outlier_data, baseline=None, device=device)
-            dl_npy = os.path.join(model_out_dir, f"{model_id}_deeplift_values.npy")
-            np.save(dl_npy, dl_vals)
-            logger.info(f"[{model_id}][DeepLIFT] Saved DeepLIFT attributions for outliers -> {dl_npy}")
+        # B2) DeepLIFT for outliers
+        deeplift_npy = os.path.join(model_out_dir, f"{model_id}_deeplift_values.npy")
+        if os.path.exists(deeplift_npy):
+            logger.info(f"[{model_id}][DeepLIFT] Found existing DeepLIFT attributions at {deeplift_npy}.")
+            dl_vals = np.load(deeplift_npy)
         else:
-            logger.info(f"[{model_id}][DeepLIFT] No outliers detected; skipping DeepLIFT.")
+            outlier_indices = compute_outliers(X, ZSCORE_THRESHOLD)
+            if len(outlier_indices) > 0:
+                outlier_data = X[outlier_indices]
+                dl_vals = deep_lift_attributions(tabnet_regressor, outlier_data, baseline=None, device=device)
+                np.save(deeplift_npy, dl_vals)
+                logger.info(f"[{model_id}][DeepLIFT] Saved DeepLIFT attributions for outliers -> {deeplift_npy}")
+            else:
+                logger.info(f"[{model_id}][DeepLIFT] No outliers detected; skipping DeepLIFT.")
 
         ########################################################
         # (C) CLUSTER-BASED LIME EXPLANATIONS
         ########################################################
-
-        logger.info(f"[{model_id}][LIME] Performing clustering for representative LIME explanations...")
-        cluster_expls, cluster_labels = cluster_based_lime_explanations(X, feature_cols, predict_fn, num_clusters=NUM_CLUSTERS)
-        # Save cluster-level LIME explanations in a CSV
         lime_csv = os.path.join(model_out_dir, f"{model_id}_cluster_lime_explanations.csv")
-        with open(lime_csv, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(["Cluster", "RepresentativeIndex", "LIME_Explanation"])
-            for cluster, explanation in cluster_expls.items():
-                # Recompute the representative index for this cluster
-                cluster_idxs = np.where(cluster_labels == cluster)[0]
-                if len(cluster_idxs) > 0:
-                    rep_idx = cluster_idxs[0]
-                else:
-                    rep_idx = -1  # Fallback if none found
-                explanation_str = "; ".join([f"{feat}: {weight:.3f}" for feat, weight in explanation])
-                writer.writerow([cluster, rep_idx, explanation_str])
-        logger.info(f"[{model_id}][LIME] Saved cluster-level LIME explanations -> {lime_csv}")
-
-        ########################################################
-        # Optionally, assign the cluster explanation back to every patient
-        ########################################################
-        cluster_assignments_df = pd.DataFrame({
-            "patient_id": patient_ids,
-            "cluster": cluster_labels
-        })
-        # Merge with cluster explanations
-        cluster_expls_list = []
-        for cluster, explanation in cluster_expls.items():
-            rep_idx = np.where(cluster_labels == cluster)[0][0]  # representative index
-            explanation_str = "; ".join([f"{feat}: {weight:.3f}" for feat, weight in explanation])
-            cluster_expls_list.append({"cluster": cluster, "rep_idx": rep_idx, "explanation": explanation_str})
-        cluster_expls_df = pd.DataFrame(cluster_expls_list)
-        patient_explanations_df = cluster_assignments_df.merge(cluster_expls_df, on="cluster", how="left")
         patient_explanations_csv = os.path.join(model_out_dir, f"{model_id}_patient_explanations.csv")
-        patient_explanations_df.to_csv(patient_explanations_csv, index=False)
-        logger.info(f"[{model_id}][LIME] Saved patient-level cluster explanations -> {patient_explanations_csv}")
+        if os.path.exists(lime_csv) and os.path.exists(patient_explanations_csv):
+            logger.info(f"[{model_id}][LIME] Found existing cluster LIME and patient-level explanations. Skipping clustering.")
+        else:
+            logger.info(f"[{model_id}][LIME] Performing clustering for representative LIME explanations...")
+            cluster_expls, cluster_labels = cluster_based_lime_explanations(X, feature_cols, predict_fn, num_clusters=NUM_CLUSTERS)
+            # Save cluster-level LIME explanations
+            with open(lime_csv, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Cluster", "RepresentativeIndex", "LIME_Explanation"])
+                for cluster, explanation in cluster_expls.items():
+                    cluster_idxs = np.where(cluster_labels == cluster)[0]
+                    rep_idx = cluster_idxs[0] if len(cluster_idxs) > 0 else -1
+                    explanation_str = "; ".join([f"{feat}: {weight:.3f}" for feat, weight in explanation])
+                    writer.writerow([cluster, rep_idx, explanation_str])
+            logger.info(f"[{model_id}][LIME] Saved cluster-level LIME explanations -> {lime_csv}")
+
+            # Merge cluster assignment back to patients
+            cluster_assignments_df = pd.DataFrame({
+                "patient_id": patient_ids,
+                "cluster": cluster_labels
+            })
+            cluster_expls_list = []
+            for cluster, explanation in cluster_expls.items():
+                rep_idx = np.where(cluster_labels == cluster)[0][0]
+                explanation_str = "; ".join([f"{feat}: {weight:.3f}" for feat, weight in explanation])
+                cluster_expls_list.append({"cluster": cluster, "rep_idx": rep_idx, "explanation": explanation_str})
+            cluster_expls_df = pd.DataFrame(cluster_expls_list)
+            patient_explanations_df = cluster_assignments_df.merge(cluster_expls_df, on="cluster", how="left")
+            patient_explanations_df.to_csv(patient_explanations_csv, index=False)
+            logger.info(f"[{model_id}][LIME] Saved patient-level cluster explanations -> {patient_explanations_csv}")
 
     logger.info("\n[ALL DONE] Advanced global and local XAI with cluster-based LIME explanations complete.\n")
 
