@@ -185,28 +185,46 @@ def integrated_gradients(model, X, baseline=None, device="cpu"):
     Compute Integrated Gradients attributions for all rows in X using IG_N_STEPS steps.
     If no baseline is provided, use the median of X as reference.
     """
-    # Use the underlying PyTorch model stored in 'network'
-    ig = IntegratedGradients(model.network)
+    # Wrap the network's forward pass to handle tuple outputs.
+    def forward_fn(x):
+        output = model.network(x)
+        if isinstance(output, tuple):
+            return output[0]
+        return output
+
+    ig = IntegratedGradients(forward_fn)
     X_t = torch.tensor(X, dtype=torch.float, device=device)
     if baseline is None:
         baseline_array = np.median(X, axis=0)
         baseline_t = torch.tensor(baseline_array, dtype=torch.float, device=device)
     else:
         baseline_t = torch.tensor(baseline, dtype=torch.float, device=device)
-    # Ensure baseline has a batch dimension for proper broadcasting
     if baseline_t.ndim == 1:
         baseline_t = baseline_t.unsqueeze(0)
-    # IMPORTANT: Specify target=0 so that the gradient is computed with respect to the first output dimension.
+    # Compute attributions with target=0 (first output dimension)
     attrs_t = ig.attribute(X_t, baselines=baseline_t, n_steps=IG_N_STEPS, target=0)
     return attrs_t.detach().cpu().numpy()
+
 
 def deep_lift_attributions(model, X, baseline=None, device="cpu"):
     """
     Compute DeepLIFT attributions for X.
     If no baseline is provided, use the median of X as reference.
     """
-    # Use the underlying PyTorch model stored in 'network'
-    dl = DeepLift(model.network)
+    # Define a wrapper module for the model's network
+    class WrappedModel(torch.nn.Module):
+        def __init__(self, tabnet_model):
+            super(WrappedModel, self).__init__()
+            self.tabnet_model = tabnet_model
+
+        def forward(self, x):
+            output = self.tabnet_model.network(x)
+            if isinstance(output, tuple):
+                return output[0]
+            return output
+
+    wrapped_model = WrappedModel(model)
+    dl = DeepLift(wrapped_model)
     X_t = torch.tensor(X, dtype=torch.float, device=device)
     if baseline is None:
         baseline_array = np.median(X, axis=0)
@@ -215,9 +233,10 @@ def deep_lift_attributions(model, X, baseline=None, device="cpu"):
         baseline_t = torch.tensor(baseline, dtype=torch.float, device=device)
     if baseline_t.ndim == 1:
         baseline_t = baseline_t.unsqueeze(0)
-    # For DeepLIFT, also specify target=0 if necessary.
+    # Compute attributions with target=0 if necessary.
     attrs_t = dl.attribute(X_t, baselines=baseline_t, target=0)
     return attrs_t.detach().cpu().numpy()
+
 
 def anchors_local_explanations(model_predict_fn, X, feature_cols, subset_indices, out_csv):
     """
@@ -233,7 +252,8 @@ def anchors_local_explanations(model_predict_fn, X, feature_cols, subset_indices
         writer.writerow(["RowIndex", "Precision", "Coverage", "Anchors"])
         for idx in subset_indices:
             explanation = anchor_exp.explain(X[idx], threshold=0.95)
-            anchor_str = " AND ".join(explanation.names())
+            # Use the 'anchor' attribute to get the explanation rules.
+            anchor_str = " AND ".join(explanation.anchor)
             writer.writerow([idx, f"{explanation.precision:.2f}", f"{explanation.coverage:.2f}", anchor_str])
 
 def plot_feature_bar(data, feature_cols, title, out_png):
@@ -353,7 +373,7 @@ def main():
 
         ########################################################
         # (A) GLOBAL EXPLANATIONS
-        ########################################################
+        ######################################################## 
 
         # To speed up global explanation computations (SHAP and IG), sample a subset of the data.
         if X.shape[0] > GLOBAL_SAMPLE_SIZE:
@@ -374,7 +394,7 @@ def main():
         plot_feature_bar(shap_vals, feature_cols, f"{model_id} - SHAP Summary", shap_png)
         logger.info(f"[{model_id}][SHAP] Saved SHAP summary plot -> {shap_png}")
 
-        # A2) Integrated Gradients on sampled data
+        # A2) Integrated Gradients on sampled data 
         logger.info(f"[{model_id}][IG] Computing Integrated Gradients with {IG_N_STEPS} steps on sampled data...")
         ig_vals = integrated_gradients(tabnet_regressor, X_sample, baseline=None, device=device)
         ig_npy = os.path.join(model_out_dir, f"{model_id}_ig_values.npy")
