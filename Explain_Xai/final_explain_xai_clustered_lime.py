@@ -227,7 +227,9 @@ def deep_lift_attributions(model, X, baseline=None, device="cpu"):
 def anchors_local_explanations(model_predict_fn, X, feature_cols, subset_indices, out_csv):
     """
     Generate rule-based local explanations using AnchorTabular.
+    The anchors are always recomputed and written to out_csv.
     """
+    # Removed unsupported keyword arguments.
     anchor_exp = AnchorTabular(
         predictor=model_predict_fn,
         feature_names=feature_cols
@@ -412,20 +414,18 @@ def main():
         ########################################################
         # (B) LOCAL EXPLANATIONS
         ########################################################
-        # B1) Anchors for critical cases
+        # B1) Anchors for critical cases - ALWAYS recompute these
         anchors_csv = os.path.join(model_out_dir, f"{model_id}_anchors_local.csv")
-        if os.path.exists(anchors_csv):
-            logger.info(f"[{model_id}][Anchors] Found existing Anchors explanations at {anchors_csv}.")
+        logger.info(f"[{model_id}][Anchors] Recomputing Anchors explanations (overwriting {anchors_csv})...")
+        residuals = compute_residuals(tabnet_regressor, X, y)
+        threshold = np.percentile(residuals, CRITICAL_PERCENTILE)
+        critical_indices = np.where(residuals > threshold)[0]
+        if len(critical_indices) > 0:
+            anchors_local_explanations(model_predict_fn=predict_fn, X=X, feature_cols=feature_cols,
+                                        subset_indices=critical_indices, out_csv=anchors_csv)
+            logger.info(f"[{model_id}][Anchors] Saved local Anchors explanations -> {anchors_csv}")
         else:
-            residuals = compute_residuals(tabnet_regressor, X, y)
-            threshold = np.percentile(residuals, CRITICAL_PERCENTILE)
-            critical_indices = np.where(residuals > threshold)[0]
-            if len(critical_indices) > 0:
-                anchors_local_explanations(model_predict_fn=predict_fn, X=X, feature_cols=feature_cols,
-                                            subset_indices=critical_indices, out_csv=anchors_csv)
-                logger.info(f"[{model_id}][Anchors] Saved local Anchors explanations -> {anchors_csv}")
-            else:
-                logger.info(f"[{model_id}][Anchors] No critical cases identified; skipping Anchors.")
+            logger.info(f"[{model_id}][Anchors] No critical cases identified; skipping Anchors.")
 
         # B2) DeepLIFT for outliers
         deeplift_npy = os.path.join(model_out_dir, f"{model_id}_deeplift_values.npy")
