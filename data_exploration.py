@@ -15,43 +15,48 @@ def load_data(data_dir):
 
 def explore_conditions(conditions):
     """Explore conditions data."""
-    print("Conditions Data Sample:")
-    print(conditions.head())
-    #print("\nUnique Condition Descriptions:")
-    #print(conditions['DESCRIPTION'].unique())
+    print("Conditions Data Columns:")
+    print(conditions.columns)
+    print("\nConditions Data Sample (first row):")
+    print(conditions.iloc[0])
 
 def explore_encounters(encounters):
     """Explore encounters data."""
-    print("Encounters Data Sample:")
-    print(encounters.head())
-    #print("\nEncounter Classes:")
-    #print(encounters['ENCOUNTERCLASS'].unique())
+    print("encounters Data Columns:")
+    print(encounters.columns)
+    print("\nencounters Data Sample (first row):")
+    print(encounters.iloc[0])
 
 def explore_medications(medications):
     """Explore medications data."""
-    print("Medications Data Sample:")
-    print(medications.head())
-    #print("\nUnique Medication Descriptions:")
-    #print(medications['DESCRIPTION'].unique())
+    print("medications Data Columns:")
+    print(medications.columns)
+    print("\nmedications Data Sample (first row):")
+    print(medications.iloc[0])
 
 def explore_observations(observations):
     """Explore observations data."""
-    print("Observations Data Sample:")
-    print(observations.head())
-    #print("\nUnique Observation Descriptions:")
-    #print(observations['DESCRIPTION'].unique())
+    print("observations Data Columns:")
+    print(observations.columns)
+    print("\nobservations Data Sample (first row):")
+    print(observations.iloc[0])
     
 def explore_patients(patients):
     """Explore patients data."""
-    print("Patients Data Sample:")
-    print(patients.head())
+    print("patients Data Columns:")
+    print(patients.columns)
+    print("\npatients Data Sample (first row):")
+    print(patients.iloc[0])
     
     
 def explore_procedures(procedures):
     """Explore procedures data."""
-    print("Procedures Data Sample:")
-    print(procedures.head())
-
+    print("procedures Data Columns:")
+    print(procedures.columns)
+    print("\nprocedures Data Sample (first row):")
+    print(procedures.iloc[0])
+    
+    
 def main():
     data_dir =  'Data'  
     conditions, encounters, medications, observations, patients, procedures = load_data(data_dir)
