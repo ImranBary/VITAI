@@ -132,6 +132,8 @@ if list_models:
 else:
     df_models = pd.DataFrame()
 
+
+# TODO: Confirm the accuracy of these KPI 
 # -----------------------------
 # Global KPIs
 # -----------------------------
