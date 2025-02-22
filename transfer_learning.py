@@ -6,6 +6,7 @@ import logging
 import subprocess
 import shutil
 import time
+from datetime import datetime
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -33,8 +34,9 @@ def parse_arguments():
     parser = argparse.ArgumentParser(
         description="Transfer Learning Pipeline for Differential Data with Automatic Synthea Generation"
     )
-    parser.add_argument("--model_ids", nargs="+", required=True,
-                        help="List of final model IDs to update (e.g., combined_diabetes_tabnet combined_all_ckd_tabnet combined_none_tabnet)")
+    # Add arguments for model IDs, epochs, learning rate, and Synthea population size
+    parser.add_argument("--model_ids", nargs="+", default=["combined_diabetes_tabnet", "combined_all_ckd_tabnet", "combined_none_tabnet"],
+                        help="List of final model IDs to update")
     parser.add_argument("--finetune_epochs", type=int, default=20,
                         help="Number of epochs for fine-tuning")
     parser.add_argument("--learning_rate", type=float, default=1e-4,
@@ -43,14 +45,15 @@ def parse_arguments():
                         help="Number of patients to generate via Synthea")
     return parser.parse_args()
 
+
 def trigger_synthea(pop_size):
     """
     Triggers Synthea to generate synthetic patient data.
-    Assumes Synthea is located in the "./Synthea" folder.
+    Assumes Synthea is located in the "./synthea-master" directory.
     """
-    synthea_dir = os.path.join(os.getcwd(), "Synthea")
+    synthea_dir = os.path.join(os.getcwd(), "synthea-master")
     if not os.path.exists(synthea_dir):
-        logger.error("Synthea directory not found.")
+        logger.error("synthea-master directory not found.")
         sys.exit(1)
     # Ensure CSV export is enabled via command-line flag
     synthea_command = ["./run_synthea", "-p", str(pop_size), "--exporter.csv.export=true"]
@@ -65,18 +68,23 @@ def trigger_synthea(pop_size):
 def copy_synthea_output_to_data():
     """
     Copies the generated CSV files from Synthea's output folder to the project's Data folder.
+    Files are renamed with a timestamp suffix to avoid overwriting existing files.
     Expected files: patients.csv, encounters.csv, conditions.csv, medications.csv, observations.csv, procedures.csv
     """
     synthea_output = os.path.join(os.getcwd(), "Synthea", "output", "csv")
     data_dir = os.path.join(os.getcwd(), "Data")
     os.makedirs(data_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     expected_files = [
         "patients.csv", "encounters.csv", "conditions.csv",
         "medications.csv", "observations.csv", "procedures.csv"
     ]
     for filename in expected_files:
         src = os.path.join(synthea_output, filename)
-        dst = os.path.join(data_dir, filename)
+        # Append a suffix to indicate differential data and current datetime
+        base, ext = os.path.splitext(filename)
+        dst_filename = f"{base}_diff_{timestamp}{ext}"
+        dst = os.path.join(data_dir, dst_filename)
         if os.path.exists(src):
             shutil.copy(src, dst)
             logger.info(f"Copied {src} to {dst}")
@@ -105,18 +113,21 @@ def run_preprocessing_pipeline():
 def load_differential_data():
     """
     Loads the merged differential data from Data/patient_data_with_all_indices.pkl.
-    Ensures exactly 1,000 patients by sampling if needed.
+    Returns only new patients (where NewData == True). If the number of new patients
+    is not exactly 1,000, sample 1,000.
     """
     differential_pkl = os.path.join(os.getcwd(), "Data", "patient_data_with_all_indices.pkl")
     if not os.path.exists(differential_pkl):
         logger.error(f"Differential data pickle not found at {differential_pkl}")
         sys.exit(1)
-    diff_data = pd.read_pickle(differential_pkl)
-    logger.info(f"Loaded differential data with shape {diff_data.shape}")
-    if diff_data.shape[0] != 1000:
-        logger.info(f"Differential data has {diff_data.shape[0]} patients; sampling 1000 patients.")
-        diff_data = diff_data.sample(n=1000, random_state=42)
-    return diff_data
+    full_data = pd.read_pickle(differential_pkl)
+    new_data = full_data[full_data["NewData"] == True]
+    logger.info(f"Loaded {full_data.shape[0]} patients from merged data; found {new_data.shape[0]} new patients.")
+    if new_data.shape[0] != 1000:
+        logger.info(f"New data has {new_data.shape[0]} patients; sampling 1000 patients.")
+        new_data = new_data.sample(n=1000, random_state=42)
+    return new_data
+
 
 def load_pretrained_model(model_id, finals_dir):
     """
@@ -154,12 +165,14 @@ def finetune_model(model, X_train, y_train, X_valid, y_valid, cat_idxs, cat_dims
 def trigger_explainable_ai(differential_pkl):
     """
     Triggers the Explainable AI pipeline for the differential data.
-    Sets the FULL_DATA_PKL variable in final_explain_xai_clustered_lime.
+    Sets the FULL_DATA_PKL variable in final_explain_xai_clustered_lime and
+    sets APPEND_MODE to True so that new explanations are appended to existing outputs.
     """
     try:
         import Explain_Xai.final_explain_xai_clustered_lime as explainer
         explainer.FULL_DATA_PKL = differential_pkl
-        logger.info("Triggering Explainable AI pipeline for differential data...")
+        explainer.APPEND_MODE = True
+        logger.info("Triggering Explainable AI pipeline for differential data in append mode...")
         explainer.main()
     except Exception as e:
         logger.error(f"Error triggering Explainable AI pipeline: {e}")
@@ -172,9 +185,9 @@ def main():
 
     # 1. Trigger Synthea to generate new differential data
     trigger_synthea(args.synthea_population_size)
-    # 2. Copy Synthea output CSV files to Data folder
+    # 2. Copy Synthea output CSV files to Data folder with timestamp suffixes (without overwriting existing files)
     copy_synthea_output_to_data()
-    # 3. Run the preprocessing pipeline to generate processed data files
+    # 3. Run the preprocessing pipeline to generate processed data files (patient_data_sequences.pkl, patient_data_with_health_index.pkl, and patient_data_with_all_indices.pkl)
     run_preprocessing_pipeline()
     # 4. Load the differential data (merged with all indices)
     diff_data = load_differential_data()
@@ -204,7 +217,7 @@ def main():
         diff_features = select_features(diff_subset, feature_config)
         logger.info(f"Data shape after feature selection: {diff_features.shape}")
 
-        # Prepare data for TabNet using your prepare_data function
+        # Prepare data for TabNet using your prepare_data function (which follows the same transformation as before)
         try:
             X, y, cat_idxs, cat_dims, feature_names = prepare_data(diff_features, target_col="Health_Index")
         except Exception as e:
@@ -234,7 +247,8 @@ def main():
         updated_model.save_model(updated_model_path)
         logger.info(f"Updated model saved to {updated_model_path}.zip")
 
-    # 6. Trigger the Explainable AI pipeline on the differential data
+    # 6. Trigger the Explainable AI pipeline on the differential data,
+    #    ensuring that the new explanations are appended to existing XAI outputs.
     differential_pkl = os.path.join(data_dir, "patient_data_with_all_indices.pkl")
     trigger_explainable_ai(differential_pkl)
 
