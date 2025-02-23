@@ -65,36 +65,21 @@ def load_data(data_dir):
     patients_pattern = os.path.join(data_dir, "patients*.csv")
     patients = _load_and_tag_csv(patients_pattern, "patients")
     
-    # Proceed as before with patients: select columns, convert dates, etc.
+    # Ensure "NewData" is preserved. If not present, default to False.
+    if "NewData" not in patients.columns:
+        patients["NewData"] = False
+
     usecols = ['Id', 'BIRTHDATE', 'DEATHDATE', 'GENDER', 'RACE', 'ETHNICITY',
-               'HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME', 'MARITAL']
+               'HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME', 'MARITAL', 'NewData']
     patients = patients[usecols].copy()
+    
+    # Convert dates and perform demographic processing (as before)
     patients['BIRTHDATE'] = pd.to_datetime(patients['BIRTHDATE'], errors='coerce')
     patients['DEATHDATE'] = pd.to_datetime(patients['DEATHDATE'], errors='coerce')
     patients = patients[patients['BIRTHDATE'] <= patients['BIRTHDATE'].max()]
     patients = patients[(patients['DEATHDATE'].isnull()) | (patients['DEATHDATE'] >= patients['BIRTHDATE'])]
     
-    # For Age, we need encounters dates.
-    encounters_pattern = os.path.join(data_dir, "encounters*.csv")
-    encounters_dates = _load_and_tag_csv(encounters_pattern, "encounters")
-    encounters_dates['START'] = pd.to_datetime(encounters_dates['START']).dt.tz_localize(None)
-    latest_date = encounters_dates['START'].max()
-    patients['AGE'] = (latest_date - patients['BIRTHDATE']).dt.days / 365.25
-    patients['AGE'] = patients['AGE'].fillna(0)
-    patients['DECEASED'] = patients['DEATHDATE'].notnull().astype(int)
-    patients['AGE_AT_DEATH'] = ((patients['DEATHDATE'] - patients['BIRTHDATE']).dt.days / 365.25).fillna(patients['AGE'])
-    patients.drop(columns=['BIRTHDATE', 'DEATHDATE'], inplace=True)
-    
-    # Impute missing data for numerical and categorical features (as before)
-    numerical_features = ['HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME']
-    for col in numerical_features:
-        patients[col].fillna(patients[col].median(), inplace=True)
-    categorical_features = ['GENDER', 'RACE', 'ETHNICITY', 'MARITAL']
-    for col in categorical_features:
-        patients[col].fillna('Unknown', inplace=True)
-        patients[col] = patients[col].replace('', 'Unknown')
-    
-    # Load encounters (similarly load all matching files)
+    # Load encounters similarly (we assume no special tagging is needed here)
     encounters_pattern = os.path.join(data_dir, "encounters*.csv")
     encounters = _load_and_tag_csv(encounters_pattern, "encounters")
     usecols_enc = ['Id', 'PATIENT', 'ENCOUNTERCLASS', 'START', 'STOP', 'REASONCODE', 'REASONDESCRIPTION']

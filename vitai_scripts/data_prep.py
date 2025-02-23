@@ -52,7 +52,6 @@ def ensure_preprocessed_data(data_dir: str) -> None:
     from charlson_comorbidity import load_cci_mapping, compute_cci
     from elixhauser_comorbidity import compute_eci
 
-    # Run preprocessing if base files are missing
     if not os.path.exists(seq_path):
         logger.info("Missing patient_data_sequences.pkl -> Running data_preprocessing.")
         preprocess_main()
@@ -65,7 +64,6 @@ def ensure_preprocessed_data(data_dir: str) -> None:
     else:
         logger.info("Found patient_data_with_health_index.pkl.")
 
-    # If final file does not exist, create it by merging indices
     if not os.path.exists(final_path):
         logger.info(f"Creating {final_path} by merging indices.")
         df = pd.read_pickle(hi_path)
@@ -85,16 +83,17 @@ def ensure_preprocessed_data(data_dir: str) -> None:
         merged_eci.to_pickle(final_path)
         logger.info(f"[DataPrep] Created {final_path}.")
     else:
-        # If final file exists, load it and append new patients from hi_path (where NewData==True)
         logger.info(f"Found existing {final_path}. Updating with new patients if available.")
         existing = pd.read_pickle(final_path)
         current = pd.read_pickle(hi_path)
+        # Select rows with NewData==True; if the column is missing, assume no new rows.
+        if "NewData" not in current.columns:
+            logger.info("No NewData column found in health index data; nothing to update.")
+            return
         new_data = current[current["NewData"] == True]
-        # Filter out rows already in existing (by Id)
         new_rows = new_data[~new_data["Id"].isin(existing["Id"])]
         if not new_rows.empty:
             logger.info(f"Appending {len(new_rows)} new patients to {final_path}.")
-            # Compute Charlson and Elixhauser for new rows
             conditions_csv = os.path.join(data_dir, "conditions.csv")
             conditions = pd.read_csv(conditions_csv, usecols=["PATIENT", "CODE", "DESCRIPTION"])
             cci_map = load_cci_mapping(data_dir)
@@ -106,7 +105,7 @@ def ensure_preprocessed_data(data_dir: str) -> None:
             merged_new = merged_cci.merge(eci_df, how="left", left_on="Id", right_on="PATIENT")
             merged_new.drop(columns="PATIENT", inplace=True, errors="ignore")
             merged_new["ElixhauserIndex"] = merged_new["ElixhauserIndex"].fillna(0.0)
-            # Mark these new rows as processed
+            # Mark new rows as processed
             merged_new["NewData"] = False
             updated = pd.concat([existing, merged_new], ignore_index=True)
             updated.to_pickle(final_path)
