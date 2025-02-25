@@ -99,7 +99,7 @@ def aggregate_codes(data_dir):
     import pandas as pd, os
     conditions = pd.read_csv(os.path.join(data_dir, 'conditions.csv'), usecols=['PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION'])
     medications = pd.read_csv(os.path.join(data_dir, 'medications.csv'), usecols=['PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION'])
-    procedures = pd.read_csv(os.path.join(data_dir, 'procedures.csv'), usecols=['PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION'])
+    procedures = pd.read_csv(os.path.join(data_dir, 'procedures.csv'), usecols=['PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION'],engine='python')# Perhaps use engine='python' if C engine faiis please fix problem
     observations = pd.read_csv(os.path.join(data_dir, 'observations.csv'), usecols=['PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION', 'VALUE', 'UNITS'])
     conditions['TYPE'] = 'condition'
     medications['TYPE'] = 'medication'

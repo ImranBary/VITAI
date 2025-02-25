@@ -92,6 +92,18 @@ def ensure_preprocessed_data(data_dir: str) -> None:
             return
         new_data = current[current["NewData"] == True]
         new_rows = new_data[~new_data["Id"].isin(existing["Id"])]
+        
+        #--- Debugging ---#
+        # Print out the excluded patients
+        excluded = new_data[new_data["Id"].isin(existing["Id"])]
+        if not excluded.empty:
+            logger.info(f"Excluded {len(excluded)} patients that had matching IDs already in the dataset.")
+            logger.info("Some excluded patient IDs (up to 20 shown): "
+                        f"{excluded['Id'].unique()[:20]}")
+            
+            
+            
+            
         if not new_rows.empty:
             logger.info(f"Appending {len(new_rows)} new patients to {final_path}.")
             conditions_csv = os.path.join(data_dir, "conditions.csv")
