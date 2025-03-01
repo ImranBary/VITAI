@@ -118,7 +118,8 @@ def ensure_preprocessed_data(data_dir: str) -> None:
             merged_new.drop(columns="PATIENT", inplace=True, errors="ignore")
             merged_new["ElixhauserIndex"] = merged_new["ElixhauserIndex"].fillna(0.0)
             # Mark new rows as processed
-            merged_new["NewData"] = False
+            # Going to comment this out, hopefully what I am trying to do works 
+            # merged_new["NewData"] = False
             updated = pd.concat([existing, merged_new], ignore_index=True)
             updated.to_pickle(final_path)
             logger.info(f"Updated {final_path} with new patients.")
