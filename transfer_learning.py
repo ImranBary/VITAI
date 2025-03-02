@@ -214,6 +214,10 @@ def main():
     new_data = df[df["NewData"] == True]
     logger.info(f"Found {len(new_data)} new patients for transfer learning.")
 
+    # Drop the full dataset from memory
+    del df
+    gc.collect()
+
     # 4) Fine-tune each model on the new data
     for model_id in args.model_ids:
         logger.info(f"\n--- Fine-tuning {model_id} ---")
@@ -246,6 +250,10 @@ def main():
             logger.info("Not enough rows to fine-tune. Skipping.")
             continue
 
+        # Drop intermediate dataframes from memory
+        del sub_df, sub_feats
+        gc.collect()
+
         # Train/valid split
         X_train, X_valid, y_train, y_valid = train_test_split(
             X, y, test_size=0.2, random_state=42
@@ -271,7 +279,8 @@ def main():
         model.save_model(updated_model_path)
         logger.info(f"Saved updated model -> {updated_model_path}.zip")
 
-        # Collect garbage to free up memory
+        # Drop training data from memory
+        del X_train, X_valid, y_train, y_valid, X, y, cat_idxs, cat_dims, feat_names
         gc.collect()
 
     # 5) Merge new patients back into the main dataset 
@@ -280,6 +289,10 @@ def main():
     final_df.loc[final_df["NewData"] == True, "NewData"] = False
     final_df.to_pickle(final_pkl)
     logger.info("All new patients now marked as processed (NewData=False).")
+
+    # Drop final_df from memory
+    del final_df
+    gc.collect()
 
     # 6) Run the XAI pipeline on the updated data
     trigger_explainable_ai()
