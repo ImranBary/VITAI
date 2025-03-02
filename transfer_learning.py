@@ -6,10 +6,11 @@ import logging
 import subprocess
 import shutil
 from datetime import datetime
-
+import torch
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
+import gc  # Import the garbage collection module
 
 # TabNet & utility
 from pytorch_tabnet.tab_model import TabNetRegressor
@@ -120,21 +121,46 @@ def load_pretrained_model(model_id, finals_dir):
     logger.info(f"Loaded pre-trained model {model_id} from {model_path}")
     return regressor
 
-def finetune_model(model, X_train, y_train, X_valid, y_valid,
-                   cat_idxs, cat_dims,
-                   learning_rate, epochs):
+def finetune_tabnet(
+    model: TabNetRegressor,
+    X_train, y_train,
+    X_valid, y_valid,
+    cat_idxs, cat_dims,
+    learning_rate=1e-4,
+    max_epochs=20,
+    batch_size=4096,
+    virtual_batch_size=1024,
+    patience=5
+):
     """
-    Fine-tunes the TabNet model on the new differential data.
+    Fine-tunes (continues training) an already loaded/pre-trained TabNetRegressor `model`
+    on (X_train, y_train), validating on (X_valid, y_valid), *without* losing the trained weights.
+    
+    Args:
+        model: A TabNetRegressor that has already been load_model()'ed or trained previously.
+        X_train, y_train: Numpy arrays for training
+        X_valid, y_valid: Numpy arrays for validation
+        cat_idxs, cat_dims: Categorical info (only needed if you originally used it for embeddings)
+        learning_rate (float): The LR to use for fine-tuning.
+        max_epochs (int): Number of epochs for fine-tuning.
+        batch_size (int)
+        virtual_batch_size (int)
+        patience (int): Early stopping patience.
+
+    Returns:
+        The fine-tuned model (same TabNet object, updated).
     """
     model.fit(
-        X_train=X_train, y_train=y_train,
+        X_train=X_train,
+        y_train=y_train,
         eval_set=[(X_valid, y_valid)],
         eval_metric=["rmse"],
-        max_epochs=epochs,
-        patience=5,
-        batch_size=4096,
-        virtual_batch_size=1024,
-        lr=learning_rate,                     # fix learning rate
+        max_epochs=max_epochs,
+        patience=patience,
+        batch_size=batch_size,
+        virtual_batch_size=virtual_batch_size,
+        learning_rate=learning_rate,
+        device_name="cuda",
         verbose=1
     )
 
@@ -234,7 +260,7 @@ def main():
 
         # Fine-tune
         logger.info(f"Fine-tuning {model_id} with {X_train.shape[0]} train rows.")
-        model = finetune_model(
+        model = finetune_tabnet(
             model, X_train, y_train, X_valid, y_valid,
             cat_idxs, cat_dims,
             args.learning_rate, args.finetune_epochs
@@ -244,6 +270,9 @@ def main():
         updated_model_path = os.path.join(finals_dir, model_id, f"{model_id}_updated_model")
         model.save_model(updated_model_path)
         logger.info(f"Saved updated model -> {updated_model_path}.zip")
+
+        # Collect garbage to free up memory
+        gc.collect()
 
     # 5) Merge new patients back into the main dataset 
     data_prep.ensure_preprocessed_data(data_dir)
