@@ -94,8 +94,7 @@ def load_final_model_outputs():
     """
     models_data = {}
 
-    # We'll keep a small subset of base columns to merge in.  
-    # Adjust as you need: e.g., "CharlsonIndex", "ElixhauserIndex".
+    # We'll keep a small subset of base columns to merge in.
     base_cols = ["Id", "Health_Index", "CharlsonIndex", "ElixhauserIndex"]
 
     for grp in final_groups:
@@ -145,8 +144,6 @@ def load_final_model_outputs():
         if os.path.exists(cluster_json):
             with open(cluster_json, "r") as f:
                 metrics_cluster = json.load(f)
-            # Combine them
-            # (Renaming keys as needed to match your code's usage)
             metrics_primary["Silhouette"]         = metrics_cluster.get("silhouette", "N/A")
             metrics_primary["Calinski_Harabasz"]  = metrics_cluster.get("calinski", "N/A")
             metrics_primary["Davies_Bouldin"]     = metrics_cluster.get("davies_bouldin", "N/A")
@@ -155,7 +152,7 @@ def load_final_model_outputs():
             metrics_primary.setdefault("Calinski_Harabasz", "N/A")
             metrics_primary.setdefault("Davies_Bouldin", "N/A")
 
-        # Encode t-SNE / UMAP
+        # Encode t-SNE / UMAP images
         tsne_img = encode_image(tsne_png)
         umap_img = encode_image(umap_png)
 
@@ -168,19 +165,10 @@ def load_final_model_outputs():
 
     return models_data
 
-# -----------------------------
-# Now that we have df_all loaded, we also do a "global" merge so that
-# df_all has all "PredictedHI_final" columns. You can do that if you want
-# a single data source. But we can skip that if you rely on the
-# per-model merges above.
-
-# For now, let's keep it simple: the "df_model" used in the callback
-# will have "Health_Index", "PredictedHI_final", "Cluster_final".
-
 logger.info("Merging final model outputs with base data if needed.")
 final_models_data = load_final_model_outputs()
 
-# If you want to also unify them in df_all, do so:
+# Optionally unify them in df_all:
 list_models = []
 for label, mdata in final_models_data.items():
     if not mdata["df"].empty:
@@ -188,9 +176,12 @@ for label, mdata in final_models_data.items():
         list_models.append(mdata["df"])
 if list_models:
     df_models = pd.concat(list_models, ignore_index=True)
-    # If you want a master df with everything:
-    df_all = pd.merge(df_all, df_models.drop(columns=["Health_Index","CharlsonIndex","ElixhauserIndex"], errors="ignore"),
-                      on="Id", how="left")
+    df_all = pd.merge(
+        df_all,
+        df_models.drop(columns=["Health_Index", "CharlsonIndex", "ElixhauserIndex"], errors="ignore"),
+        on="Id",
+        how="left"
+    )
     logger.info(f"Master df_all shape after merges: {df_all.shape}")
 
 # -----------------------------
@@ -203,8 +194,9 @@ AVG_HEALTH_INDEX  = round(df_all["Health_Index"].mean(), 2) if "Health_Index" in
 AVG_CHARLSON      = round(df_all["CharlsonIndex"].mean(), 2) if "CharlsonIndex" in df_all.columns else "N/A"
 AVG_ELIXHAUSER    = round(df_all["ElixhauserIndex"].mean(), 2) if "ElixhauserIndex" in df_all.columns else "N/A"
 
-# -------------- [ Dashboard Layout Below, Same as Before ] --------------
-
+# -----------------------------
+# Color / Theme Config
+# -----------------------------
 nhs_colors = {
     "background": "#F7F7F7",
     "text": "#333333",
@@ -214,6 +206,23 @@ nhs_colors = {
 }
 external_stylesheets = [dbc.themes.FLATLY]
 
+# -----------------------------
+# Helper: Apply 2-decimal formatting to figure axes
+# -----------------------------
+def apply_2decimal_format(fig):
+    """
+    Forces x-axis & y-axis ticks to show 2 decimals (ex: 3 -> 3.00).
+    If you want to only show decimals if non-integer, see 'tickformat' ~r approach.
+    """
+    fig.update_layout(
+        xaxis=dict(tickformat=".2f"),
+        yaxis=dict(tickformat=".2f")
+    )
+    return fig
+
+# -----------------------------
+# KPI Card Helper
+# -----------------------------
 def kpi_card(title, value):
     return html.Div(
         style={
@@ -222,7 +231,8 @@ def kpi_card(title, value):
             "backgroundColor": nhs_colors["secondary"],
             "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
             "borderRadius": "5px",
-            "textAlign": "center"
+            "textAlign": "center",
+            "flex": "1"  # so each card can flex nicely in a row
         },
         children=[
             html.H4(title, style={"color": nhs_colors["primary"]}),
@@ -230,6 +240,9 @@ def kpi_card(title, value):
         ]
     )
 
+# -----------------------------
+# Patient Modal
+# -----------------------------
 patient_modal = html.Div([
     dbc.Modal(
         [
@@ -245,6 +258,9 @@ patient_modal = html.Div([
     ),
 ])
 
+# -----------------------------
+# Correlation Figure
+# -----------------------------
 def correlation_figure(df):
     relevant_cols = ["AGE", "INCOME", "Health_Index", "CharlsonIndex", "ElixhauserIndex"]
     existing = [c for c in relevant_cols if c in df.columns]
@@ -253,46 +269,59 @@ def correlation_figure(df):
 
     corr = df[existing].corr()
     fig = px.imshow(corr, text_auto=True, aspect="auto", title="Correlation Among Key Features")
-    fig.update_layout(margin={"r":0,"t":50,"l":0,"b":0})
+    # apply 2-decimal format to correlation colorbar if needed
+    fig.update_layout(margin={"r": 0, "t": 50, "l": 0, "b": 0})
+    apply_2decimal_format(fig)  # ensure axis ticks are .2f
     return fig
 
+# -----------------------------
+# Overriding the default Hist Figures to 2 decimals
+# -----------------------------
+hist_health = px.histogram(df_all, x="Health_Index", nbins=30, title="Distribution of Health Index", template="plotly_white")
+apply_2decimal_format(hist_health)
+
+hist_charlson = px.histogram(df_all, x="CharlsonIndex", nbins=30, title="Distribution of Charlson Index", template="plotly_white")
+apply_2decimal_format(hist_charlson)
+
+# -----------------------------
+# TABS Content
+# -----------------------------
+# Overview Tab with a Flex Layout for KPI Cards & Histograms
 overview_tab = dbc.Container([
     html.H2("Overview & KPIs", style={"color": nhs_colors["primary"]}),
     html.Hr(),
-    dbc.Row([
-        dbc.Col(kpi_card("Total Patients", TOTAL_PATIENTS), width=2),
-        dbc.Col(kpi_card("Avg Age",       AVG_AGE), width=2),
-        dbc.Col(kpi_card("Avg Income",    f"£{AVG_INCOME}"), width=2),
-        dbc.Col(kpi_card("Avg Health",    AVG_HEALTH_INDEX), width=2),
-        dbc.Col(kpi_card("Avg Charlson",  AVG_CHARLSON), width=2),
-        dbc.Col(kpi_card("Avg Elixhauser",AVG_ELIXHAUSER), width=2),
-    ], className="mb-4"),
 
-    dbc.Row([
-        dbc.Col(
-            dcc.Graph(
-                id="hist-healthindex",
-                figure=px.histogram(
-                    df_all, x="Health_Index", nbins=30,
-                    title="Distribution of Health Index",
-                    template="plotly_white"
-                )
-            ),
-            width=6
-        ),
-        dbc.Col(
-            dcc.Graph(
-                id="hist-charlson",
-                figure=px.histogram(
-                    df_all, x="CharlsonIndex", nbins=30,
-                    title="Distribution of Charlson Index",
-                    template="plotly_white"
-                )
-            ),
-            width=6
-        )
-    ]),
+    # KPI Cards in a Flex Row
+    html.Div([
+        kpi_card("Total Patients", TOTAL_PATIENTS),
+        kpi_card("Avg Age", AVG_AGE),
+        kpi_card("Avg Income", f"£{AVG_INCOME}"),
+        kpi_card("Avg Health", AVG_HEALTH_INDEX),
+        kpi_card("Avg Charlson", AVG_CHARLSON),
+        kpi_card("Avg Elixhauser", AVG_ELIXHAUSER),
+    ], style={
+        "display": "flex",
+        "flexWrap": "wrap",  # wrap to next line on smaller screens
+        "justifyContent": "space-around"
+    }),
+
     html.Br(),
+    # Histograms side by side
+    html.Div([
+        html.Div([
+            dcc.Graph(id="hist-healthindex", figure=hist_health)
+        ], style={"flex": "1", "margin": "10px"}),
+
+        html.Div([
+            dcc.Graph(id="hist-charlson", figure=hist_charlson)
+        ], style={"flex": "1", "margin": "10px"})
+    ], style={
+        "display": "flex",
+        "flexDirection": "row"
+    }),
+
+    html.Br(),
+    # Correlation Heatmap
     dcc.Graph(id="correlation-heatmap", figure=correlation_figure(df_all)),
 ], fluid=True, style={"backgroundColor": nhs_colors["background"], "padding": "20px"})
 
@@ -378,6 +407,7 @@ map_tab = dbc.Container([
     ])
 ], fluid=True, style={"backgroundColor": nhs_colors["background"], "padding": "20px"})
 
+# Show first 50 rows
 df_raw_display = df_all.head(50).copy()
 if "SEQUENCE" in df_raw_display.columns:
     df_raw_display["SEQUENCE"] = df_raw_display["SEQUENCE"].apply(lambda x: json.dumps(x) if isinstance(x, list) else x)
@@ -401,35 +431,50 @@ raw_data_tab = dbc.Container([
     patient_modal,
 ], fluid=True, style={"backgroundColor": nhs_colors["background"], "padding": "20px"})
 
+# -----------------------------
+# App & Navbar
+# -----------------------------
 app = dash.Dash(__name__, suppress_callback_exceptions=True, external_stylesheets=external_stylesheets)
 server = app.server
 
 navbar = dbc.Navbar(
     dbc.Container([
-        dbc.NavbarBrand("VITAI Dashboard", style={"color": nhs_colors["primary"], "fontWeight": "bold"}),
-        dbc.Nav([
-            dbc.NavItem(dbc.NavLink("Overview", href="#")),
-            dbc.NavItem(dbc.NavLink("Model Details", href="#")),
-            dbc.NavItem(dbc.NavLink("XAI Insights", href="#")),
-            dbc.NavItem(dbc.NavLink("Map & Inequalities", href="#")),
-            dbc.NavItem(dbc.NavLink("Raw Data", href="#")),
-        ], navbar=True)
-    ]),
+        dbc.NavbarBrand("VITAI Dashboard", style={
+            "color": nhs_colors["primary"], 
+            "fontWeight": "bold",
+            "fontSize": "24px"
+        }),
+        # Navigation Tabs (Right)
+        dcc.Tabs(
+            id="main-tabs",
+            value="overview-tab",
+            children=[
+                dcc.Tab(label="Overview", value="overview-tab"),
+                dcc.Tab(label="Model Details", value="model-details-tab"),
+                dcc.Tab(label="XAI Insights", value="xai-tab"),
+                dcc.Tab(label="Map & Inequalities", value="map-tab"),
+                dcc.Tab(label="Raw Data", value="raw-data-tab")
+            ],
+            style={
+                "borderBottom": "none",
+                "marginLeft": "auto"
+            }
+        )
+    ], fluid=True),
     color=nhs_colors["secondary"],
     light=True,
-    sticky="top"
+    sticky="top",
+    expand="lg"  # ensures the navbar won't collapse too early
 )
 
+# -----------------------------
+# Final Layout
+# -----------------------------
 app.layout = html.Div([
     navbar,
-    dcc.Tabs(id="main-tabs", value="overview-tab", children=[
-        dcc.Tab(label="Overview",           value="overview-tab"),
-        dcc.Tab(label="Model Details",      value="model-details-tab"),
-        dcc.Tab(label="XAI Insights",       value="xai-tab"),
-        dcc.Tab(label="Map & Inequalities", value="map-tab"),
-        dcc.Tab(label="Raw Data",           value="raw-data-tab")
-    ]),
-    html.Div(id="tabs-content")
+
+    # Container for the tab content
+    html.Div(id="tabs-content", style={"padding": "10px"})
 ], style={"backgroundColor": nhs_colors["background"]})
 
 # -----------------------------
@@ -440,6 +485,7 @@ app.layout = html.Div([
     Input("main-tabs", "value")
 )
 def render_tabs(tab):
+    """Render the correct layout based on the active tab."""
     if tab == "overview-tab":
         return overview_tab
     elif tab == "model-details-tab":
@@ -461,7 +507,6 @@ def update_model_details(selected_group):
         return html.Div("No model group selected.")
 
     # Re-load model data in case it changed
-    # (Typically it won't, but safe to re-check)
     all_models = load_final_model_outputs()
     mdata      = all_models.get(selected_group, {})
     metrics    = mdata.get("metrics", {})
@@ -469,6 +514,7 @@ def update_model_details(selected_group):
     tsne_src   = mdata.get("tsne_img")
     umap_src   = mdata.get("umap_img")
 
+    # Create the scatter if columns are available
     if "PredictedHI_final" in df_model.columns and "Health_Index" in df_model.columns:
         scatter_fig = px.scatter(
             df_model,
@@ -478,6 +524,7 @@ def update_model_details(selected_group):
             title=f"Predicted vs Actual Health Index ({selected_group})",
             template="plotly_white"
         )
+        apply_2decimal_format(scatter_fig)  # Round to 2 decimals
     else:
         scatter_fig = go.Figure().update_layout(
             title="Data Not Available",
@@ -494,24 +541,37 @@ def update_model_details(selected_group):
         "padding": "10px",
         "backgroundColor": nhs_colors["secondary"],
         "borderRadius": "5px",
-        "marginBottom": "20px"
+        "marginBottom": "20px",
+        'width': '30%',
+        'height': 'auto'
     })
 
-    tsne_img = html.Img(src=tsne_src, style={"width": "50%", "height": "auto"}) if tsne_src else html.Div("t-SNE plot not available")#changed height to 50%, see how this affect db
-    umap_img = html.Img(src=umap_src, style={"width": "50%", "height": "auto"}) if umap_src else html.Div("UMAP plot not available")
+    tsne_img = html.Img(src=tsne_src, style={"width": "20%", "height": "auto"}) if tsne_src else html.Div("t-SNE plot not available")
+    umap_img = html.Img(src=umap_src, style={"width": "20%", "height": "auto"}) if umap_src else html.Div("UMAP plot not available")
 
     return html.Div([
+        # First Row: Scatter Plot & Metrics
         dbc.Row([
-            dbc.Col(dcc.Graph(figure=scatter_fig), width=6),
-            dbc.Col(metrics_div, width=6),
-        ]),
-        html.Hr(),
-        html.H4("t-SNE Visualization"),
-        tsne_img,
-        html.Br(),
-        html.Br(),
-        html.H4("UMAP Visualization"),
-        umap_img
+            dbc.Col(dcc.Graph(figure=scatter_fig), width=7),
+            dbc.Col(metrics_div, width=5)
+        ], align="center", style={"marginBottom": "20px"}),
+
+        # Second Row: t-SNE & UMAP
+        dbc.Row([
+            dbc.Col([
+                html.H4("t-SNE Visualization", style={"textAlign": "center", "marginBottom": "10px"}),
+                html.Img(src=tsne_src, style={"width": "100%", "height": "auto", "borderRadius": "5px"})
+                if tsne_src else html.Div("t-SNE plot not available", style={"textAlign": "center"})
+            ], width=6),
+
+            dbc.Col([
+                html.H4("UMAP Visualization", style={"textAlign": "center", "marginBottom": "10px"}),
+                html.Img(src=umap_src, style={"width": "100%", "height": "auto", "borderRadius": "5px"})
+                if umap_src else html.Div("UMAP plot not available", style={"textAlign": "center"})
+            ], width=6),
+        ], align="center", style={"marginBottom": "20px"}),
+
+        html.H4("t-SNE & UMAP Visualizations", style={"textAlign": "center", "marginTop": "10px"})
     ])
 
 @app.callback(
@@ -521,7 +581,7 @@ def update_model_details(selected_group):
 def update_xai_insights(selected_group):
     if not selected_group:
         return html.Div("No group selected for XAI.")
-    
+
     found = [fg for fg in final_groups if fg["label"] == selected_group]
     if not found:
         return html.Div(f"Cannot find model group: {selected_group}")
@@ -533,7 +593,7 @@ def update_xai_insights(selected_group):
     anchors_path      = os.path.join(model_xai_dir, f"{model_dir_name}_anchors_local.csv")
     deeplift_path     = os.path.join(model_xai_dir, f"{model_dir_name}_deeplift_values.npy")
     cluster_lime_path = os.path.join(model_xai_dir, f"{model_dir_name}_cluster_lime_explanations.csv")
-    
+
     content = []
 
     # SHAP
@@ -544,6 +604,7 @@ def update_xai_insights(selected_group):
         df_shap = pd.DataFrame({"Feature": features, "Importance": mean_abs}).sort_values("Importance", ascending=False)
         shap_fig = px.bar(df_shap, x="Importance", y="Feature", orientation="h",
                           title="Global SHAP Summary", template="plotly_white")
+        apply_2decimal_format(shap_fig)
         content.append(html.Div([
             html.H4("SHAP Values", style={"color": nhs_colors["primary"]}),
             dcc.Graph(figure=shap_fig)
@@ -560,6 +621,7 @@ def update_xai_insights(selected_group):
         df_ig.sort_values("IG_Importance", ascending=False, inplace=True)
         ig_fig = px.bar(df_ig, x="IG_Importance", y="Feature", orientation="h",
                         title="Integrated Gradients Summary", template="plotly_white")
+        apply_2decimal_format(ig_fig)
         content.append(html.Div([
             html.H4("Integrated Gradients", style={"color": nhs_colors["primary"]}),
             dcc.Graph(figure=ig_fig)
@@ -655,6 +717,7 @@ def update_inequalities_map(selected_model_group, vis_mode, income_range, health
             title="Patient Distribution & Socio-Economic Filter (Scatter)"
         )
         fig.update_layout(mapbox_style="carto-positron", margin={"r":0, "t":50, "l":0, "b":0})
+        apply_2decimal_format(fig)
     else:
         fig = px.density_mapbox(
             dff, lat="LAT", lon="LON",
@@ -665,6 +728,7 @@ def update_inequalities_map(selected_model_group, vis_mode, income_range, health
             title="Patient Distribution & Socio-Economic Filter (Heatmap)"
         )
         fig.update_layout(mapbox_style="carto-positron", margin={"r":0, "t":50, "l":0, "b":0})
+        apply_2decimal_format(fig)
 
     return fig
 
@@ -698,7 +762,7 @@ def toggle_patient_modal(active_cell, close_click, is_open, table_data):
             details = [
                 html.P(f"ID: {patient.get('Id', 'N/A')}"),
                 html.P(f"Age: {patient.get('AGE', 'N/A')}"),
-                html.P(f"Income: £{patient.get('INCOME', 'N/A')}"),
+                html.P(f"Income: ${patient.get('INCOME', 'N/A')}"),
                 html.P(f"Health Index: {patient.get('Health_Index', 'N/A')}"),
                 html.P(f"Charlson Index: {patient.get('CharlsonIndex', 'N/A')}"),
                 html.P(f"Elixhauser Index: {patient.get('ElixhauserIndex', 'N/A')}"),
@@ -711,5 +775,8 @@ def toggle_patient_modal(active_cell, close_click, is_open, table_data):
             return False, ""
     return is_open, ""
 
+# -----------------------------
+# Run Server
+# -----------------------------
 if __name__ == "__main__":
     app.run_server(debug=True)
