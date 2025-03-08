@@ -93,7 +93,7 @@ def compute_cci(conditions, cci_mapping):
         #
         # PERIPHERAL VASCULAR DISEASE (weight 1)
         #
-        # -- None in your list match typical “peripheral vascular disease” codes --
+        # -- None in list match typical “peripheral vascular disease” codes --
         #
         # CEREBROVASCULAR DISEASE (weight 1)
         #
@@ -118,7 +118,7 @@ def compute_cci(conditions, cci_mapping):
         #
         # ULCER DISEASE (weight 1)
         #
-        # -- None in your list specifically match “peptic ulcer disease” --
+        # -- None in list specifically match “peptic ulcer disease” --
         #
         # MILD LIVER DISEASE (weight 1)
         #
@@ -143,7 +143,7 @@ def compute_cci(conditions, cci_mapping):
         #
         # HEMIPLEGIA or PARAPLEGIA (weight 2)
         #
-        # -- None in your list appear to indicate hemiplegia or paraplegia, 
+        # -- None in list appear to indicate hemiplegia or paraplegia, 
         #    e.g. “cerebral palsy” is not typically counted as hemiplegia. 
         #
         # MODERATE OR SEVERE KIDNEY DISEASE (weight 2)
@@ -173,7 +173,7 @@ def compute_cci(conditions, cci_mapping):
         #
         # MODERATE OR SEVERE LIVER DISEASE (weight 3)
         #
-        # -- None in your list mention cirrhosis or advanced hepatic failure 
+        # -- None in list mention cirrhosis or advanced hepatic failure 
         #    that we'd classify as 'moderate/severe liver disease'.
         #
         # METASTATIC SOLID TUMOUR (weight 6)
