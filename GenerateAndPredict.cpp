@@ -31,7 +31,7 @@
 
 
 
- 
+
 /******************************************
  * TODO: Confirm if the logic used for the health index is similar to
  * the one used in helath_index.py
@@ -52,6 +52,8 @@
  #include <cstdio>
  #include <chrono>
  #include <ctime>
+ #include <filesystem> // C++17
+ namespace fs = std::filesystem;
  
  // For CSV parsing (using an external single-header CSV library)
  // #define CSV_IO_NO_THREAD 
@@ -187,49 +189,52 @@
      std::cout << "[INFO] Synthea generation complete.\n";
  }
  
+ // Copy the main Synthea output CSVs to our Data directory with a timestamp 
  static void copySyntheaOutput() {
-     std::string synOutput = SYN_DIR + "/" + SYN_OUT;
-     struct stat st;
-     if (stat(synOutput.c_str(), &st) != 0) {
-         std::cerr << "[ERROR] Synthea output dir " << synOutput << " not found.\n";
-         std::exit(1);
-     }
-     makeDirIfNeeded(DATA_DIR);
- 
-     // The main CSV files we want
-     std::vector<std::string> needed = {
-         "patients.csv", "encounters.csv", "conditions.csv",
-         "medications.csv", "observations.csv", "procedures.csv"
-     };
-     std::string stamp = getTimestamp();
- 
-     for (auto &fname : needed) {
-         std::string src = synOutput + "/" + fname;
-         if (stat(src.c_str(), &st) != 0) {
-             std::cerr << "[WARN] Missing " << fname << " in Synthea output.\n";
-             continue;
-         }
-         // rename => e.g. "patients_diff_20250308_130045.csv"
-         auto dotPos = fname.rfind('.');
-         std::string base = (dotPos == std::string::npos ? fname : fname.substr(0, dotPos));
-         std::string ext  = (dotPos == std::string::npos ? ""    : fname.substr(dotPos));
-         std::string newName = base + "_diff_" + stamp + ext;
-         std::string dst = DATA_DIR + "/" + newName;
- 
-#ifdef _WIN32
-    // Wrap src and dst in quotes to handle spaces/special characters
-    std::string cmd = "copy \"" + src + "\" \"" + dst + "\""; 
-#else
-    std::string cmd = "cp \"" + src + "\" \"" + dst + "\"";
-#endif
-     
-         std::cout << "[INFO] Copying " << src << " => " << dst << "\n";
-         int ret = std::system(cmd.c_str());
-         if (ret != 0) {
-             std::cerr << "[ERROR] copy cmd failed: " << cmd << "\n";
-         }
-     }
- }
+    // e.g. "synthea-master/output/csv"
+    fs::path synOutput = fs::path(SYN_DIR) / SYN_OUT;
+
+    // Make sure the Synthea output dir actually exists:
+    if (!fs::exists(synOutput)) {
+        std::cerr << "[ERROR] Synthea output dir " << synOutput << " not found.\n";
+        std::exit(1);
+    }
+    makeDirIfNeeded(DATA_DIR); // keep your existing mkdir logic or use filesystem as well
+
+    // The main CSV files we want to copy
+    std::vector<std::string> needed = {
+        "patients.csv", "encounters.csv", "conditions.csv",
+        "medications.csv", "observations.csv", "procedures.csv"
+    };
+
+    std::string stamp = getTimestamp(); // your existing function
+    for (auto &fname : needed) {
+        fs::path src = synOutput / fname;
+        if (!fs::exists(src)) {
+            std::cerr << "[WARN] Missing " << fname << " in Synthea output.\n";
+            continue;
+        }
+        // e.g. "patients_diff_20250309_165742.csv"
+        auto dotPos = fname.rfind('.');
+        std::string base = (dotPos == std::string::npos
+                            ? fname
+                            : fname.substr(0, dotPos));
+        std::string ext  = (dotPos == std::string::npos
+                            ? ""
+                            : fname.substr(dotPos));
+        std::string newName = base + "_diff_" + stamp + ext;
+
+        fs::path dst = fs::path(DATA_DIR) / newName;
+
+        std::cout << "[INFO] Copying " << src << " => " << dst << "\n";
+        try {
+            // Overwrites if already exists:
+            fs::copy_file(src, dst, fs::copy_options::overwrite_existing);
+        } catch (const fs::filesystem_error &ex) {
+            std::cerr << "[ERROR] copy failed: " << ex.what() << "\n";
+        }
+    }
+}
  
  /****************************************************
   * Helpers to load CSVs
