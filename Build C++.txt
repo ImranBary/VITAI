@@ -1,0 +1,3 @@
+cl /EHsc /std:c++17 GenerateAndPredict.cpp ^
+  /I"C:\Users\imran\miniconda3\envs\tf_gpu_env\include" ^
+  /link /LIBPATH:"C:\Users\imran\miniconda3\envs\tf_gpu_env\libs" python39.lib /MACHINE:X64
