@@ -13,4 +13,5 @@ coverage
 *.zip
 *.html
 Archive/
-synthea-master/
+synthea-master/output/
+synthea-master/.github
