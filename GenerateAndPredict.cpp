@@ -25,6 +25,17 @@
  * 
  *****************************************************/
 
+
+
+
+
+
+
+ 
+/******************************************
+ * TODO: Confirm if the logic used for the health index is similar to
+ * the one used in helath_index.py
+ ******************************************/
  #include <Python.h> // For embedded Python
  #include <iostream>
  #include <fstream>
@@ -207,7 +218,7 @@
  
 #ifdef _WIN32
     // Wrap src and dst in quotes to handle spaces/special characters
-    std::string cmd = "copy /Y \"" + src + "\" \"" + dst + "\""; // added Y to force overwrite without prompt
+    std::string cmd = "copy \"" + src + "\" \"" + dst + "\""; 
 #else
     std::string cmd = "cp \"" + src + "\" \"" + dst + "\"";
 #endif
