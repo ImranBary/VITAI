@@ -1,22 +1,31 @@
 /*****************************************************
  * GenerateAndPredict.cpp
  *
- * A single monolithic C++ program that replicates:
- *   1) data_preprocessing.py (merge old & new CSVs, set NewData)
- *   2) health_index.py (compute comorbidity-based features and a Health_Index)
- *   3) data_prep.py (merge Charlson/Elixhauser, produce final integrated dataset)
- *   4) subset_utils.py (filter by diabetes/ckd/none)
+ * C++ program replicating the logic of:
+ *   1) data_preprocessing.py (merge old & new CSVs, marking new data as NewData)
+ *   2) health_index.py (computing comorbidity-based features + Health_Index)
+ *   3) data_prep.py (merging Charlson/Elixhauser, final integrated dataset)
+ *   4) subset_utils.py (filter: diabetes/ckd/none)
  *   5) feature_utils.py (select columns: composite, cci, eci, combined, etc.)
- *   6) final pipeline (run Synthea, copy files, do transformations).
- *   7) Embeds Python to load TabNet models and produce predictions
- *      in Data/new_predictions/<model_id>/...
- *   8) Optionally runs the XAI script if --enable-xai is set.
+ *   6) final "generate_new_patients_and_predict.py" pipeline
+ *   7) Embedded Python calls for TabNet model inference + optional XAI
  *
- * It does *not* write or read .pkl files. Instead, it stores an
- * equivalent final dataset in CSV form named 'patient_data_with_all_indices.csv'.
+ * Charlson Comorbidity Index now uses a full dictionary-based approach
+ * (no CSV file). We replicate the "SNOMED_TO_CHARLSON" and category weights
+ * from the Python script you provided.
  *
  * Author: Imran Feisal
  * Date: 08/03/2025
+ * Usage: 
+ * 
+First go to the directory:
+cd /c/Users/imran/Documents/VITAI
+
+Then run the following command:
+g++ -std=c++17 GenerateAndPredict.cpp -I"C:\Users\imran\miniconda3\envs\tf_gpu_env\include" -L"C:\Users\imran\miniconda3\envs\tf_gpu_env\libs" -lpython39 -o GenerateAndPredict
+
+
+ * 
  *****************************************************/
 
  #include <Python.h> // For embedded Python
@@ -36,7 +45,7 @@
  #include <chrono>
  #include <ctime>
  
- // For CSV parsing (external single-header library)
+ // For CSV parsing (using an external single-header CSV library)
  #include "csv.hpp"
  
  #ifdef _WIN32
@@ -65,9 +74,7 @@
      {"combined_none_tabnet",     {"none",     "combined"}}
  };
  
- // --------------------------------------------------
  // Data structures to hold loaded records
- // --------------------------------------------------
  struct PatientRecord {
      std::string Id;
      std::string BIRTHDATE;
@@ -81,21 +88,21 @@
      std::string MARITAL;
      bool   NewData=false;   // Mark if loaded from a "_diff_" file
  
-     // We also keep a simplistic approach for age & deceased
+     // Simplistic approach for age & deceased
      double AGE=0.0;
      bool   DECEASED=false;
  
-     // For Charlson/Elixhauser
+     // Charlson & Elixhauser indices
      double CharlsonIndex=0.0;
      double ElixhauserIndex=0.0;
  
-     // For additional health metrics
+     // Additional metrics
      double Comorbidity_Score=0.0;
      int    Hospitalizations_Count=0;
      int    Medications_Count=0;
      int    Abnormal_Observations_Count=0;
  
-     // The final "Health_Index"
+     // Final "Health_Index"
      double Health_Index=0.0;
  };
  
@@ -155,11 +162,10 @@
  
  static void runSynthea(int popSize) {
  #ifdef _WIN32
-     // On Windows, you might have run_synthea.bat
-     // e.g. "cd synthea-master && run_synthea.bat -p 100"
+     // Windows example
      std::string cmd = "cd " + SYN_DIR + " && run_synthea.bat -p " + std::to_string(popSize);
  #else
-     // On Linux / macOS
+     // Linux/macOS example
      std::string cmd = "cd " + SYN_DIR + " && ./run_synthea -p " + std::to_string(popSize);
  #endif
      std::cout << "[INFO] Running Synthea: " << cmd << "\n";
@@ -193,7 +199,7 @@
              std::cerr << "[WARN] Missing " << fname << " in Synthea output.\n";
              continue;
          }
-         // rename => e.g., "patients_diff_20250308_130045.csv"
+         // rename => e.g. "patients_diff_20250308_130045.csv"
          auto dotPos = fname.rfind('.');
          std::string base = (dotPos == std::string::npos ? fname : fname.substr(0, dotPos));
          std::string ext  = (dotPos == std::string::npos ? ""    : fname.substr(dotPos));
@@ -214,34 +220,29 @@
  }
  
  /****************************************************
-  * Loading CSVs: we want to load both the original
-  * (non-diff) and all diff files, then combine them.
+  * Helpers to load CSVs
   ****************************************************/
  
- // Helper to see if a filename is "diff"
+ // check if file name includes "_diff_"
  static bool isDiffFile(const std::string &fname) {
      return (fname.find("_diff_") != std::string::npos);
  }
  
- // List all CSVs that start with <prefix> in Data/
+ // We do a simple approach: for prefix "patients", we check
+ //   Data/patients.csv
+ //   Data/patients_diff_1.csv
+ //   Data/patients_diff_2.csv
+ //   ...
+ // in practice you might want to list the directory to find all matches
  static std::vector<std::string> listCSVFiles(const std::string &prefix) {
-     // In a real scenario you might do platform-specific directory listing;
-     // for simplicity, we’ll guess up to 50 versions.
-     // You can refine if you want to read the entire directory.
-     // We'll check <prefix>*.csv or <prefix>_diff_*.csv
      std::vector<std::string> found;
-     for (int i = 0; i < 200; i++) {
-         // e.g. "patients.csv", "patients_diff_20250308_123455.csv", ...
-         // We can try a pattern approach.
-         // We'll attempt two forms: "prefix.csv" or "prefix_diff_i.csv"
-         // but to replicate Python you'd check all that match prefix*
-         // For demonstration: we'll do prefix alone and prefix_diff_...
+     for (int i = 0; i < 300; i++) {
          std::ostringstream oss;
          if (i == 0) {
-             // "patients.csv" or "encounters.csv", etc.
+             // e.g. "Data/patients.csv"
              oss << DATA_DIR << "/" << prefix << ".csv";
          } else {
-             // "patients_diff_1.csv", "patients_diff_2.csv", ...
+             // e.g. "Data/patients_diff_1.csv", ...
              oss << DATA_DIR << "/" << prefix << "_diff_" << i << ".csv";
          }
          std::string path = oss.str();
@@ -250,25 +251,17 @@
              found.push_back(path);
          }
      }
-     // We do the same pattern with a timestamp approach or just rely on the above "i" approach.
-     // In practice you can scan the directory for all files that start with <prefix>.
      return found;
  }
  
- /****************************************************
-  * 1) LOADING PATIENTS
-  *    We replicate "data_preprocessing.py" logic:
-  *    - If file name has "_diff_", set NewData = true
-  *    - Otherwise NewData = false
-  ****************************************************/
+ // 1) Load patients
  static void loadPatients(std::vector<PatientRecord> &allPatients) {
-     auto patientFiles = listCSVFiles("patients"); // e.g. "patients.csv", "patients_diff_..."
- 
+     auto patientFiles = listCSVFiles("patients"); 
      for (auto &path : patientFiles) {
-         bool isDiff = isDiffFile(path);
+         bool diff = isDiffFile(path);
          try {
-             csv::CSVReader reader(path);
-             for (auto &row : reader) {
+             csv::CSVReader rd(path);
+             for (auto &row : rd) {
                  PatientRecord p;
                  p.Id        = row["Id"].get<>();
                  p.BIRTHDATE = row["BIRTHDATE"].get<>();
@@ -282,15 +275,12 @@
                  try { p.HEALTHCARE_COVERAGE = row["HEALTHCARE_COVERAGE"].get<double>(); } catch(...) {}
                  try { p.INCOME = row["INCOME"].get<double>(); } catch(...) {}
  
-                 p.NewData = isDiff;  // mark all from this file the same
-                 // approximate: if DEATHDATE is non-empty => DECEASED
+                 p.NewData = diff;
                  if (!p.DEATHDATE.empty() && p.DEATHDATE != "NaN") {
                      p.DECEASED = true;
                  }
-                 // naive approximation for AGE (just ignoring date)
-                 // you could parse BIRTHDATE properly if desired
-                 p.AGE = 50.0; // placeholder
- 
+                 // naive approach for AGE
+                 p.AGE = 50.0;
                  allPatients.push_back(p);
              }
          } catch(...) {
@@ -299,9 +289,7 @@
      }
  }
  
- /****************************************************
-  * 2) Loading Conditions (and so forth)
-  ****************************************************/
+ // 2) Load conditions, encounters, meds, obs, procs
  static void loadConditions(std::vector<ConditionRow> &conds) {
      auto condFiles = listCSVFiles("conditions");
      for (auto &path : condFiles) {
@@ -317,6 +305,7 @@
          } catch(...) {}
      }
  }
+ 
  static void loadEncounters(std::vector<EncounterRow> &encs) {
      auto encFiles = listCSVFiles("encounters");
      for (auto &path : encFiles) {
@@ -324,14 +313,15 @@
              csv::CSVReader rd(path);
              for (auto &row : rd) {
                  EncounterRow e;
-                 e.Id            = row["Id"].get<>();
-                 e.PATIENT       = row["PATIENT"].get<>();
-                 e.ENCOUNTERCLASS= row["ENCOUNTERCLASS"].get<>();
+                 e.Id             = row["Id"].get<>();
+                 e.PATIENT        = row["PATIENT"].get<>();
+                 e.ENCOUNTERCLASS = row["ENCOUNTERCLASS"].get<>();
                  encs.push_back(e);
              }
          } catch(...) {}
      }
  }
+ 
  static void loadMedications(std::vector<MedicationRow> &meds) {
      auto files = listCSVFiles("medications");
      for (auto &path : files) {
@@ -339,15 +329,16 @@
              csv::CSVReader rd(path);
              for (auto &row : rd) {
                  MedicationRow m;
-                 m.PATIENT    = row["PATIENT"].get<>();
-                 m.ENCOUNTER  = row["ENCOUNTER"].get<>();
-                 m.CODE       = row["CODE"].get<>();
-                 m.DESCRIPTION= row["DESCRIPTION"].get<>();
+                 m.PATIENT     = row["PATIENT"].get<>();
+                 m.ENCOUNTER   = row["ENCOUNTER"].get<>();
+                 m.CODE        = row["CODE"].get<>();
+                 m.DESCRIPTION = row["DESCRIPTION"].get<>();
                  meds.push_back(m);
              }
          } catch(...) {}
      }
  }
+ 
  static void loadObservations(std::vector<ObservationRow> &obs) {
      auto files = listCSVFiles("observations");
      for (auto &path : files) {
@@ -370,6 +361,7 @@
          } catch(...) {}
      }
  }
+ 
  static void loadProcedures(std::vector<ProcedureRow> &procs) {
      auto files = listCSVFiles("procedures");
      for (auto &path : files) {
@@ -388,53 +380,252 @@
  }
  
  /****************************************************
-  * 3) Charlson / Elixhauser logic
-  *    (We’ll embed partial mappings)
+  * Charlson Comorbidity: dictionary-based approach
+  * from your Python "charlson_comorbidity.py"
   ****************************************************/
- static std::map<std::string,std::string> CHARLSON_MAP = {
-     {"22298006","Myocardial infarction"},
-     {"88805009","Congestive heart failure"},
-     {"62479008","AIDS/HIV"}
- };
- static std::map<std::string,int> CHARLSON_WEIGHTS = {
-     {"Myocardial infarction",1},
-     {"Congestive heart failure",1},
-     {"AIDS/HIV",1}
+ 
+ // 1) Full SNOMED->CharlsonCategory mapping
+ static std::map<long long, std::string> SNOMED_TO_CHARLSON = {
+     // MYOCARDIAL INFARCTION (weight 1)
+     {22298006, "Myocardial infarction"},
+     {401303003, "Myocardial infarction"},
+     {401314000, "Myocardial infarction"},
+     {129574000, "Myocardial infarction"},
+ 
+     // CONGESTIVE HEART FAILURE (weight 1)
+     {88805009,  "Congestive heart failure"},
+     {84114007,  "Congestive heart failure"},
+ 
+     // PERIPHERAL VASCULAR DISEASE (weight 1)
+     // (No explicit codes in that snippet, so omitted)
+ 
+     // CEREBROVASCULAR DISEASE (weight 1)
+     {230690007, "Cerebrovascular disease"},
+ 
+     // DEMENTIA (weight 1)
+     {26929004,  "Dementia"},
+     {230265002, "Dementia"},
+ 
+     // CHRONIC PULMONARY DISEASE (weight 1)
+     {185086009, "Chronic pulmonary disease"},
+     {87433001,  "Chronic pulmonary disease"},
+     {195967001, "Chronic pulmonary disease"},
+     {233678006, "Chronic pulmonary disease"},
+ 
+     // CONNECTIVE TISSUE DISEASE (weight 1)
+     {69896004,  "Connective tissue disease"},
+     {200936003, "Connective tissue disease"},
+ 
+     // ULCER DISEASE (weight 1)
+     // (No explicit codes in that snippet)
+ 
+     // MILD LIVER DISEASE (weight 1)
+     {128302006, "Mild liver disease"},
+     {61977001,  "Mild liver disease"},
+ 
+     // DIABETES WITHOUT END-ORGAN DAMAGE (weight 1)
+     {44054006,  "Diabetes without end-organ damage"},
+ 
+     // DIABETES WITH END-ORGAN DAMAGE (weight 2)
+     {368581000119106LL, "Diabetes with end-organ damage"},
+     {422034002,         "Diabetes with end-organ damage"},
+     {127013003,         "Diabetes with end-organ damage"},
+     {90781000119102LL,  "Diabetes with end-organ damage"},
+     {157141000119108LL, "Diabetes with end-organ damage"},
+     {60951000119105LL,  "Diabetes with end-organ damage"},
+     {97331000119101LL,  "Diabetes with end-organ damage"},
+     {1501000119109LL,   "Diabetes with end-organ damage"},
+     {1551000119108LL,   "Diabetes with end-organ damage"},
+ 
+     // HEMIPLEGIA/PARAPLEGIA (weight 2)
+     // (No explicit codes in that snippet)
+ 
+     // MODERATE OR SEVERE KIDNEY DISEASE (weight 2)
+     {431855005, "Moderate or severe kidney disease"},
+     {431856006, "Moderate or severe kidney disease"},
+     {433144002, "Moderate or severe kidney disease"},
+     {431857002, "Moderate or severe kidney disease"},
+     {46177005,  "Moderate or severe kidney disease"},
+     {129721000119106LL, "Moderate or severe kidney disease"},
+ 
+     // ANY TUMOUR (weight 2)
+     {254637007, "Any tumour, leukaemia, lymphoma"},
+     {254632001, "Any tumour, leukaemia, lymphoma"},
+     {93761005,  "Any tumour, leukaemia, lymphoma"},
+     {363406005, "Any tumour, leukaemia, lymphoma"},
+     {109838007, "Any tumour, leukaemia, lymphoma"},
+     {126906006, "Any tumour, leukaemia, lymphoma"},
+     {92691004,  "Any tumour, leukaemia, lymphoma"},
+     {254837009, "Any tumour, leukaemia, lymphoma"},
+     {109989006, "Any tumour, leukaemia, lymphoma"},
+     {93143009,  "Any tumour, leukaemia, lymphoma"},
+     {91861009,  "Any tumour, leukaemia, lymphoma"},
+ 
+     // MODERATE OR SEVERE LIVER DISEASE (weight 3)
+     // (No explicit codes in the snippet, but you can add if needed)
+ 
+     // METASTATIC SOLID TUMOUR (weight 6)
+     {94503003,  "Metastatic solid tumour"},
+     {94260004,  "Metastatic solid tumour"},
+ 
+     // AIDS/HIV (weight 6)
+     {62479008,  "AIDS/HIV"},
+     {86406008,  "AIDS/HIV"}
  };
  
- static std::map<std::string,std::string> ELIX_MAP = {
-     {"88805009","Congestive heart failure"}
- };
- static std::map<std::string,int> ELIX_WEIGHTS = {
-     {"Congestive heart failure",7}
+ // 2) Category->CharlsonWeight
+ static std::map<std::string,int> CHARLSON_CATEGORY_WEIGHTS = {
+     {"Myocardial infarction", 1},
+     {"Congestive heart failure", 1},
+     {"Peripheral vascular disease", 1},
+     {"Cerebrovascular disease", 1},
+     {"Dementia", 1},
+     {"Chronic pulmonary disease", 1},
+     {"Connective tissue disease", 1},
+     {"Ulcer disease", 1},
+     {"Mild liver disease", 1},
+     {"Diabetes without end-organ damage", 1},
+ 
+     {"Hemiplegia", 2},
+     {"Moderate or severe kidney disease", 2},
+     {"Diabetes with end-organ damage", 2},
+     {"Any tumour, leukaemia, lymphoma", 2},
+ 
+     {"Moderate or severe liver disease", 3},
+     {"Metastatic solid tumour", 6},
+     {"AIDS/HIV", 6}
  };
  
- static int getCharlsonWeight(const std::string &code) {
-     auto it = CHARLSON_MAP.find(code);
-     if (it != CHARLSON_MAP.end()) {
-         // e.g. Myocardial infarction
-         auto wIt = CHARLSON_WEIGHTS.find(it->second);
-         if (wIt != CHARLSON_WEIGHTS.end()) {
-             return wIt->second;
+ /****************************************************
+  * Elixhauser (unchanged from your earlier approach)
+  ****************************************************/
+ // For demonstration, we'll keep the code-based approach 
+ // from your existing script or partial dictionary:
+ static std::map<long long,std::string> SNOMED_TO_ELIXHAUSER = {
+     // Congestive heart failure
+     {88805009,  "Congestive heart failure"},
+     {84114007,  "Congestive heart failure"},
+     // (Truncated for brevity; you'd put the full dictionary here.)
+ };
+ 
+ // We apply the typical van Walraven weighting:
+ static std::map<std::string,int> ELIXHAUSER_CATEGORY_WEIGHTS = {
+     {"Congestive heart failure", 7},
+     {"Cardiac arrhythmias", 5},
+     // ...
+     // etc. from your python script
+ };
+ 
+ /****************************************************
+  * 1) Compute Charlson (dictionary-based)
+  ****************************************************/
+ static void computeCharlsonIndex(const std::vector<ConditionRow> &conds,
+                                  std::unordered_map<std::string,double> &charlsonScore)
+ {
+     // We'll store the best weight for each (patient, category).
+     // i.e., if a patient has multiple codes in the same category,
+     // we only count that category once and take the max weight if needed.
+     // But typically Charlson is "one category = fixed weight".
+     // This approach matches the Python logic of grouping by (PATIENT, category).
+     std::map<std::pair<std::string,std::string>, int> patCatWeight; 
+ 
+     for (auto &c : conds) {
+         // Convert code to a long long
+         long long codeLL=0;
+         try {
+             codeLL = std::stoll(c.CODE);
+         } catch(...) {
+             // if code is not numeric
+             continue;
+         }
+         // Look up category
+         auto it = SNOMED_TO_CHARLSON.find(codeLL);
+         if (it == SNOMED_TO_CHARLSON.end()) {
+             continue; // code not in dictionary
+         }
+         const std::string &category = it->second;
+ 
+         // Category -> weight
+         auto wIt = CHARLSON_CATEGORY_WEIGHTS.find(category);
+         if (wIt == CHARLSON_CATEGORY_WEIGHTS.end()) {
+             continue;
+         }
+         int weight = wIt->second;
+ 
+         auto key = std::make_pair(c.PATIENT, category);
+         auto existing = patCatWeight.find(key);
+         if (existing == patCatWeight.end()) {
+             patCatWeight[key] = weight;
+         } else {
+             // If there's some reason we might want max; typically it's the same weight
+             // but let's do max() to emulate Python's .groupby max
+             patCatWeight[key] = std::max(existing->second, weight);
          }
      }
-     return 0;
- }
- static int getElixWeight(const std::string &code) {
-     auto it = ELIX_MAP.find(code);
-     if (it != ELIX_MAP.end()) {
-         auto wIt = ELIX_WEIGHTS.find(it->second);
-         if (wIt != ELIX_WEIGHTS.end()) {
-             return wIt->second;
-         }
+ 
+     // Now sum across categories for each patient
+     // so patient_cci_sum = sum of each category’s weight
+     for (auto &kv : patCatWeight) {
+         const std::string &patient = kv.first.first;
+         int w = kv.second;
+         charlsonScore[patient] += w;
      }
-     return 0;
  }
  
  /****************************************************
-  * 4) Health Index logic (basic approximation)
+  * 2) Compute Elixhauser
   ****************************************************/
- // SNOMED groups => codes => weights
+ static void computeElixhauserIndex(const std::vector<ConditionRow> &conds,
+                                    std::unordered_map<std::string,double> &elixScore)
+ {
+     // Similar approach: group by (patient, category), take max weight
+     std::map<std::pair<std::string,std::string>, int> patCatWeight;
+ 
+     for (auto &c : conds) {
+         long long codeLL=0;
+         try {
+             codeLL = std::stoll(c.CODE);
+         } catch(...) { continue; }
+         auto it = SNOMED_TO_ELIXHAUSER.find(codeLL);
+         if (it == SNOMED_TO_ELIXHAUSER.end()) {
+             continue;
+         }
+         const std::string &category = it->second;
+         auto wIt = ELIXHAUSER_CATEGORY_WEIGHTS.find(category);
+         if (wIt == ELIXHAUSER_CATEGORY_WEIGHTS.end()) {
+             continue;
+         }
+         int weight = wIt->second;
+ 
+         auto key = std::make_pair(c.PATIENT, category);
+         auto existing = patCatWeight.find(key);
+         if (existing == patCatWeight.end()) {
+             patCatWeight[key] = weight;
+         } else {
+             patCatWeight[key] = std::max(existing->second, weight);
+         }
+     }
+     // sum for each patient
+     for (auto &kv : patCatWeight) {
+         const std::string &patient = kv.first.first;
+         elixScore[patient] += kv.second;
+     }
+ }
+ 
+ /****************************************************
+  * Health Index logic
+  ****************************************************/
+ struct ObsThreshold { double minVal; double maxVal; };
+ static std::map<std::string,ObsThreshold> OBS_THRESHOLDS = {
+     {"Systolic Blood Pressure",{90,120}},
+     {"Body Mass Index",{18.5,24.9}}
+ };
+ static std::map<std::string,std::string> OBS_DESC_MAP = {
+     {"Systolic Blood Pressure","Systolic Blood Pressure"},
+     {"Body mass index (BMI) [Ratio]","Body Mass Index"}
+ };
+ 
+ // We'll define some "groups" => codes => weights for Comorbidity_Score
  static std::map<std::string,std::vector<std::string>> SNOMED_GROUPS = {
      {"Cardiovascular Diseases",{"53741008","445118002","22298006"}},
      {"Respiratory Diseases",   {"19829001","233604007"}},
@@ -449,37 +640,22 @@
      {"Other",                 1.0}
  };
  
- // For observations => abnormal
- struct ObsThreshold { double minVal; double maxVal; };
- static std::map<std::string,ObsThreshold> OBS_THRESHOLDS = {
-     {"Systolic Blood Pressure",{90,120}},
-     {"Body Mass Index",{18.5,24.9}}
-     // You can expand these as needed
- };
- // Maps from internal strings to a "standard" that has thresholds
- static std::map<std::string,std::string> OBS_DESC_MAP = {
-     {"Systolic Blood Pressure","Systolic Blood Pressure"},
-     {"Body mass index (BMI) [Ratio]","Body Mass Index"}
- };
- 
- static double findGroupWeight(const std::string &code) {
-     // Check each named group
+ static double findGroupWeight(const std::string &codeStr) {
+     // We'll do a simplistic check if code is in these groups
      for (auto &kv : SNOMED_GROUPS) {
          for (auto &c : kv.second) {
-             if (c == code) {
+             if (c == codeStr) {
                  return GROUP_WEIGHTS[kv.first];
              }
          }
      }
      return GROUP_WEIGHTS["Other"];
  }
- 
  static bool isAbnormalObs(const std::string &desc, double val) {
-     // If desc matches one of our known obs, check threshold
      auto it = OBS_DESC_MAP.find(desc);
      if (it != OBS_DESC_MAP.end()) {
-         std::string standard = it->second;
-         auto thr = OBS_THRESHOLDS.find(standard);
+         // e.g. "Body Mass Index"
+         auto thr = OBS_THRESHOLDS.find(it->second);
          if (thr != OBS_THRESHOLDS.end()) {
              if (val < thr->second.minVal || val > thr->second.maxVal) {
                  return true;
@@ -489,8 +665,8 @@
      return false;
  }
  
- // A simple formula to mimic the python approach
  static double computeHealthIndex(const PatientRecord &p) {
+     // Same approximate formula as we used before
      double base = 10.0;
      double penalty1 = 0.4 * p.Comorbidity_Score;
      double penalty2 = 1.0 * p.Hospitalizations_Count;
@@ -505,7 +681,7 @@
  }
  
  /****************************************************
-  * 5) Subset Utils
+  * Subset Utils
   ****************************************************/
  static std::set<std::string> findDiabeticPatients(const std::vector<ConditionRow> &conds) {
      std::set<std::string> out;
@@ -530,7 +706,6 @@
      }
      return out;
  }
- 
  static std::vector<PatientRecord> filterSubpopulation(
      const std::vector<PatientRecord> &allP,
      const std::string &subsetType,
@@ -557,22 +732,21 @@
          }
          return sub;
      }
-     // default => entire set
      return allP;
  }
  
  /****************************************************
-  * 6) Feature Utils
+  * Feature Utils
   ****************************************************/
  static std::vector<std::string> getFeatureCols(const std::string &feature_config) {
-     // Base columns from your Python feature_utils:
+     // Base columns
      std::vector<std::string> base = {
          "Id","GENDER","RACE","ETHNICITY","MARITAL",
          "HEALTHCARE_EXPENSES","HEALTHCARE_COVERAGE","INCOME",
          "AGE","DECEASED",
          "Hospitalizations_Count","Medications_Count","Abnormal_Observations_Count"
      };
-     // Now add depending on feature_config
+     // Additional columns based on config
      if (feature_config == "composite") {
          base.push_back("Health_Index");
      } else if (feature_config == "cci") {
@@ -601,54 +775,54 @@
  {
      std::ofstream ofs(outFile);
      if (!ofs.is_open()) {
-         std::cerr << "[ERROR] can't open " << outFile << "\n";
+         std::cerr << "[ERROR] cannot open " << outFile << "\n";
          return;
      }
      // Header
-     for (size_t i = 0; i < cols.size(); i++) {
+     for (size_t i=0; i<cols.size(); i++) {
          ofs << cols[i];
-         if (i + 1 < cols.size()) ofs << ",";
+         if (i+1<cols.size()) ofs << ",";
      }
      ofs << "\n";
  
      for (auto &p : pats) {
-         for (size_t c = 0; c < cols.size(); c++) {
-             if (c > 0) ofs << ",";
-             const auto &col = cols[c];
-             if (col == "Id") {
+         for (size_t c=0; c<cols.size(); c++) {
+             if (c>0) ofs << ",";
+             const auto &col= cols[c];
+             if (col=="Id") {
                  ofs << p.Id;
-             } else if (col == "GENDER") {
+             } else if (col=="GENDER") {
                  ofs << p.GENDER;
-             } else if (col == "RACE") {
+             } else if (col=="RACE") {
                  ofs << p.RACE;
-             } else if (col == "ETHNICITY") {
+             } else if (col=="ETHNICITY") {
                  ofs << p.ETHNICITY;
-             } else if (col == "MARITAL") {
+             } else if (col=="MARITAL") {
                  ofs << p.MARITAL;
-             } else if (col == "HEALTHCARE_EXPENSES") {
+             } else if (col=="HEALTHCARE_EXPENSES") {
                  ofs << p.HEALTHCARE_EXPENSES;
-             } else if (col == "HEALTHCARE_COVERAGE") {
+             } else if (col=="HEALTHCARE_COVERAGE") {
                  ofs << p.HEALTHCARE_COVERAGE;
-             } else if (col == "INCOME") {
+             } else if (col=="INCOME") {
                  ofs << p.INCOME;
-             } else if (col == "AGE") {
+             } else if (col=="AGE") {
                  ofs << p.AGE;
-             } else if (col == "DECEASED") {
-                 ofs << (p.DECEASED ? "1" : "0");
-             } else if (col == "Hospitalizations_Count") {
+             } else if (col=="DECEASED") {
+                 ofs << (p.DECEASED?"1":"0");
+             } else if (col=="Hospitalizations_Count") {
                  ofs << p.Hospitalizations_Count;
-             } else if (col == "Medications_Count") {
+             } else if (col=="Medications_Count") {
                  ofs << p.Medications_Count;
-             } else if (col == "Abnormal_Observations_Count") {
+             } else if (col=="Abnormal_Observations_Count") {
                  ofs << p.Abnormal_Observations_Count;
-             } else if (col == "Health_Index") {
+             } else if (col=="Health_Index") {
                  ofs << p.Health_Index;
-             } else if (col == "CharlsonIndex") {
+             } else if (col=="CharlsonIndex") {
                  ofs << p.CharlsonIndex;
-             } else if (col == "ElixhauserIndex") {
+             } else if (col=="ElixhauserIndex") {
                  ofs << p.ElixhauserIndex;
              } else {
-                 ofs << 0; // fallback
+                 ofs << 0;
              }
          }
          ofs << "\n";
@@ -658,15 +832,15 @@
  }
  
  /****************************************************
-  * 7) Save final data akin to "patient_data_with_all_indices.pkl"
-  *    but in CSV form
+  * Save final data akin to "patient_data_with_all_indices.pkl"
+  * but in CSV form
   ****************************************************/
  static void saveFinalDataCSV(const std::vector<PatientRecord> &pats,
                               const std::string &outfile)
  {
      std::ofstream ofs(outfile);
      if (!ofs.is_open()) {
-         std::cerr << "[ERROR] can't open " << outfile << "\n";
+         std::cerr << "[ERROR] cannot open " << outfile << "\n";
          return;
      }
      ofs << "Id,BIRTHDATE,DEATHDATE,GENDER,RACE,ETHNICITY,"
@@ -693,19 +867,20 @@
  }
  
  /****************************************************
-  * 8) Embedding Python for TabNet Inference
+  * Embedding Python for TabNet Inference
   ****************************************************/
  static bool runPythonInference(const std::string &model_id,
                                 const std::string &csvPath)
  {
-     // We assume a Python script: "tabnet_inference.py"
-     // that takes sys.argv = [script, model_id, csvPath]
-     // loads the TabNet model from e.g. Data/finals/<model_id>/<model_id>_model.zip
-     // reads <csvPath> for features
-     // writes predictions to Data/new_predictions/<model_id>/
-     std::string script = "tabnet_inference.py"; // must exist
+     // We'll assume we have "tabnet_inference.py" that:
+     //   sys.argv = [script, model_id, csvPath]
+     //   loads the TabNet model from Data/finals/<model_id>/<model_id>_model.zip
+     //   reads <csvPath> for features
+     //   writes predictions in Data/new_predictions/<model_id>/...
+     // For details, see the "What Else You Might Need" in the commentary.
+     std::string script = "tabnet_inference.py";
  
-     // Build Python code string that fakes sys.argv and runs the script
+     // Build Python code
      std::ostringstream code;
      code << "import sys, runpy\n"
           << "sys.argv = ['" << script << "', '" << model_id << "', '" << csvPath << "']\n"
@@ -721,7 +896,7 @@
  }
  
  /****************************************************
-  * 9) XAI script
+  * Optional XAI
   ****************************************************/
  static void runExplainability() {
      // If you have final_explain_xai_clustered_lime.py
@@ -746,7 +921,7 @@
      int popSize = 100;
      bool enableXAI = false;
  
-     // parse command line
+     // Parse command line
      for (int i = 1; i < argc; i++) {
          std::string arg = argv[i];
          if (arg.rfind("--population=", 0) == 0) {
@@ -758,11 +933,11 @@
      std::cout << "[INFO] popSize=" << popSize
                << ", XAI=" << (enableXAI ? "true" : "false") << "\n";
  
-     // 1) Generate new data via Synthea
+     // 1) Run Synthea & copy CSV outputs
      runSynthea(popSize);
      copySyntheaOutput();
  
-     // 2) Load entire dataset (both old & diff) for each CSV type
+     // 2) Load entire dataset (old + new)
      std::vector<PatientRecord> allPatients;
      loadPatients(allPatients);
  
@@ -782,42 +957,42 @@
      loadProcedures(procs);
  
      // 3) Compute Charlson & Elixhauser
-     // We'll accumulate them by patient
      std::unordered_map<std::string, double> charlMap, elixMap;
-     for (auto &c : conds) {
-         charlMap[c.PATIENT] += getCharlsonWeight(c.CODE);
-         elixMap[c.PATIENT]  += getElixWeight(c.CODE);
-     }
+     computeCharlsonIndex(conds, charlMap);
+     computeElixhauserIndex(conds, elixMap);
  
      // 4) Additional aggregator logic
-     //    4a) Comorbidity_Score from SNOMED groups
-     std::unordered_map<std::string, double> groupScore;
+     //  (Comorbidity_Score from simpler "groups", Hospitalizations, etc.)
+     // 4a) Comorbidity_Score
+     std::unordered_map<std::string,double> groupScore;
      for (auto &c : conds) {
-         groupScore[c.PATIENT] += findGroupWeight(c.CODE);
+         // We'll treat c.CODE as a string
+         double w = findGroupWeight(c.CODE);
+         groupScore[c.PATIENT] += w;
      }
-     //    4b) Hospitalizations => inpatient
-     std::unordered_map<std::string, int> hospCount;
+     // 4b) Hospitalizations => inpatient
+     std::unordered_map<std::string,int> hospCount;
      for (auto &e : encs) {
          if (e.ENCOUNTERCLASS == "inpatient") {
              hospCount[e.PATIENT]++;
          }
      }
-     //    4c) Distinct medication codes
+     // 4c) Distinct medication codes
      std::unordered_map<std::string, std::set<std::string>> medSet;
      for (auto &m : meds) {
          medSet[m.PATIENT].insert(m.CODE);
      }
-     //    4d) Abnormal observations
-     std::unordered_map<std::string, int> abnMap;
+     // 4d) Abnormal observations
+     std::unordered_map<std::string,int> abnMap;
      for (auto &oRec : obs) {
          if (isAbnormalObs(oRec.DESCRIPTION, oRec.VALUE)) {
              abnMap[oRec.PATIENT]++;
          }
      }
  
-     // 5) Merge into the PatientRecord
-     //    We'll index them by Id for quick updates
-     std::unordered_map<std::string, PatientRecord*> pMap;
+     // 5) Merge into PatientRecord
+     // Index them by Id
+     std::unordered_map<std::string,PatientRecord*> pMap;
      for (auto &p : allPatients) {
          pMap[p.Id] = &p;
      }
@@ -857,11 +1032,11 @@
          p.Health_Index = computeHealthIndex(p);
      }
  
-     // 7) Save final big CSV
+     // 7) Save final big CSV (akin to "patient_data_with_all_indices.pkl", but in CSV)
      std::string finalCSV = DATA_DIR + "/patient_data_with_all_indices.csv";
      saveFinalDataCSV(allPatients, finalCSV);
  
-     // 8) We only run predictions on newly generated patients
+     // 8) Subset to new patients (NewData==true), run predictions for each final model
      std::vector<PatientRecord> newPatients;
      for (auto &p : allPatients) {
          if (p.NewData) {
@@ -873,7 +1048,7 @@
      // Initialize Python
      Py_Initialize();
  
-     // For each final model, filter subset, select features, write CSV, run inference
+     // For each final TabNet model
      for (auto &it : MODEL_CONFIG_MAP) {
          std::string model_id   = it.first;
          std::string subsetType = it.second.subset;
@@ -886,13 +1061,13 @@
          // Filter subpopulation
          auto sub = filterSubpopulation(newPatients, subsetType, conds);
          if (sub.empty()) {
-             std::cout << "[INFO] No new patients belong to subpop=" << subsetType
+             std::cout << "[INFO] No new patients in subpop=" << subsetType
                        << " => skip.\n";
              continue;
          }
-         // Get columns
+         // pick columns
          auto cols = getFeatureCols(featconf);
-         // Write the CSV for inference
+         // write CSV for inference
          std::string outDir = DATA_DIR + "/new_predictions/" + model_id;
          makeDirIfNeeded(DATA_DIR + "/new_predictions");
          makeDirIfNeeded(outDir);
@@ -900,22 +1075,22 @@
          std::string infCSV = outDir + "/input_for_inference.csv";
          writeFeaturesCSV(sub, infCSV, cols);
  
-         // Invoke Python to do TabNet inference
+         // call Python
          bool ok = runPythonInference(model_id, infCSV);
          if (!ok) {
              std::cerr << "[WARN] Inference for " << model_id << " failed.\n";
          }
      }
  
-     // Optionally, run advanced XAI
+     // optionally run XAI
      if (enableXAI) {
          runExplainability();
      }
  
-     // Finalize Python
+     // finalize Python
      Py_Finalize();
  
-     std::cout << "[INFO] Done. Generated new data, merged Charlson/Elixhauser, "
+     std::cout << "[INFO] Done. Generated new data, computed Charlson/Elixhauser, "
                << "computed health index, saved final CSV, ran TabNet, XAI="
                << (enableXAI ? "true" : "false") << ".\n";
      return 0;

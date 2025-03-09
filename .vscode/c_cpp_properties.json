@@ -3,7 +3,9 @@
         {
             "name": "Win32",
             "includePath": [
-                "${workspaceFolder}/**"
+                "${workspaceFolder}/**",
+                // Add the path to Python.h in conda env:
+                "C:/Users/imran/miniconda3/envs/tf_gpu_env/include"
             ],
             "defines": [
                 "_DEBUG",
