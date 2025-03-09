@@ -16,15 +16,12 @@
  *
  * Author: Imran Feisal
  * Date: 08/03/2025
+ * To build the file use command:
+ * cl /EHsc /std:c++17 GenerateAndPredict.cpp ^ /I"C:\Users\imran\miniconda3\envs\tf_gpu_env\include" ^ /link /LIBPATH:"C:\Users\imran\miniconda3\envs\tf_gpu_env\libs" python39.lib /MACHINE:X64
  * Usage: 
- * 
-First go to the directory:
-cd /c/Users/imran/Documents/VITAI
-
-Then run the following command:
-g++ -std=c++17 GenerateAndPredict.cpp -I"C:\Users\imran\miniconda3\envs\tf_gpu_env\include" -L"C:\Users\imran\miniconda3\envs\tf_gpu_env\libs" -lpython39 -o GenerateAndPredict
-
-
+ * GenerateAndPredict.exe --population=100
+ * or
+ * GenerateAndPredict.exe --population=100 --enable-xai
  * 
  *****************************************************/
 
@@ -46,6 +43,8 @@ g++ -std=c++17 GenerateAndPredict.cpp -I"C:\Users\imran\miniconda3\envs\tf_gpu_e
  #include <ctime>
  
  // For CSV parsing (using an external single-header CSV library)
+ // #define CSV_IO_NO_THREAD 
+ #define CSV_IMPLEMENTATION
  #include "csv.hpp"
  
  #ifdef _WIN32
@@ -206,11 +205,13 @@ g++ -std=c++17 GenerateAndPredict.cpp -I"C:\Users\imran\miniconda3\envs\tf_gpu_e
          std::string newName = base + "_diff_" + stamp + ext;
          std::string dst = DATA_DIR + "/" + newName;
  
- #ifdef _WIN32
-         std::string cmd = "copy " + src + " " + dst;
- #else
-         std::string cmd = "cp " + src + " " + dst;
- #endif
+#ifdef _WIN32
+    // Wrap src and dst in quotes to handle spaces/special characters
+    std::string cmd = "copy /Y \"" + src + "\" \"" + dst + "\""; // added Y to force overwrite without prompt
+#else
+    std::string cmd = "cp \"" + src + "\" \"" + dst + "\"";
+#endif
+     
          std::cout << "[INFO] Copying " << src << " => " << dst << "\n";
          int ret = std::system(cmd.c_str());
          if (ret != 0) {
@@ -497,23 +498,157 @@ g++ -std=c++17 GenerateAndPredict.cpp -I"C:\Users\imran\miniconda3\envs\tf_gpu_e
  };
  
  /****************************************************
-  * Elixhauser (unchanged from your earlier approach)
+  * Elixhauser (unchanged from earlier approach)
   ****************************************************/
- // For demonstration, we'll keep the code-based approach 
- // from your existing script or partial dictionary:
- static std::map<long long,std::string> SNOMED_TO_ELIXHAUSER = {
-     // Congestive heart failure
-     {88805009,  "Congestive heart failure"},
-     {84114007,  "Congestive heart failure"},
-     // (Truncated for brevity; you'd put the full dictionary here.)
- };
+ static std::map<long long, std::string> SNOMED_TO_ELIXHAUSER = {
+    // Congestive Heart Failure
+    {88805009,  "Congestive heart failure"},
+    {84114007,  "Congestive heart failure"},
+
+    // Cardiac Arrhythmias
+    {49436004,  "Cardiac arrhythmias"},
+
+    // Valvular Disease
+    {48724000,  "Valvular disease"},
+    {91434003,  "Pulmonic valve regurgitation"},
+    {79619009,  "Mitral valve stenosis"},
+    {111287006, "Tricuspid valve regurgitation"},
+    {49915006,  "Tricuspid valve stenosis"},
+    {60573004,  "Aortic valve stenosis"},
+    {60234000,  "Aortic valve regurgitation"},
+
+    // Pulmonary Circulation Disorders
+    {65710008,  "Pulmonary circulation disorders"},
+    {706870000, "Acute pulmonary embolism"},
+    {67782005,  "Acute respiratory distress syndrome"},
+
+    // Peripheral Vascular Disorders
+    // NOTE: Overwritten by the next entry in the Python dictionary (key repeated)
+    // {698754002, "Peripheral vascular disorders"},
+
+    // Hypertension
+    {59621000,  "Hypertension, uncomplicated"},
+
+    // Paralysis
+    // Overwrites the earlier "Peripheral vascular disorders" for 698754002
+    {698754002, "Paralysis"},
+    {128188000, "Paralysis"},
+
+    // Other Neurological Disorders
+    // NOTE: Overwritten by the next entry in the Python dictionary (key repeated)
+    // {69896004,  "Other neurological disorders"},
+    {128613002, "Seizure disorder"},
+
+    // Chronic Pulmonary Disease
+    {195967001, "Chronic pulmonary disease"},
+    {233678006, "Chronic pulmonary disease"},
+
+    // Diabetes, Complicated
+    {368581000119106, "Diabetes, complicated"},
+    {422034002,        "Diabetes, complicated"},
+    {90781000119102,   "Diabetes, complicated"},
+
+    // Diabetes, Uncomplicated
+    {44054006,  "Diabetes, uncomplicated"},
+
+    // Renal Failure
+    {129721000119106, "Renal failure"},
+    {433144002,       "Renal failure"},
+
+    // Liver Disease
+    {128302006, "Liver disease"},
+    {61977001,  "Liver disease"},
+
+    // Peptic Ulcer Disease
+    // (Not identified in the dataset)
+
+    // AIDS/HIV
+    {62479008,  "AIDS/HIV"},
+    {86406008,  "AIDS/HIV"},
+
+    // Lymphoma
+    {93143009,  "Lymphoma"},
+
+    // Metastatic Cancer
+    {94503003,  "Metastatic cancer"},
+    {94260004,  "Metastatic cancer"},
+
+    // Solid Tumour Without Metastasis
+    {126906006, "Solid tumour without metastasis"},
+    {254637007, "Solid tumour without metastasis"},
+
+    // Rheumatoid Arthritis / Collagen Vascular Diseases
+    // Overwrites the earlier "Other neurological disorders" for 69896004
+    {69896004,  "Rheumatoid arthritis/collagen vascular diseases"},
+    {200936003, "Rheumatoid arthritis/collagen vascular diseases"},
+
+    // Coagulopathy
+    {234466008, "Coagulopathy"},
+
+    // Obesity
+    {408512008, "Obesity"},
+    {162864005, "Obesity"},
+
+    // Weight Loss
+    {278860009, "Weight loss"},
+
+    // Fluid and Electrolyte Disorders
+    {389087006, "Fluid and electrolyte disorders"},
+
+    // Blood Loss Anaemia
+    // (Not identified in the dataset)
+
+    // Deficiency Anaemias
+    {271737000, "Deficiency anaemias"},
+
+    // Alcohol Abuse
+    {7200002,   "Alcohol abuse"},
+
+    // Drug Abuse
+    {6525002,   "Drug abuse"},
+
+    // Psychoses
+    {47505003,  "Psychoses"},
+
+    // Depression
+    {370143000, "Depression"},
+    {36923009,  "Depression"}
+};
+
  
  // We apply the typical van Walraven weighting:
  static std::map<std::string,int> ELIXHAUSER_CATEGORY_WEIGHTS = {
-     {"Congestive heart failure", 7},
-     {"Cardiac arrhythmias", 5},
-     // ...
-     // etc. from your python script
+    {"Congestive heart failure", 7},
+    {"Cardiac arrhythmias", 5},
+    {"Valvular disease", 4},
+    {"Pulmonary circulation disorders", 6},
+    {"Peripheral vascular disorders", 2},
+    {"Hypertension, uncomplicated", -1},
+    {"Hypertension, complicated", 0},
+    {"Paralysis", 7},
+    {"Other neurological disorders", 6},
+    {"Chronic pulmonary disease", 3},
+    {"Diabetes, uncomplicated", 0},
+    {"Diabetes, complicated", 7},
+    {"Hypothyroidism", 0},
+    {"Renal failure", 5},
+    {"Liver disease", 11},
+    {"Peptic ulcer disease", 0},
+    {"AIDS/HIV", 0},
+    {"Lymphoma", 9},
+    {"Metastatic cancer", 14},
+    {"Solid tumour without metastasis", 8},
+    {"Rheumatoid arthritis/collagen vascular diseases", 4},
+    {"Coagulopathy", 11},
+    {"Obesity", 0},
+    {"Weight loss", 6},
+    {"Fluid and electrolyte disorders", 5},
+    {"Blood loss anaemia", 3},
+    {"Deficiency anaemias", 0},
+    {"Alcohol abuse", 0},
+    {"Drug abuse", 0},
+    {"Psychoses", 0},
+    {"Depression", -3}
  };
  
  /****************************************************
@@ -1044,7 +1179,11 @@ g++ -std=c++17 GenerateAndPredict.cpp -I"C:\Users\imran\miniconda3\envs\tf_gpu_e
          }
      }
      std::cout << "[INFO] Found " << newPatients.size() << " newly generated patients.\n";
- 
+     
+     // Need to set python home - causing errors I don't know why
+
+     Py_SetPythonHome(L"C:\\Users\\imran\\miniconda3\\envs\\tf_gpu_env");
+
      // Initialize Python
      Py_Initialize();
  
