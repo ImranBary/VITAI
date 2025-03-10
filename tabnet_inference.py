@@ -9,11 +9,12 @@ from pytorch_tabnet.tab_model import TabNetRegressor
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 import matplotlib.pyplot as plt
 import seaborn as sns
+import torch
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-def load_model_artifacts(model_id):
+def load_model_artifacts(model_id, force_cpu=False):
     """Load the TabNet model and any associated artifacts (e.g., scaler)"""
     model_dir = os.path.join("Data","finals", model_id)
     model_file = os.path.join(model_dir, f"{model_id}_model.zip")
@@ -24,15 +25,40 @@ def load_model_artifacts(model_id):
     
     # Load the model
     regressor = TabNetRegressor()
-    regressor.load_model(model_file)
-    logger.info(f"Loaded TabNet model from {model_file}")
+    
+    # Force CPU if requested
+    if force_cpu:
+        os.environ['CUDA_VISIBLE_DEVICES'] = ''
+        logger.info("Forcing CPU usage for inference")
+        
+    # Set up PyTorch to catch device-side errors better
+    if torch.cuda.is_available() and not force_cpu:
+        # Enable device-side assertions where possible
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        logger.info("CUDA is available - with enhanced error checking")
+    else:
+        logger.info("Using CPU for inference")
+    
+    # Check if the model dimensions match the expected shape
+    try:
+        regressor.load_model(model_file)
+        logger.info(f"Loaded TabNet model from {model_file}")
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        sys.exit(1)
     
     # Check for scaler
     scaler_file = os.path.join(model_dir, f"{model_id}_scaler.joblib")
     scaler = None
     if os.path.exists(scaler_file):
-        scaler = joblib.load(scaler_file)
-        logger.info(f"Loaded feature scaler from {scaler_file}")
+        try:
+            scaler = joblib.load(scaler_file)
+            logger.info(f"Loaded feature scaler from {scaler_file}")
+        except Exception as e:
+            logger.warning(f"Failed to load scaler: {e}. Will create a new one.")
+            scaler = None
     
     return regressor, scaler
 
@@ -62,6 +88,15 @@ def preprocess_features(df, model_id):
         'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count'
     ]
     
+    # Special handling for combined models
+    if "combined" in model_id:
+        if "all" in model_id:
+            continuous_columns.extend(['Health_Index', 'CharlsonIndex', 'ElixhauserIndex'])
+        elif "eci" in model_id:
+            continuous_columns.extend(['Health_Index', 'ElixhauserIndex'])
+        else:
+            continuous_columns.extend(['Health_Index', 'CharlsonIndex'])
+    
     # Make a copy to avoid modifying the original dataframe
     features = df.copy()
     
@@ -70,6 +105,11 @@ def preprocess_features(df, model_id):
                    if col not in features.columns]
     if missing_cols:
         logger.warning(f"Missing columns in input data: {missing_cols}")
+        logger.info(f"Available columns: {features.columns.tolist()}")
+    
+    # Remove any missing columns from our processing lists
+    categorical_columns = [col for col in categorical_columns if col in features.columns]
+    continuous_columns = [col for col in continuous_columns if col in features.columns]
     
     # Convert binary columns
     if 'DECEASED' in features.columns:
@@ -86,36 +126,49 @@ def preprocess_features(df, model_id):
     scaler_file = os.path.join(model_dir, f"{model_id}_scaler.joblib")
     
     if os.path.exists(scaler_file):
-        scaler = joblib.load(scaler_file)
-        logger.info(f"Using saved scaler: {scaler_file}")
+        try:
+            scaler = joblib.load(scaler_file)
+            logger.info(f"Using saved scaler: {scaler_file}")
+        except Exception as e:
+            logger.warning(f"Error loading scaler: {e}. Creating new scaler.")
+            scaler = StandardScaler()
+            # Fit the scaler on the available columns
+            if continuous_columns:
+                features[continuous_columns] = scaler.fit_transform(features[continuous_columns])
     else:
         logger.warning(f"No saved scaler found at {scaler_file}, performing standard scaling")
         scaler = StandardScaler()
-        existing_cont_cols = [col for col in continuous_columns if col in features.columns]
-        if existing_cont_cols:
-            features[existing_cont_cols] = scaler.fit_transform(features[existing_cont_cols])
+        # Fit the scaler on the available columns
+        if continuous_columns:
+            features[continuous_columns] = scaler.fit_transform(features[continuous_columns])
     
     # Apply scaling to continuous columns
-    existing_cont_cols = [col for col in continuous_columns if col in features.columns]
-    if existing_cont_cols:
-        features[existing_cont_cols] = scaler.transform(features[existing_cont_cols])
+    if continuous_columns:
+        features[continuous_columns] = scaler.transform(features[continuous_columns])
     
     # Fill missing values
     features.fillna(0, inplace=True)
     
     # Select only relevant columns for inference
-    relevant_cols = [col for col in categorical_columns + continuous_columns 
-                    if col in features.columns]
+    relevant_cols = categorical_columns + continuous_columns
+    
+    # Validate that we have features to work with
+    if not relevant_cols:
+        logger.error("No valid features found for inference!")
+        sys.exit(1)
+    
+    logger.info(f"Processed features: {len(relevant_cols)} columns")
     
     return patient_ids, features[relevant_cols]
 
 def main():
     if len(sys.argv) < 3:
-        logger.error("Usage: python tabnet_inference.py <model_id> <csv_for_inference>")
+        logger.error("Usage: python tabnet_inference.py <model_id> <csv_for_inference> [--force-cpu]")
         sys.exit(1)
 
     model_id = sys.argv[1]
     csv_path = sys.argv[2]
+    force_cpu = "--force-cpu" in sys.argv
     
     if not os.path.exists(csv_path):
         logger.error(f"Input CSV file not found: {csv_path}")
@@ -130,15 +183,41 @@ def main():
         sys.exit(1)
     
     # Load model
-    regressor, _ = load_model_artifacts(model_id)
+    regressor, _ = load_model_artifacts(model_id, force_cpu)
     
     # Preprocess features
     patient_ids, X = preprocess_features(df, model_id)
     
-    # Run inference
+    # Check dimensions
+    feature_count = X.shape[1]
+    logger.info(f"Feature shape: {X.shape}")
+    
+    if feature_count < 7:  # Basic sanity check
+        logger.error(f"Feature count too low: {feature_count}. Expected at least 7 features.")
+        sys.exit(1)
+    
+    # Run inference with proper error handling
     try:
-        logger.info(f"Running inference with feature shape: {X.shape}")
-        preds = regressor.predict(X.values).flatten()
+        # Convert to numpy explicitly to avoid CUDA errors with certain dataframe formats
+        X_values = X.values.astype(np.float32)
+        logger.info(f"Running inference with feature shape: {X_values.shape}")
+        
+        try:
+            # Try inference with a small batch first as a test
+            if len(X_values) > 1:
+                test_pred = regressor.predict(X_values[:1]).flatten()
+                logger.info(f"Test prediction successful: {test_pred}")
+        except Exception as e:
+            if "CUDA" in str(e):
+                logger.warning(f"CUDA error in test prediction: {e}. Falling back to CPU.")
+                # Force CPU by setting environment variable
+                os.environ["CUDA_VISIBLE_DEVICES"] = ""
+                # Reload model in CPU mode
+                regressor = TabNetRegressor(device_name='cpu')
+                regressor.load_model(os.path.join("Data","finals", model_id, f"{model_id}_model.zip"))
+        
+        # Now do the full prediction
+        preds = regressor.predict(X_values).flatten()
         logger.info(f"Successfully generated {len(preds)} predictions")
     except Exception as e:
         logger.error(f"Inference error: {str(e)}")

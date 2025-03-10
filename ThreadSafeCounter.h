@@ -1,73 +1,124 @@
 #pragma once
 
 #include <unordered_map>
-#include <string>
+#include <shared_mutex>
 #include <mutex>
-#include <cstdint>
-#include <shared_mutex> // For read-write lock
+#include <string>
+#include <atomic>
+#include <vector>
+#include <thread>
+#include <memory>
 
-/**
- * ThreadSafeCounter
- * 
- * - Enhanced version with read/write lock for better concurrency
- * - Manages float counters (e.g., Charlson scores) and
- *   int counters (e.g., hospitalizations) safely under multiple threads.
- * - Uses shared_mutex for read-heavy workloads to improve performance
- */
+// A thread-safe counter optimized for high-concurrency scenarios
 class ThreadSafeCounter {
 private:
-    mutable std::shared_mutex mapMutex; // Read-write lock for better concurrency
-    std::unordered_map<std::string, float> floatValues;
-    std::unordered_map<std::string, uint16_t> intValues;
-
-    // Optional - to reduce hash map contention with many threads
-    static constexpr size_t SHARD_COUNT = 16;
-    mutable std::shared_mutex shardMutexes[SHARD_COUNT];
+    class Shard {
+    public:
+        std::shared_mutex mutex;
+        std::unordered_map<std::string, float> counters;
+        std::unordered_map<std::string, uint16_t> intCounters;
+        
+        // Add move constructor to allow unique_ptr to work with this class
+        Shard() = default;
+        Shard(Shard&&) noexcept = default;
+        Shard& operator=(Shard&&) noexcept = default;
+        
+        // Delete copy operations since shared_mutex is not copyable
+        Shard(const Shard&) = delete;
+        Shard& operator=(const Shard&) = delete;
+    };
     
-    // Simple hash function to determine shard
-    size_t getShardIndex(const std::string& key) const {
-        return std::hash<std::string>{}(key) % SHARD_COUNT;
+    // Change vector to store unique_ptr to Shard
+    std::vector<std::unique_ptr<Shard>> shards;
+    size_t numShards;
+    
+    // Hash function to distribute keys across shards
+    size_t getShard(const std::string& key) const {
+        std::hash<std::string> hasher;
+        return hasher(key) % numShards;
     }
 
 public:
-    // Increment a float value by 'value' (write operation)
-    void addFloat(const std::string &key, float value) {
-        size_t shardIdx = getShardIndex(key);
-        std::unique_lock<std::shared_mutex> lock(shardMutexes[shardIdx]);
-        floatValues[key] += value;
-    }
-
-    // Increment an int value by 'value' (write operation)
-    void addInt(const std::string &key, uint16_t value) {
-        size_t shardIdx = getShardIndex(key);
-        std::unique_lock<std::shared_mutex> lock(shardMutexes[shardIdx]);
-        intValues[key] += value;
-    }
-
-    // Get the float total for a key (read operation - now uses shared lock)
-    float getFloat(const std::string &key) const {
-        size_t shardIdx = getShardIndex(key);
-        std::shared_lock<std::shared_mutex> lock(shardMutexes[shardIdx]);
-        auto it = floatValues.find(key);
-        return (it == floatValues.end()) ? 0.0f : it->second;
-    }
-
-    // Get the int total for a key (read operation - now uses shared lock)
-    uint16_t getInt(const std::string &key) const {
-        size_t shardIdx = getShardIndex(key);
-        std::shared_lock<std::shared_mutex> lock(shardMutexes[shardIdx]);
-        auto it = intValues.find(key);
-        return (it == intValues.end()) ? 0 : it->second;
+    ThreadSafeCounter(size_t shardCount = 16) : numShards(shardCount) {
+        // Initialize shards with unique_ptr
+        shards.resize(numShards);
+        for (size_t i = 0; i < numShards; i++) {
+            shards[i] = std::make_unique<Shard>();
+        }
     }
     
-    // Batch processing - acquire all data at once to reduce lock contention
-    std::unordered_map<std::string, float> getAllFloats() const {
-        std::shared_lock<std::shared_mutex> lock(mapMutex);
-        return floatValues;
+    // Methods that access shards need to be updated to use -> instead of . for pointer access
+    void increment(const std::string& key) {
+        size_t shardIdx = getShard(key);
+        std::unique_lock<std::shared_mutex> lock(shards[shardIdx]->mutex);
+        shards[shardIdx]->counters[key] += 1.0f;
     }
     
-    std::unordered_map<std::string, uint16_t> getAllInts() const {
-        std::shared_lock<std::shared_mutex> lock(mapMutex);
-        return intValues;
+    void add(const std::string& key, float value) {
+        size_t shardIdx = getShard(key);
+        std::unique_lock<std::shared_mutex> lock(shards[shardIdx]->mutex);
+        shards[shardIdx]->counters[key] += value;
+    }
+    
+    void add(const std::string& key, uint16_t value) {
+        size_t shardIdx = getShard(key);
+        std::unique_lock<std::shared_mutex> lock(shards[shardIdx]->mutex);
+        shards[shardIdx]->intCounters[key] += value;
+    }
+
+    void addInt(const std::string& key, uint16_t value) {
+        size_t shardIdx = getShard(key);
+        std::unique_lock<std::shared_mutex> lock(shards[shardIdx]->mutex);
+        shards[shardIdx]->intCounters[key] += value;
+    }
+    
+    float getFloat(const std::string& key) const {
+        size_t shardIdx = getShard(key);
+        std::shared_lock<std::shared_mutex> lock(shards[shardIdx]->mutex);
+        auto it = shards[shardIdx]->counters.find(key);
+        if (it != shards[shardIdx]->counters.end()) {
+            return it->second;
+        }
+        return 0.0f;
+    }
+    
+    uint16_t getInt(const std::string& key) const {
+        size_t shardIdx = getShard(key);
+        std::shared_lock<std::shared_mutex> lock(shards[shardIdx]->mutex);
+        auto it = shards[shardIdx]->intCounters.find(key);
+        if (it != shards[shardIdx]->intCounters.end()) {
+            return it->second;
+        }
+        return 0;
+    }
+    
+    void bulkAdd(const std::unordered_map<std::string, float>& updates) {
+        // Group updates by shard to minimize lock contention
+        std::vector<std::unordered_map<std::string, float>> shardUpdates(numShards);
+        
+        for (const auto& [key, value] : updates) {
+            size_t shardIdx = getShard(key);
+            shardUpdates[shardIdx][key] = value;
+        }
+        
+        // Apply updates to each shard with appropriate locking
+        for (size_t i = 0; i < numShards; i++) {
+            if (!shardUpdates[i].empty()) {
+                std::unique_lock<std::shared_mutex> lock(shards[i]->mutex);
+                for (const auto& [key, value] : shardUpdates[i]) {
+                    shards[i]->counters[key] += value;
+                }
+            }
+        }
+    }
+    
+    // Pre-allocate space in each shard for expected number of entries
+    void reserve(size_t expectedEntries) {
+        size_t entriesPerShard = (expectedEntries + numShards - 1) / numShards;
+        for (size_t i = 0; i < numShards; i++) {
+            std::unique_lock<std::shared_mutex> lock(shards[i]->mutex);
+            shards[i]->counters.reserve(entriesPerShard);
+            shards[i]->intCounters.reserve(entriesPerShard);
+        }
     }
 };
