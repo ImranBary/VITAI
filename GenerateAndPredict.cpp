@@ -233,7 +233,7 @@ public:
         : m_memoryUtilizationTarget(memoryUtilizationTarget), 
           m_cpuUtilizationTarget(cpuUtilizationTarget),
           m_lastCheck(std::chrono::high_resolution_clock::now()),
-          m_updateInterval(std::chrono::milliseconds(500)), // More frequent updates (was 2 seconds)
+          m_updateInterval(std::chrono::seconds(5)), // Less frequent updates (was 500ms)
           m_aggressiveScaling(PERFORMANCE_MODE),
           m_extremeScaling(EXTREME_PERFORMANCE)
     {
@@ -281,25 +281,25 @@ public:
         
         // Log resource utilization less frequently to reduce console spam
         static int updateCounter = 0;
-        if (++updateCounter % 10 == 0) {
+        if (++updateCounter % 3 == 0) {  // Even less frequent logging
             std::cout << "[RESOURCE] Memory: " << m_availableMemoryMB << "MB/" << m_totalMemoryMB 
                     << "MB (" << (m_availableMemoryMB*100.0/m_totalMemoryMB) << "% free), "
                     << "CPU: " << (m_cpuUsage*100.0) << "% utilized" << std::endl;
         }
                   
-        // Dynamically adjust targets if we're underutilizing resources
+        // Looser conditions for scaling up
         if (m_aggressiveScaling || m_extremeScaling) {
-            // If CPU usage is still low, gradually increase our target
-            if (m_cpuUsage < m_cpuUtilizationTarget * 0.5f && m_cpuUtilizationTarget < 0.99f) {
-                float increment = m_extremeScaling ? 0.10f : 0.05f;
+            // If CPU usage is below 80% of target, gradually increase our target
+            if (m_cpuUsage < m_cpuUtilizationTarget * 0.8f && m_cpuUtilizationTarget < 0.99f) {
+                float increment = m_extremeScaling ? 0.2f : 0.15f;  // More aggressive increments
                 m_cpuUtilizationTarget = std::min(0.99f, m_cpuUtilizationTarget + increment);
                 std::cout << "[RESOURCE] Dynamically increasing CPU target to " << (m_cpuUtilizationTarget * 100) << "%\n";
             }
             
-            // If memory usage is still low, gradually increase our target
-            if ((static_cast<float>(m_availableMemoryMB) / m_totalMemoryMB) > 0.3f && m_memoryUtilizationTarget < 0.95f) {
-                float increment = m_extremeScaling ? 0.10f : 0.05f;
-                m_memoryUtilizationTarget = std::min(0.95f, m_memoryUtilizationTarget + increment);
+            // If memory usage is below 50% of target, more aggressively increase target
+            if ((static_cast<float>(m_availableMemoryMB) / m_totalMemoryMB) > 0.5f && m_memoryUtilizationTarget < 0.90f) {
+                float increment = m_extremeScaling ? 0.2f : 0.15f;  // More aggressive increments
+                m_memoryUtilizationTarget = std::min(0.90f, m_memoryUtilizationTarget + increment);
                 std::cout << "[RESOURCE] Dynamically increasing memory target to " << (m_memoryUtilizationTarget * 100) << "%\n";
             }
         }
@@ -307,14 +307,17 @@ public:
 
     size_t getOptimalBatchSize(size_t fileSize = 0) {
         update();
-        // Start with default batch size
-        size_t optimalBatchSize = DEFAULT_CSV_BATCH_SIZE;
+        // Start with a larger default batch size
+        size_t optimalBatchSize = DEFAULT_CSV_BATCH_SIZE * 2;  // Double the starting point
         
-        // File-size aware batch sizing
+        // File-size aware batch sizing - more aggressive scaling
         if (fileSize > 0) {
             // Adjust based on file size - larger files need larger batches
             float fileSizeGB = fileSize / (1024.0f * 1024.0f * 1024.0f);
             if (fileSizeGB > 1.0f) { // For files > 1GB
+                optimalBatchSize = static_cast<size_t>(optimalBatchSize * (1.0f + fileSizeGB * 4.0f));  // 4x multiplier instead of 2x
+                std::cout << "[BATCH] File size based adjustment: " << optimalBatchSize << " rows\n";
+            } else if (fileSizeGB > 0.1f) { // For files > 100MB
                 optimalBatchSize = static_cast<size_t>(optimalBatchSize * (1.0f + fileSizeGB * 2.0f));
                 std::cout << "[BATCH] File size based adjustment: " << optimalBatchSize << " rows\n";
             }
@@ -367,7 +370,7 @@ public:
             else
                 scaleFactor += 1.0f * availableRatio;
                 
-            return static_cast<unsigned int>(baseThreadCount * scaleFactor);
+            return static_cast<unsigned int>(baseThreadCount * scaleFactor);;
         } else {
             // If CPU is overloaded, reduce threads but less aggressively in performance mode
             float overuseRatio = (m_cpuUsage - m_cpuUtilizationTarget) / (1.0f - m_cpuUtilizationTarget);
@@ -475,48 +478,6 @@ public:
         idealThreadCount = newSize;
     }
     
-    // Try to dispose of excess threads when pool is idle
-    void tryScaleDown() {
-        if (workers.size() <= idealThreadCount) return;
-        
-        // Only attempt scale down if queue is empty and most threads are idle
-        if (tasks.empty() && activeThreads < workers.size() / 2) {
-            std::cout << "[THREADS] Scaling down pool from " << workers.size() 
-                      << " to " << idealThreadCount << " threads\n";
-                       
-            // Create temporary vector of threads to dispose
-            std::vector<std::thread> threadsToDispose;
-            size_t numToDispose = workers.size() - idealThreadCount;
-            
-            // Stop the threads we want to dispose
-            {
-                std::unique_lock<std::mutex> lock(queue_mutex);
-                // Signal threads to stop (they'll exit when they next check for work)
-                stop = true;
-            }
-            condition.notify_all();
-            
-            // Move excess threads to disposal vector
-            for (size_t i = 0; i < numToDispose && !workers.empty(); ++i) {
-                threadsToDispose.push_back(std::move(workers.back()));
-                workers.pop_back();
-            }
-            
-            // Join and destroy the threads
-            for (std::thread& thread : threadsToDispose) {
-                if (thread.joinable()) thread.join();
-            }
-            
-            // Reset stop flag for remaining threads
-            {
-                std::unique_lock<std::mutex> lock(queue_mutex);
-                stop = false;
-            }
-            
-            std::cout << "[THREADS] Pool scaled down to " << workers.size() << " threads\n";
-        }
-    }
-
     template<class F, class... Args>
     auto enqueue(F&& f, Args&&... args)
       -> std::future<typename std::invoke_result<F, Args...>::type>
@@ -535,11 +496,11 @@ public:
         }
         condition.notify_one();
         
-        // Scale up if queue is getting too large compared to thread count
-        if (tasks.size() > workers.size() * 2) {
+        // More aggressive scaling: check queue depth relative to worker count
+        if (tasks.size() > workers.size()) {  // Changed from 2x to 1x for faster scaling
             unsigned int optimalThreads = static_cast<unsigned int>(std::min(
-                workers.size() * 1.5, // 50% increase
-                static_cast<double>(std::thread::hardware_concurrency() * 4) // Cap at 4x cores
+                workers.size() * 2.0, // 100% increase (changed from 50%)
+                static_cast<double>(std::thread::hardware_concurrency() * 6) // Cap at 6x cores (increased from 4x)
             ));
             scaleThreadPool(optimalThreads);
         }
@@ -619,6 +580,77 @@ public:
         return workers.size();
     }
 
+    // New method to scale up thread count based on CPU underutilization
+    void scaleUp(size_t newSize) {
+        if (newSize <= workers.size()) return;
+        
+        std::cout << "[THREADS] Scaling up thread pool: " << workers.size() << " → " << newSize << "\n";
+        
+        for (size_t i = workers.size(); i < newSize; ++i) {
+            workers.emplace_back([this] {
+                while (true) {
+                    std::function<void()> task;
+                    {   // Acquire lock and wait for a task
+                        std::unique_lock<std::mutex> lock(queue_mutex);
+                        condition.wait(lock, [this]{ return stop || !tasks.empty(); });
+                        if (stop && tasks.empty())
+                            return;
+                        task = std::move(tasks.front());
+                        tasks.pop();
+                    }
+                    // Track active threads for monitoring
+                    activeThreads++;
+                    // Execute task
+                    task();
+                    activeThreads--;
+                }
+            });
+        }
+        idealThreadCount = newSize;
+    }
+
+    // Modified tryScaleDown that only scales down when conditions are right
+    void tryScaleDown() {
+        if (workers.size() <= idealThreadCount) return;
+        
+        // Only scale down if queue is *nearly* empty (less than 20% of worker count)
+        // and most threads are idle (80% or more)
+        if (tasks.size() < workers.size() * 0.2 && activeThreads < workers.size() * 0.2) {
+            std::cout << "[THREADS] Scaling down pool from " << workers.size() 
+                      << " to " << idealThreadCount << " threads\n";
+                      
+            // Create temporary vector of threads to dispose
+            std::vector<std::thread> threadsToDispose;
+            size_t numToDispose = workers.size() - idealThreadCount;
+            
+            // Stop the threads we want to dispose
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                stop = true;
+            }
+            condition.notify_all();
+            
+            // Move excess threads to disposal vector
+            for (size_t i = 0; i < numToDispose && !workers.empty(); ++i) {
+                threadsToDispose.push_back(std::move(workers.back()));
+                workers.pop_back();
+            }
+            
+            // Join and destroy the threads
+            for (std::thread& thread : threadsToDispose) {
+                if (thread.joinable()) thread.join();
+            }
+            
+            // Reset stop flag for remaining threads
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                stop = false;
+            }
+            
+            std::cout << "[THREADS] Pool scaled down to " << workers.size() << " threads\n";
+        }
+    }
+
 private:
     std::vector<std::thread> workers;
     std::queue<std::function<void()>> tasks;
@@ -634,47 +666,25 @@ private:
 // Parallel file processing helper
 template<typename FileProcessor>
 static void processFilesInParallel(const std::vector<std::string>& files, FileProcessor processor) {
-    ThreadPool pool(THREAD_COUNT);
+    // Increase initial thread count to 1.5x hardware concurrency
+    unsigned int initialThreadCount = static_cast<unsigned int>(std::thread::hardware_concurrency() * 1.5);
+    ThreadPool pool(std::max(THREAD_COUNT, initialThreadCount));
     std::vector<std::future<void>> results;
     ResourceMonitor localMonitor(memoryUtilTarget, cpuUtilTarget);
-
-    // Submit initial batch of tasks
-    size_t initialBatch = std::min(files.size(), static_cast<size_t>(THREAD_COUNT * 2));
-    for (size_t i = 0; i < initialBatch; i++) {
+    
+    // Queue all tasks at once for immediate CPU utilization
+    for (size_t i = 0; i < files.size(); i++) {
         results.emplace_back(pool.enqueue(processor, files[i]));
     }
     
-    // Dynamically submit remaining files based on resource utilization
-    size_t nextFile = initialBatch;
-    while (nextFile < files.size()) {
-        // Check resource utilization
-        localMonitor.update();
-        
-        // If we have capacity, add more files to process
-        if (pool.queueSize() < THREAD_COUNT && 
-            localMonitor.getCurrentMemoryUtilization() < memoryUtilTarget) {
-            
-            size_t batchToAdd = std::min(
-                files.size() - nextFile,
-                static_cast<size_t>(THREAD_COUNT - pool.queueSize())
-            );
-            
-            if (PERFORMANCE_MODE) {
-                // In performance mode, add larger batches
-                batchToAdd = std::min(files.size() - nextFile, batchToAdd * 2);
-            }
-            
-            for (size_t i = 0; i < batchToAdd; i++, nextFile++) {
-                if (nextFile < files.size()) {
-                    results.emplace_back(pool.enqueue(processor, files[nextFile]));
-                }
-            }
-        }
-        
-        // Small delay to prevent busy wait
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // After queuing everything, check if we should scale up based on resource utilization
+    localMonitor.update();
+    if (localMonitor.getCurrentMemoryUtilization() < memoryUtilTarget * 0.8) {
+        // Memory usage is well below target, consider scaling up aggressively
+        unsigned int scaledThreads = pool.getTotalThreadCount() * 1.5;
+        pool.scaleUp(scaledThreads);
     }
-
+    
     for (auto &result : results) {
         result.get();
     }
@@ -1701,11 +1711,6 @@ static void processPatientsInBatches(const std::string &path,
                 if (!val.empty()) p.HEALTHCARE_EXPENSES = std::stof(val);
                 
                 val = getValue("HEALTHCARE_COVERAGE");
-                if (!val.empty()) p.HEALTHCARE_COVERAGE = std::stof(val);
-                
-                val = getValue("INCOME");
-                if (!val.empty()) p.INCOME = std::stof(val);
-                
                 // Calculate age if birthdate is available
                 if (!p.BIRTHDATE.empty() && p.BIRTHDATE != "NaN") {
                     // Simple age calculation (could be enhanced)
