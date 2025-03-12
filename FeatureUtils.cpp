@@ -33,58 +33,39 @@ std::vector<std::string> getFeatureCols(const std::string& featureConfig) {
 
 // Writes patient features to a CSV file based on specified feature columns
 void writeFeaturesCSV(const std::vector<PatientRecord>& patients, 
-                      const std::string& filename, 
-                      const std::vector<std::string>& features) {
-    std::cout << "[INFO] Writing features to CSV file: " << filename << std::endl;
+                      const std::string& filename,
+                      const std::vector<std::string>& columns) {
+    std::cout << "[INFO] Writing features to CSV file: " << filename << "\n";
     
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "[ERROR] Could not open file for writing: " << filename << std::endl;
+    // Convert column names to lowercase for model compatibility
+    std::vector<std::string> lowercaseColumns = convertFeatureNamesToLowercase(columns);
+    
+    std::ofstream outFile(filename);
+    if (!outFile.is_open()) {
+        std::cerr << "[ERROR] Could not open file for writing: " << filename << "\n";
         return;
     }
     
-    // Write header
-    for (size_t i = 0; i < features.size(); ++i) {
-        file << features[i];
-        if (i < features.size() - 1) file << ",";
+    // Write header with lowercase column names
+    outFile << "Id";
+    for (const auto& col : lowercaseColumns) {
+        outFile << "," << col;
     }
-    file << "\n";
+    outFile << "\n";
     
-    // Write data
-    for (const auto& patient : patients) {
-        for (size_t i = 0; i < features.size(); ++i) {
-            const std::string& feature = features[i];
-            
-            if (feature == "Id") {
-                file << patient.Id;
-            } else if (feature == "Age") {
-                file << patient.Age;
-            } else if (feature == "Gender") {
-                file << patient.Gender;
-            } else if (feature == "CharlsonIndex") {
-                file << patient.CharlsonIndex;
-            } else if (feature == "ElixhauserIndex") {
-                file << patient.ElixhauserIndex;
-            } else if (feature == "Comorbidity_Score") {
-                file << patient.Comorbidity_Score;
-            } else if (feature == "Hospitalizations_Count") {
-                file << patient.Hospitalizations_Count;
-            } else if (feature == "Medications_Count") {
-                file << patient.Medications_Count;
-            } else if (feature == "Abnormal_Observations_Count") {
-                file << patient.Abnormal_Observations_Count;
-            } else if (feature == "Health_Index") {
-                file << patient.Health_Index;
-            } else {
-                file << "N/A";
-            }
-            
-            if (i < features.size() - 1) file << ",";
+    // Write data rows
+    for (const auto& p : patients) {
+        outFile << p.Id;
+        for (const auto& col : columns) { // Use original columns for field lookup
+            // Use the original capitalized column name to access PatientRecord fields
+            // but the lowercase version was written to the header
+            outFile << "," << getPatientFieldByName(p, col);
         }
-        file << "\n";
+        outFile << "\n";
     }
     
-    std::cout << "[INFO] Wrote " << patients.size() << " patient records to " << filename << std::endl;
+    outFile.close();
+    std::cout << "[INFO] Wrote " << patients.size() << " patient records to " << filename << "\n";
 }
 
 // Saves comprehensive patient data to a CSV file
@@ -123,4 +104,23 @@ void cleanupFiles(const std::vector<std::string> &files) {
     for (const auto &f : files) {
         std::remove(f.c_str());
     }
+}
+
+// Add a helper function to access PatientRecord fields by name
+std::string getPatientFieldByName(const PatientRecord& patient, const std::string& fieldName) {
+    // Map field names to their values in the PatientRecord
+    if (fieldName == "Age") return std::to_string(patient.Age);
+    if (fieldName == "Gender") return patient.Gender;
+    if (fieldName == "CharlsonIndex") return std::to_string(patient.CharlsonIndex);
+    if (fieldName == "ElixhauserIndex") return std::to_string(patient.ElixhauserIndex);
+    if (fieldName == "Comorbidity_Score") return std::to_string(patient.Comorbidity_Score);
+    if (fieldName == "Hospitalizations_Count") return std::to_string(patient.Hospitalizations_Count);
+    if (fieldName == "Medications_Count") return std::to_string(patient.Medications_Count);
+    if (fieldName == "Abnormal_Observations_Count") return std::to_string(patient.Abnormal_Observations_Count);
+    if (fieldName == "Health_Index") return std::to_string(patient.Health_Index);
+    // Add other fields as needed
+    
+    // Return empty string for unknown fields
+    std::cerr << "[WARNING] Unknown field name: " << fieldName << "\n";
+    return "";
 }

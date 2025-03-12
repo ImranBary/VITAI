@@ -46,6 +46,7 @@ import seaborn as sns
 from datetime import datetime
 import os
 import sys 
+import joblib
 
 #---------------------------------------------------
 # Add the root directory to PYTHONPATH
@@ -146,6 +147,25 @@ def run_final_model(model_id: str, subset_type: str, feature_config: str, full_d
     # 3) Prepare data for TabNet
     #    (We assume prepare_data can accept a 'target_col' for the final col)
     X, y, cat_idxs, cat_dims, feature_columns = prepare_data(feats_df, target_col=TARGET_COL)
+    
+    # Extract and save a scaler specifically for this model
+    # First, identify categorical and continuous columns
+    categorical_columns = ['DECEASED','GENDER','RACE','ETHNICITY','MARITAL']
+    continuous_columns = [col for col in feature_columns if col not in categorical_columns]
+    
+    # Create a dataframe from X with column names for scaling
+    x_df = pd.DataFrame(X, columns=feature_columns)
+    
+    # Create and fit a scaler on continuous features
+    scaler = StandardScaler()
+    if continuous_columns:  # Only if we have continuous columns
+        # Fit scaler (no need to transform, we just want to save the scaler)
+        scaler.fit(x_df[continuous_columns])
+        
+        # Save the model-specific scaler
+        scaler_path = os.path.join(out_dir, f"{model_id}_scaler.joblib")
+        joblib.dump(scaler, scaler_path)
+        logger.info(f"[{model_id}] Saved feature scaler to {scaler_path}")
 
     # Train/test split
     X_train_full, X_test, y_train_full, y_test = train_test_split(X, y, test_size=0.1, random_state=42)

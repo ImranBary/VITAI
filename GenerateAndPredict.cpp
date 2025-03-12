@@ -29,6 +29,7 @@
  #include <filesystem>
  #include <set>  // Added for std::set
  #include <functional> // Added for std::function
+ #include <fstream> // Added for std::ifstream
  
  // Headers for refactored modules/utility code - reordered to prevent redefinition issues
  #include "DataStructures.h"       // Include first as it contains BatchProcessor
@@ -183,6 +184,9 @@
      return matchingFiles;
  }
  
+ // Global variable to track inference status
+ static bool GPU_INFERENCE_FAILED = false;
+
  //-----------------------------------------------------------------------------------
  // Function to run model predictions for different patient subsets using Python
  //-----------------------------------------------------------------------------------
@@ -193,8 +197,10 @@
      
  #ifdef _WIN32
      const std::string pyCmdBase = "python";
+     const std::string tempOutputFile = "temp_py_output.txt";
  #else
      const std::string pyCmdBase = "python3";
+     const std::string tempOutputFile = "/tmp/temp_py_output.txt";
  #endif
  
      std::ostringstream cmd;
@@ -204,6 +210,9 @@
      if (forceCPU) {
          cmd << " --force-cpu";
      }
+     
+     // Redirect output to a temporary file for analysis
+     cmd << " > " << tempOutputFile << " 2>&1";
  
      std::cout << "[INFO] Running multi-model predictions for patient groups...\n";
      std::cout << "[INFO] Invoking: " << cmd.str() << "\n";
@@ -213,7 +222,37 @@
          std::cerr << "[ERROR] run_patient_group_predictions.py returned error code: " << ret << "\n";
          return false;
      }
+ 
+     // Read the output file to check for errors
+     std::ifstream outputFile(tempOutputFile);
+     if (!outputFile.is_open()) {
+         std::cerr << "[ERROR] Could not open Python script output file.\n";
+         return false;
+     }
+ 
+     std::string line;
+     bool errorFound = false;
+     while (std::getline(outputFile, line)) {
+         std::cout << line << std::endl;  // Echo the Python output to console
+         
+         // Check for error indicators in the output
+         if (line.find("ERROR:") != std::string::npos || 
+             line.find("Inference error:") != std::string::npos ||
+             line.find("Exception:") != std::string::npos) {
+             errorFound = true;
+         }
+     }
+     outputFile.close();
      
+     // Clean up the temporary file
+     std::remove(tempOutputFile.c_str());
+ 
+     if (errorFound) {
+         std::cerr << "[ERROR] Errors detected in model inference process.\n";
+         return false;
+     }
+     
+     std::cout << "[INFO] Multi-model inference completed successfully.\n";
      return true;
  }
  
@@ -389,6 +428,7 @@
      }
 
      // 7. Update allPatients with these concurrency-safe counters
+     // Using original capitalized field names from PatientRecord struct
      for (auto &p : allPatients) {
          p.CharlsonIndex              = static_cast<float>(charlsonCounter.getInt(p.Id));
          p.ElixhauserIndex            = static_cast<float>(elixhauserCounter.getInt(p.Id));
