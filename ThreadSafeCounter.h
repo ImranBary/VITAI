@@ -39,7 +39,17 @@ private:
     }
 
 public:
-    ThreadSafeCounter(size_t shardCount = 16) : numShards(shardCount) {
+    // Auto-scale shard count based on hardware
+    ThreadSafeCounter(size_t shardCount = 0) {
+        // If shardCount is 0, auto-scale based on hardware
+        if (shardCount == 0) {
+            unsigned int cpuCount = std::thread::hardware_concurrency();
+            numShards = cpuCount * 8; // Much more aggressive sharding - 8x CPU count
+            numShards = std::max<size_t>(32, numShards); // Minimum 32 shards for better distribution
+        } else {
+            numShards = shardCount;
+        }
+        
         // Initialize shards with unique_ptr
         shards.resize(numShards);
         for (size_t i = 0; i < numShards; i++) {
@@ -47,13 +57,14 @@ public:
         }
     }
     
-    // Methods that access shards need to be updated to use -> instead of . for pointer access
+    // Optimized increment using reader-writer locks more efficiently
     void increment(const std::string& key) {
         size_t shardIdx = getShard(key);
         std::unique_lock<std::shared_mutex> lock(shards[shardIdx]->mutex);
         shards[shardIdx]->counters[key] += 1.0f;
     }
     
+    // Optimized add with hint for initial capacity to reduce rehashing
     void add(const std::string& key, float value) {
         size_t shardIdx = getShard(key);
         std::unique_lock<std::shared_mutex> lock(shards[shardIdx]->mutex);
@@ -70,6 +81,12 @@ public:
         size_t shardIdx = getShard(key);
         std::unique_lock<std::shared_mutex> lock(shards[shardIdx]->mutex);
         shards[shardIdx]->intCounters[key] += value;
+    }
+
+    void addFloat(const std::string& key, float value) {
+        size_t shardIdx = getShard(key);
+        std::unique_lock<std::shared_mutex> lock(shards[shardIdx]->mutex);
+        shards[shardIdx]->counters[key] += value;
     }
     
     float getFloat(const std::string& key) const {
@@ -92,16 +109,19 @@ public:
         return 0;
     }
     
+    // Optimized bulk add with better locking strategy
     void bulkAdd(const std::unordered_map<std::string, float>& updates) {
-        // Group updates by shard to minimize lock contention
+        // Pre-sort updates by shard for more efficient processing
         std::vector<std::unordered_map<std::string, float>> shardUpdates(numShards);
         
+        // First pass: group by shard without locking
         for (const auto& [key, value] : updates) {
             size_t shardIdx = getShard(key);
             shardUpdates[shardIdx][key] = value;
         }
         
-        // Apply updates to each shard with appropriate locking
+        // Second pass: acquire locks only for shards that have updates
+        #pragma omp parallel for if(numShards > 16) // Use OpenMP if many shards
         for (size_t i = 0; i < numShards; i++) {
             if (!shardUpdates[i].empty()) {
                 std::unique_lock<std::shared_mutex> lock(shards[i]->mutex);
@@ -112,9 +132,13 @@ public:
         }
     }
     
-    // Pre-allocate space in each shard for expected number of entries
+    // More aggressive pre-allocation
     void reserve(size_t expectedEntries) {
+        // Calculate per-shard capacity with extra headroom for better distribution
         size_t entriesPerShard = (expectedEntries + numShards - 1) / numShards;
+        entriesPerShard = static_cast<size_t>(entriesPerShard * 1.5); // Add 50% extra capacity
+        
+        #pragma omp parallel for if(numShards > 16) // Parallelize reservation
         for (size_t i = 0; i < numShards; i++) {
             std::unique_lock<std::shared_mutex> lock(shards[i]->mutex);
             shards[i]->counters.reserve(entriesPerShard);

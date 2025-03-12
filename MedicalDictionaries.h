@@ -1,5 +1,8 @@
 #pragma once
 
+#ifndef MEDICAL_DICTIONARIES_H
+#define MEDICAL_DICTIONARIES_H
+
 #include <string>
 #include <vector>
 #include <map>
@@ -301,8 +304,8 @@ static std::map<std::string,std::string> OBS_DESC_MAP = {
  * OPTIMIZED LOOKUPS
  ****************************************************/
 // Pre-compute direct lookup tables for faster code access
-static std::unordered_map<std::string, float> CHARLSON_CODE_TO_WEIGHT;
-static std::unordered_map<std::string, float> ELIXHAUSER_CODE_TO_WEIGHT;
+extern const std::unordered_map<std::string, float> CHARLSON_CODE_TO_WEIGHT;
+extern const std::unordered_map<std::string, float> ELIXHAUSER_CODE_TO_WEIGHT;
 static std::unordered_map<std::string, double> CODE_TO_GROUP_WEIGHT;
 static std::unordered_map<std::string, std::string> CODE_TO_GROUP_NAME;
 static std::unordered_map<std::string, double> GROUP_NAME_TO_WEIGHT;
@@ -431,21 +434,8 @@ static bool isAbnormalObsOptimized(const std::string &desc, double val)
 
 // Initialize all direct lookups for faster processing
 static void initializeDirectLookups() {
-    // Initialize Charlson direct map
-    for (const auto& kv : SNOMED_TO_CHARLSON) {
-        auto weight_it = CHARLSON_CATEGORY_WEIGHTS.find(kv.second);
-        if (weight_it != CHARLSON_CATEGORY_WEIGHTS.end()) {
-            CHARLSON_CODE_TO_WEIGHT[std::to_string(kv.first)] = weight_it->second;
-        }
-    }
-    
-    // Initialize Elixhauser direct map
-    for (const auto& kv : SNOMED_TO_ELIXHAUSER) {
-        auto weight_it = ELIXHAUSER_CATEGORY_WEIGHTS.find(kv.second);
-        if (weight_it != ELIXHAUSER_CATEGORY_WEIGHTS.end()) {
-            ELIXHAUSER_CODE_TO_WEIGHT[std::to_string(kv.first)] = weight_it->second;
-        }
-    }
+    // Don't modify the const maps - they're initialized in the .cpp file
+    // Instead, just initialize the non-const maps
     
     // Initialize group weight direct map
     for (const auto& group : SNOMED_GROUPS) {
@@ -458,6 +448,15 @@ static void initializeDirectLookups() {
     // Initialize the other lookups as well
     initializeCodeLookups();
     initializeObsLookups();
+    initializeObsAbnormalDirect();
     
     std::cout << "[INFO] Direct lookup maps initialized\n";
 }
+
+// Function to quickly find the comorbidity group weight for a given code
+double findGroupWeightFast(const std::string& code);
+
+// Function to quickly determine if an observation is abnormal
+bool isAbnormalObsFast(const std::string& description, double value);
+
+#endif // MEDICAL_DICTIONARIES_H

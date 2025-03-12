@@ -1,5 +1,9 @@
 #pragma once
 
+#ifndef BATCH_PROCESSOR_H
+#define BATCH_PROCESSOR_H
+
+#include "DataStructures.h"
 #include <string>
 #include <vector>
 #include <functional>
@@ -8,6 +12,10 @@
 #include <iostream>
 #include <filesystem>
 #include "SystemResources.h"
+
+// Only define BatchProcessor if it's not already defined in DataStructures.h
+#ifndef BATCH_PROCESSOR_DEFINED
+#define BATCH_PROCESSOR_DEFINED
 
 // A memory-efficient batch processor for CSV files
 class BatchProcessor {
@@ -157,3 +165,7 @@ private:
         return std::min(result, static_cast<size_t>(1000000));
     }
 };
+
+#endif // BATCH_PROCESSOR_DEFINED
+
+#endif // BATCH_PROCESSOR_H

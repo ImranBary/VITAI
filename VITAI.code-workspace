@@ -82,7 +82,11 @@
 			"shared_mutex": "cpp",
 			"queue": "cpp",
 			"memory_resource": "cpp",
-			"future": "cpp"
+			"future": "cpp",
+			"bitset": "cpp",
+			"coroutine": "cpp",
+			"resumable": "cpp",
+			"filesystem": "cpp"
 		},
 		"java.compile.nullAnalysis.mode": "automatic"
 	}
