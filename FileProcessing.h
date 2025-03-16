@@ -9,6 +9,16 @@
 #include "BatchProcessor.h"
 #include "Utilities.h"
 
+// Utility function to normalize field names between C++ struct and CSV headers
+inline std::string normalizeFieldName(const std::string& fieldName) {
+    // Map common field name variations
+    if (fieldName == "Id" || fieldName == "ID") {
+        return "id";  // Lowercase version used in CSV
+    }
+    // Add other field name mappings as needed
+    return fieldName;
+}
+
 // Batch file processing functions
 void processConditionsInBatches(const std::string &path,
                               std::function<void(const ConditionRow&)> callback);

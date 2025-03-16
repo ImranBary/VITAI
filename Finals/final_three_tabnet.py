@@ -167,9 +167,61 @@ def run_final_model(model_id: str, subset_type: str, feature_config: str, full_d
         joblib.dump(scaler, scaler_path)
         logger.info(f"[{model_id}] Saved feature scaler to {scaler_path}")
 
+    # Save feature metadata for future predictions
+    metadata = {
+        "model_id": model_id,
+        "subset_type": subset_type,
+        "feature_config": feature_config,
+        "target_column": TARGET_COL,
+        "feature_columns": feature_columns,
+        "categorical_indices": cat_idxs,
+        "categorical_dimensions": cat_dims,
+        "categorical_columns": categorical_columns,
+        "continuous_columns": continuous_columns,
+        "best_params": best_params,
+        "training_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    metadata_path = os.path.join(out_dir, f"{model_id}_metadata.json")
+    with open(metadata_path, 'w') as f:
+        # Convert numpy arrays/int64 to standard types for JSON serialization
+        sanitized_metadata = {}
+        for k, v in metadata.items():
+            if isinstance(v, (np.ndarray, list)):
+                sanitized_metadata[k] = [int(x) if isinstance(x, np.integer) else x for x in v]
+            elif isinstance(v, dict):
+                sanitized_metadata[k] = {key: float(val) if isinstance(val, (np.floating, np.integer)) else val 
+                                        for key, val in v.items()}
+            else:
+                sanitized_metadata[k] = v
+        json.dump(sanitized_metadata, f, indent=2)
+    logger.info(f"[{model_id}] Saved model metadata to {metadata_path}")
+
+    # Also save a sample of input data for reference
+    sample_path = os.path.join(out_dir, f"{model_id}_sample_input.csv")
+    x_df.head(5).to_csv(sample_path, index=False)
+    logger.info(f"[{model_id}] Saved sample input data to {sample_path}")
+
     # Train/test split
     X_train_full, X_test, y_train_full, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
     X_train, X_valid, y_train, y_valid = train_test_split(X_train_full, y_train_full, test_size=0.2, random_state=42)
+
+    # Save the final training/valid/test splits for reference
+    splits_dict = {
+        "X_train_shape": X_train.shape,
+        "X_valid_shape": X_valid.shape,
+        "X_test_shape": X_test.shape,
+        "y_train_shape": y_train.shape,
+        "y_valid_shape": y_valid.shape,
+        "y_test_shape": y_test.shape
+    }
+    
+    splits_path = os.path.join(out_dir, f"{model_id}_data_splits.json")
+    with open(splits_path, 'w') as f:
+        # Convert numpy shapes to lists for JSON serialization
+        splits_json = {k: list(v) for k, v in splits_dict.items()}
+        json.dump(splits_json, f, indent=2)
+    logger.info(f"[{model_id}] Saved data split information to {splits_path}")
 
     # 4) Hyperparameter tuning (short-run)
     best_params = hyperparameter_tuning(X_train, y_train, cat_idxs, cat_dims)

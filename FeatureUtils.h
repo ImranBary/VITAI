@@ -6,6 +6,8 @@
 #include <iostream>
 #include <algorithm>
 #include <cctype>
+#include <map>
+#include <functional>
 #include "DataStructures.h"
 #include "Utilities.h"
 
@@ -40,3 +42,6 @@ inline std::vector<std::string> convertFeatureNamesToLowercase(const std::vector
     
     return lowercaseFeatures;
 }
+
+// Define a function to get the exact feature columns expected by the model
+std::vector<std::string> getModelExpectedFeatures();

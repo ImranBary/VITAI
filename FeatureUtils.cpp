@@ -1,5 +1,6 @@
 #include "FeatureUtils.h"
 #include "DataStructures.h"
+#include "FileProcessing.h"  // Add this include for normalizeFieldName
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -7,65 +8,95 @@
 #include <algorithm>
 #include <sstream>
 
-// Retrieves feature column names based on feature configuration
-std::vector<std::string> getFeatureCols(const std::string& featureConfig) {
-    std::cout << "[INFO] Getting feature columns for configuration: " << featureConfig << std::endl;
-    
-    std::vector<std::string> features;
-    
-    // Define features based on configuration
-    if (featureConfig == "combined_all") {
-        features = {
-            "Id", "Age", "Gender", "CharlsonIndex", "ElixhauserIndex", 
-            "Comorbidity_Score", "Hospitalizations_Count", "Medications_Count",
-            "Abnormal_Observations_Count", "Health_Index"
-        };
-    } else if (featureConfig == "basic") {
-        features = {"Id", "Age", "Gender", "CharlsonIndex"};
-    } else {
-        std::cout << "[WARNING] Unknown feature configuration: " << featureConfig << ". Using default features." << std::endl;
-        features = {"Id", "Age", "Gender", "Health_Index"};
-    }
-    
-    std::cout << "[INFO] Selected " << features.size() << " features." << std::endl;
-    return features;
+// Define a function to get the exact feature columns expected by the model
+std::vector<std::string> getModelExpectedFeatures() {
+    // Add 'Id' as the first feature in the list
+    return {
+        "Id",   // Add the Id column as the first column
+        "AGE", 
+        "DECEASED", 
+        "GENDER", 
+        "RACE", 
+        "ETHNICITY", 
+        "MARITAL", 
+        "HEALTHCARE_EXPENSES", 
+        "HEALTHCARE_COVERAGE", 
+        "INCOME", 
+        "Hospitalizations_Count", 
+        "Medications_Count", 
+        "Abnormal_Observations_Count"
+    };
 }
 
-// Writes patient features to a CSV file based on specified feature columns
+// Implementation of getFeatureCols
+std::vector<std::string> getFeatureCols(const std::string& featureConfig) {
+    // For inference, we need to make sure we include all expected model features
+    if (featureConfig == "combined_all" || featureConfig == "combined") {
+        return getModelExpectedFeatures();
+    }
+    
+    // Handle other feature configurations as needed
+    // ...
+
+    // Default to model expected features
+    return getModelExpectedFeatures();
+}
+
+// Helper function to get patient field value based on the model's expected column names
+std::string getPatientFieldValue(const PatientRecord& p, const std::string& fieldName) {
+    // Map the model's expected column names to actual PatientRecord field names/values
+    if (fieldName == "Id") return p.Id;  // Add this line to handle the Id field
+    if (fieldName == "AGE") return std::to_string(p.Age);
+    if (fieldName == "DECEASED") return p.IsDeceased ? "1" : "0";  // Assuming the field is actually IsDeceased
+    if (fieldName == "GENDER") return p.Gender;
+    if (fieldName == "RACE") return p.RaceCategory;    // Assuming the field is RaceCategory
+    if (fieldName == "ETHNICITY") return p.EthnicityCategory;  // Assuming the field is EthnicityCategory
+    if (fieldName == "MARITAL") return p.MaritalStatus;  // Assuming the field is MaritalStatus
+    if (fieldName == "HEALTHCARE_EXPENSES") return std::to_string(p.HealthcareExpenses);  // Adjusted field name
+    if (fieldName == "HEALTHCARE_COVERAGE") return std::to_string(p.HealthcareCoverage);  // Adjusted field name
+    if (fieldName == "INCOME") return std::to_string(p.Income);
+    if (fieldName == "Hospitalizations_Count") return std::to_string(p.Hospitalizations_Count);
+    if (fieldName == "Medications_Count") return std::to_string(p.Medications_Count);
+    if (fieldName == "Abnormal_Observations_Count") return std::to_string(p.Abnormal_Observations_Count);
+    
+    // Default case - unknown field
+    std::cerr << "[WARNING] Unknown field requested: " << fieldName << "\n";
+    return "";
+}
+
+// Enhanced function to write features to CSV ensuring all required columns are included
 void writeFeaturesCSV(const std::vector<PatientRecord>& patients, 
-                      const std::string& filename,
-                      const std::vector<std::string>& columns) {
-    std::cout << "[INFO] Writing features to CSV file: " << filename << "\n";
-    
-    // Convert column names to lowercase for model compatibility
-    std::vector<std::string> lowercaseColumns = convertFeatureNamesToLowercase(columns);
-    
+                     const std::string& filename,
+                     const std::vector<std::string>& features) {
     std::ofstream outFile(filename);
     if (!outFile.is_open()) {
-        std::cerr << "[ERROR] Could not open file for writing: " << filename << "\n";
+        std::cerr << "[ERROR] Could not open " << filename << " for writing.\n";
         return;
     }
-    
-    // Write header with lowercase column names
-    outFile << "Id";
-    for (const auto& col : lowercaseColumns) {
-        outFile << "," << col;
+
+    // Write header with exact column names
+    bool first = true;
+    for (const auto& feature : features) {
+        if (!first) outFile << ",";
+        outFile << feature;
+        first = false;
     }
     outFile << "\n";
-    
-    // Write data rows
-    for (const auto& p : patients) {
-        outFile << p.Id;
-        for (const auto& col : columns) { // Use original columns for field lookup
-            // Use the original capitalized column name to access PatientRecord fields
-            // but the lowercase version was written to the header
-            outFile << "," << getPatientFieldByName(p, col);
+
+    // Write patient data
+    for (const auto& patient : patients) {
+        first = true;
+        for (const auto& feature : features) {
+            if (!first) outFile << ",";
+            outFile << getPatientFieldValue(patient, feature);
+            first = false;
         }
         outFile << "\n";
     }
     
     outFile.close();
-    std::cout << "[INFO] Wrote " << patients.size() << " patient records to " << filename << "\n";
+    std::cout << "[INFO] Successfully wrote " << patients.size() << " patients to " << filename 
+              << " with " << features.size() << " features.\n";
 }
 
 // Saves comprehensive patient data to a CSV file
