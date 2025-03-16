@@ -167,7 +167,32 @@ def run_final_model(model_id: str, subset_type: str, feature_config: str, full_d
         joblib.dump(scaler, scaler_path)
         logger.info(f"[{model_id}] Saved feature scaler to {scaler_path}")
 
-    # Save feature metadata for future predictions
+    # Train/test split
+    X_train_full, X_test, y_train_full, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
+    X_train, X_valid, y_train, y_valid = train_test_split(X_train_full, y_train_full, test_size=0.2, random_state=42)
+
+    # Save the final training/valid/test splits for reference
+    splits_dict = {
+        "X_train_shape": X_train.shape,
+        "X_valid_shape": X_valid.shape,
+        "X_test_shape": X_test.shape,
+        "y_train_shape": y_train.shape,
+        "y_valid_shape": y_valid.shape,
+        "y_test_shape": y_test.shape
+    }
+    
+    splits_path = os.path.join(out_dir, f"{model_id}_data_splits.json")
+    with open(splits_path, 'w') as f:
+        # Convert numpy shapes to lists for JSON serialization
+        splits_json = {k: list(v) for k, v in splits_dict.items()}
+        json.dump(splits_json, f, indent=2)
+    logger.info(f"[{model_id}] Saved data split information to {splits_path}")
+
+    # 4) Hyperparameter tuning (short-run)
+    best_params = hyperparameter_tuning(X_train, y_train, cat_idxs, cat_dims)
+    logger.info(f"[{model_id}] Best hyperparams from tuning: {best_params}")
+    
+    # NOW save feature metadata for future predictions (after hyperparameter tuning)
     metadata = {
         "model_id": model_id,
         "subset_type": subset_type,
@@ -201,32 +226,7 @@ def run_final_model(model_id: str, subset_type: str, feature_config: str, full_d
     sample_path = os.path.join(out_dir, f"{model_id}_sample_input.csv")
     x_df.head(5).to_csv(sample_path, index=False)
     logger.info(f"[{model_id}] Saved sample input data to {sample_path}")
-
-    # Train/test split
-    X_train_full, X_test, y_train_full, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
-    X_train, X_valid, y_train, y_valid = train_test_split(X_train_full, y_train_full, test_size=0.2, random_state=42)
-
-    # Save the final training/valid/test splits for reference
-    splits_dict = {
-        "X_train_shape": X_train.shape,
-        "X_valid_shape": X_valid.shape,
-        "X_test_shape": X_test.shape,
-        "y_train_shape": y_train.shape,
-        "y_valid_shape": y_valid.shape,
-        "y_test_shape": y_test.shape
-    }
     
-    splits_path = os.path.join(out_dir, f"{model_id}_data_splits.json")
-    with open(splits_path, 'w') as f:
-        # Convert numpy shapes to lists for JSON serialization
-        splits_json = {k: list(v) for k, v in splits_dict.items()}
-        json.dump(splits_json, f, indent=2)
-    logger.info(f"[{model_id}] Saved data split information to {splits_path}")
-
-    # 4) Hyperparameter tuning (short-run)
-    best_params = hyperparameter_tuning(X_train, y_train, cat_idxs, cat_dims)
-    logger.info(f"[{model_id}] Best hyperparams from tuning: {best_params}")
-
     # 5) Build final regressor with big epochs
     saved_lr = best_params.pop("lr")
     best_params.update({
