@@ -31,6 +31,13 @@
  #include <functional> // Added for std::function
  #include <fstream> // Added for std::ifstream
  #include <algorithm> // Added for std::transform
+
+ // Define SCRIPT_DIR - path to the script directory (current directory by default)
+ #ifdef _WIN32
+ const std::string SCRIPT_DIR = ".";
+ #else
+ const std::string SCRIPT_DIR = ".";
+ #endif
  
  // Headers for refactored modules/utility code - reordered to prevent redefinition issues
  #include "DataStructures.h"       // Include first as it contains BatchProcessor
@@ -54,6 +61,12 @@
  #endif
  
  namespace fs = std::filesystem;
+ 
+ // Add this function to select only the features expected by the model
+ static std::vector<std::string> getRequiredFeatures() {
+     // Use the utility function to ensure consistency with model expectations
+     return getModelExpectedFeatures();
+ }
  
  //-----------------------------------------------------------------------------------
  // Command-line argument parsing-----------------------------------------------------
@@ -225,18 +238,34 @@
      bool allFound = true;
      for (const auto& model : requiredModels) {
          bool found = false;
-         std::vector<std::string> searchPaths = {
-             fs::path(SCRIPT_DIR) / (model + ".zip"),
-             fs::path(SCRIPT_DIR) / "Data" / "finals" / model.substr(0, model.find("_model")) / (model + ".zip"),
-             fs::path(SCRIPT_DIR) / "Data" / "models" / (model + ".zip"),
-             fs::path(SCRIPT_DIR) / model,
-             fs::path(SCRIPT_DIR) / "Data" / "finals" / model.substr(0, model.find("_model")) / model,
-             fs::path(SCRIPT_DIR) / "Data" / "models" / model
-         };
+         
+         // Extract the base part before "_model" if it exists
+         std::string baseModelName = model;
+         size_t modelPos = model.find("_model");
+         if (modelPos != std::string::npos) {
+             baseModelName = model.substr(0, modelPos);
+         }
+         
+         // Create paths and explicitly convert them to strings
+         std::string path1 = (fs::path(SCRIPT_DIR) / (model + ".zip")).string();
+         std::string path2 = (fs::path(SCRIPT_DIR) / "Data" / "finals" / baseModelName / (model + ".zip")).string();
+         std::string path3 = (fs::path(SCRIPT_DIR) / "Data" / "models" / (model + ".zip")).string();
+         std::string path4 = (fs::path(SCRIPT_DIR) / model).string();
+         std::string path5 = (fs::path(SCRIPT_DIR) / "Data" / "finals" / baseModelName / model).string();
+         std::string path6 = (fs::path(SCRIPT_DIR) / "Data" / "models" / model).string();
+         
+         // Add paths to the vector
+         std::vector<std::string> searchPaths;
+         searchPaths.push_back(path1);
+         searchPaths.push_back(path2);
+         searchPaths.push_back(path3);
+         searchPaths.push_back(path4);
+         searchPaths.push_back(path5);
+         searchPaths.push_back(path6);
          
          for (const auto& path : searchPaths) {
              if (fs::exists(path)) {
-                 std::cout << "[INFO] Found model: " << path.string() << "\n";
+                 std::cout << "[INFO] Found model: " << path << "\n";
                  found = true;
                  break;
              }
@@ -291,7 +320,8 @@
  #endif
      std::ostringstream cmd;
      cmd << pyCmdBase << " run_patient_group_predictions.py"
-         << " --input-csv=\"" << fs::absolute(inputPath).string() << "\""; // Use absolute path with quotes
+         // Make sure to convert the path to string
+         << " --input-csv=\"" << fs::absolute(inputPath).string() << "\"";
      if (forceCPU) {
          cmd << " --force-cpu";
      }   
@@ -545,12 +575,25 @@
          }   
      }   
      
+     // Debug counters before updating patients
+     std::cout << "[DEBUG] First 5 patients from charlsonCounter:\n";
+     int debugCount = 0;
+     for (auto& p : allPatients) {
+         if (debugCount < 5) {
+             std::cout << "   Patient " << p.Id << ": CharlsonIndex=" 
+                       << charlsonCounter.getFloat(p.Id) 
+                       << ", Hospitalizations=" << hospitalCounter.getInt(p.Id)
+                       << ", Medications=" << medsCounter.getInt(p.Id) << "\n";
+             debugCount++;
+         }
+     }
+     
      // 7. Update allPatients with these concurrency-safe counters
      // Using original capitalized field names from PatientRecord struct
      for (auto &p : allPatients) {
-         p.CharlsonIndex              = static_cast<float>(charlsonCounter.getInt(p.Id));
-         p.ElixhauserIndex            = static_cast<float>(elixhauserCounter.getInt(p.Id));
-         p.Comorbidity_Score          = static_cast<float>(comorbCounter.getInt(p.Id));
+         p.CharlsonIndex              = charlsonCounter.getFloat(p.Id);  // Use getFloat instead of casting from getInt
+         p.ElixhauserIndex            = elixhauserCounter.getFloat(p.Id);  // Use getFloat directly
+         p.Comorbidity_Score          = comorbCounter.getFloat(p.Id);  // Use getFloat directly
          p.Hospitalizations_Count     = hospitalCounter.getInt(p.Id);
          p.Medications_Count          = medsCounter.getInt(p.Id);
          p.Abnormal_Observations_Count= abnormalObsCounter.getInt(p.Id);
@@ -558,6 +601,18 @@
          // Recompute health index
          p.Health_Index = computeHealthIndex(p);
      }   
+     
+     // Debug the updated patient records
+     std::cout << "[DEBUG] First 5 patient records after updating:\n";
+     debugCount = 0;
+     for (auto& p : allPatients) {
+         if (debugCount < 5) {
+             std::cout << "   Patient " << p.Id << ": CharlsonIndex=" << p.CharlsonIndex 
+                       << ", Hospitalizations=" << p.Hospitalizations_Count 
+                       << ", Medications=" << p.Medications_Count << "\n";
+             debugCount++;
+         }
+     }
      
      // 8. (Optional) Identify subsets (diabetes, CKD, etc.) using PatientSubsets
      std::cout << "[INFO] Loading ConditionRows for subset identification...\n";
@@ -630,11 +685,13 @@
      }   
      
      // 9. Create feature CSV for inference or training
-     // Use combined_all as the feature config as we see in the Python code
      std::string featureConfig = "combined_all"; 
-     // Get expected features with exact capitalization - NO Health_Index
-     auto featureCols = getModelExpectedFeatures();    
+     // Get expected features with exact capitalization 
+     auto featureCols = getRequiredFeatures();
      writeFeaturesCSV(allPatients, "PatientFeatures.csv", featureCols);
+     
+     // Validate the feature CSV before running predictions
+     validateFeatureCSV("PatientFeatures.csv");
      
      // Still write a comprehensive CSV of everything including Health_Index for other purposes    
      saveFinalDataCSV(allPatients, "AllPatientsData.csv");

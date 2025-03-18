@@ -10,9 +10,8 @@
 
 // Define a function to get the exact feature columns expected by the model
 std::vector<std::string> getModelExpectedFeatures() {
-    // Add 'Id' as the first feature in the list
+    // Return all features the model expects, exactly matching Python's expectations
     return {
-        "Id",   // Add the Id column as the first column
         "AGE", 
         "DECEASED", 
         "GENDER", 
@@ -64,39 +63,46 @@ std::string getPatientFieldValue(const PatientRecord& p, const std::string& fiel
     return "";
 }
 
-// Enhanced function to write features to CSV ensuring all required columns are included
+// Fix writeFeaturesCSV function with correct field names and format
 void writeFeaturesCSV(const std::vector<PatientRecord>& patients, 
-                     const std::string& filename,
-                     const std::vector<std::string>& features) {
-    std::ofstream outFile(filename);
-    if (!outFile.is_open()) {
-        std::cerr << "[ERROR] Could not open " << filename << " for writing.\n";
+                     const std::string& outputFile,
+                     const std::vector<std::string>& columns) {
+    std::ofstream file(outputFile);
+    if (!file.is_open()) {
+        std::cerr << "[ERROR] Failed to open file for writing: " << outputFile << "\n";
         return;
     }
-
-    // Write header with exact column names
-    bool first = true;
-    for (const auto& feature : features) {
-        if (!first) outFile << ",";
-        outFile << feature;
-        first = false;
+    
+    // Write header - start with Id column
+    file << "Id";
+    for (const auto& col : columns) {
+        file << "," << col;
     }
-    outFile << "\n";
-
-    // Write patient data
-    for (const auto& patient : patients) {
-        first = true;
-        for (const auto& feature : features) {
-            if (!first) outFile << ",";
-            outFile << getPatientFieldValue(patient, feature);
-            first = false;
+    file << "\n";
+    
+    // Write data rows
+    for (const auto& p : patients) {
+        file << p.Id;
+        for (const auto& col : columns) {
+            file << ",";
+            if (col == "AGE") file << p.Age;
+            else if (col == "DECEASED") file << (p.IsDeceased ? "1" : "0");  
+            else if (col == "GENDER") file << p.Gender;  // Write as string to match Python's categorical processing
+            else if (col == "RACE") file << p.RaceCategory;
+            else if (col == "ETHNICITY") file << p.EthnicityCategory;
+            else if (col == "MARITAL") file << p.MaritalStatus;
+            else if (col == "HEALTHCARE_EXPENSES") file << p.HealthcareExpenses;
+            else if (col == "HEALTHCARE_COVERAGE") file << p.HealthcareCoverage;
+            else if (col == "INCOME") file << p.Income;
+            else if (col == "Hospitalizations_Count") file << p.Hospitalizations_Count;
+            else if (col == "Medications_Count") file << p.Medications_Count;
+            else if (col == "Abnormal_Observations_Count") file << p.Abnormal_Observations_Count;
         }
-        outFile << "\n";
+        file << "\n";
     }
     
-    outFile.close();
-    std::cout << "[INFO] Successfully wrote " << patients.size() << " patients to " << filename 
-              << " with " << features.size() << " features.\n";
+    file.close();
+    std::cout << "[INFO] Wrote " << patients.size() << " patient records to " << outputFile << "\n";
 }
 
 // Saves comprehensive patient data to a CSV file
@@ -154,4 +160,16 @@ std::string getPatientFieldByName(const PatientRecord& patient, const std::strin
     // Return empty string for unknown fields
     std::cerr << "[WARNING] Unknown field name: " << fieldName << "\n";
     return "";
+}
+
+// Add this debugging function
+void debugThreadSafeCounter(const ThreadSafeCounter& counter, const std::string& name, const std::vector<PatientRecord>& patients, int maxToShow = 5) {
+    std::cout << "[DEBUG] " << name << " values for first " << maxToShow << " patients:\n";
+    int count = 0;
+    for (const auto& patient : patients) {
+        if (count < maxToShow) {
+            std::cout << "   Patient " << patient.Id << ": " << counter.getFloat(patient.Id) << "\n";
+            count++;
+        }
+    }
 }

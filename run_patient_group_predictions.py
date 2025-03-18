@@ -37,52 +37,77 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------------
-# 2. Additional "try" path for local vitai_scripts
+# 2. Improved path handling for module imports
 # ------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR))
+VITAI_SCRIPTS_DIR = os.path.join(SCRIPT_DIR, "vitai_scripts")
+
+# Add necessary paths in the correct order
+sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, VITAI_SCRIPTS_DIR)
 sys.path.insert(0, SCRIPT_DIR)
 
 try:
-    # Attempt direct import from vitai_scripts
+    # Try to import from various locations with better error reporting
     try:
         from vitai_scripts.subset_utils import filter_subpopulation
         from vitai_scripts.feature_utils import select_features
         logger.info("Loaded utilities from vitai_scripts package")
-    except ImportError:
-        # Fallback: local vitai_scripts directory
-        sys.path.insert(0, os.path.join(SCRIPT_DIR, "vitai_scripts"))
-        from subset_utils import filter_subpopulation
-        from feature_utils import select_features
-        logger.info("Loaded utilities from local vitai_scripts directory")
+    except ImportError as e:
+        logger.warning(f"Import from package failed: {e}, trying local directory...")
+        try:
+            sys.path.insert(0, os.path.join(SCRIPT_DIR, "vitai_scripts"))
+            from subset_utils import filter_subpopulation
+            from feature_utils import select_features
+            logger.info("Loaded utilities from local vitai_scripts directory")
+        except ImportError as nested_e:
+            logger.error(f"Local import also failed: {nested_e}")
+            # Re-raise the original exception for better debugging
+            raise e
 
 except ImportError as e:
     logger.error(f"Failed to import subset_utils or feature_utils: {e}")
-
+    logger.error(f"sys.path: {sys.path}")
+    logger.error(f"Current directory: {os.getcwd()}")
+    logger.error(f"Directory contents: {os.listdir(SCRIPT_DIR)}")
+    
+    # Fallback functions with enhanced logging
     def filter_subpopulation(df, subset_name, _):
         """Fallback function to identify patient subsets"""
+        logger.warning(f"Using fallback filter_subpopulation for subset '{subset_name}' with {len(df)} patients")
         if subset_name == "diabetes":
             # Try to load from file if it exists
             try:
                 with open("diabetic_patients.txt", "r") as f:
                     diabetic_ids = set(line.strip() for line in f if line.strip() and not line.startswith("#"))
+                logger.info(f"Loaded {len(diabetic_ids)} diabetic patient IDs from file")
                 return df[df["Id"].isin(diabetic_ids)]
-            except:
+            except Exception as e:
+                logger.warning(f"Error loading diabetic patients: {e}")
                 # Fallback: ~52% of patients for diabetes
                 count = int(len(df) * 0.52)
+                logger.info(f"Using percentage-based allocation: {count} patients ({count/len(df)*100:.1f}%)")
                 return df.iloc[:count]
         elif subset_name == "ckd":
             # For CKD, ~5%
             count = max(1, int(len(df) * 0.05))
+            logger.info(f"CKD subset: {count} patients ({count/len(df)*100:.1f}%)")
             return df.iloc[:count]
         else:  # "none"
             diabetes_df = filter_subpopulation(df, "diabetes", None)
             ckd_df = filter_subpopulation(df, "ckd", None)
             combined_ids = set(diabetes_df["Id"]).union(set(ckd_df["Id"]))
-            return df[~df["Id"].isin(combined_ids)]
+            result = df[~df["Id"].isin(combined_ids)]
+            logger.info(f"'None' subset: {len(result)} patients ({len(result)/len(df)*100:.1f}%)")
+            return result
 
     def select_features(df, config):
         logger.warning(f"Using fallback feature selection for config: {config}")
-        return df
+        # Make a copy to avoid modifying the original
+        result_df = df.copy()
+        logger.info(f"Feature columns: {result_df.columns.tolist()}")
+        return result_df
 
 # ------------------------------------------------------------------------
 # 3. Model configurations
@@ -181,6 +206,16 @@ def load_model_artifacts(model_id, force_cpu=False):
 
     regressor = TabNetRegressor(device_name=device)
     regressor.load_model(model_path)
+    
+    # NEW: Check the expected input dimension from the loaded model
+    expected_dim = None
+    try:
+        # Try to access the input dimension from the model
+        if hasattr(regressor.network, 'input_dim'):
+            expected_dim = regressor.network.input_dim
+            logger.info(f"Model expects input dimension: {expected_dim}")
+    except Exception as e:
+        logger.warning(f"Could not determine model's expected input dimension: {e}")
 
     # Attempt to load scaler
     scaler = None
@@ -198,13 +233,11 @@ def load_model_artifacts(model_id, force_cpu=False):
                 break
             except Exception as e:
                 logger.warning(f"Failed to load scaler from {spath}: {e}")
-    return regressor, scaler
+    return regressor, scaler, expected_dim  # Return the expected dimension
 
-def preprocess_features(df, model_id):
+def preprocess_features(df, model_id, expected_dim=None):
     """
-    Prepare features for model inference.
-    - Removes 'Id', 'Health_Index', 'Predicted_Health_Index' from the final set of numeric features.
-    - Encodes certain columns as ordinal categorical if present.
+    Prepare features for model inference with enhanced feature validation.
     """
     logger.debug(f"[{model_id}] Preprocessing {len(df)} rows with columns: {df.columns.tolist()}")
     logger.debug(f"[{model_id}] Sample data:\n{df.head(3)}")
@@ -212,6 +245,13 @@ def preprocess_features(df, model_id):
     # Make a copy for transformations
     preproc_df = df.copy()
     patient_ids = preproc_df['Id'].values
+
+    # Check if we have all expected categorical columns
+    cat_cols = ['DECEASED', 'GENDER', 'RACE', 'ETHNICITY', 'MARITAL']
+    for col in cat_cols:
+        if col not in preproc_df.columns:
+            logger.warning(f"[{model_id}] Missing categorical column '{col}'. Adding with default value 0.")
+            preproc_df[col] = 0
 
     # 1. Identify which columns to treat as numeric features
     feature_cols = [
@@ -221,27 +261,49 @@ def preprocess_features(df, model_id):
     ]
     logger.debug(f"[{model_id}] Numeric feature_cols: {feature_cols}")
 
-    # 2. Convert some columns from string -> ordinal numeric
-    cat_cols = ['DECEASED', 'GENDER', 'RACE', 'ETHNICITY', 'MARITAL']
+    # Check for expected numeric columns and add defaults if missing
+    expected_numeric = ['AGE', 'HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME', 
+                        'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count']
+    for col in expected_numeric:
+        if col not in feature_cols and col not in preproc_df.columns:
+            logger.warning(f"[{model_id}] Missing numeric column '{col}'. Adding with default value 0.")
+            preproc_df[col] = 0
+            if col not in feature_cols:
+                feature_cols.append(col)
+
+    # 2. Convert categorical columns from string -> ordinal numeric
     for col in cat_cols:
         if col in preproc_df.columns:
             preproc_df[col] = preproc_df[col].astype(str)
             unique_vals = preproc_df[col].unique()
             val_to_idx = {val: idx for idx, val in enumerate(unique_vals)}
             preproc_df[col] = preproc_df[col].map(val_to_idx).fillna(0)
+            
+            # Ensure categorical columns are in feature_cols
+            if col not in feature_cols:
+                feature_cols.append(col)
 
-    # 3. Construct final X
-    if feature_cols:
+    # 3. Construct final X with enhanced error checking
+    if not feature_cols:
+        logger.error(f"[{model_id}] No suitable feature columns found!")
+        logger.error(f"Input columns were: {df.columns.tolist()}")
+        raise ValueError(f"No suitable feature columns found for model {model_id}")
+
+    try:
         X = preproc_df[feature_cols].values
-    else:
-        logger.warning(f"No suitable numeric feature columns found for model {model_id}, using dummy column.")
-        X = np.zeros((len(preproc_df), 1))
+        logger.info(f"Selected features: {feature_cols}")
+    except Exception as e:
+        logger.error(f"[{model_id}] Error selecting features: {str(e)}")
+        logger.error(f"Available columns: {preproc_df.columns.tolist()}")
+        logger.error(f"Requested features: {feature_cols}")
+        raise
 
     # 4. Fill any leftover NaNs
     X = np.nan_to_num(X)
-    logger.debug(f"[{model_id}] Final shape of X: {X.shape}")
-
-    return patient_ids, X
+    original_shape = X.shape
+    logger.debug(f"[{model_id}] Original feature shape: {original_shape}")
+    
+    return patient_ids, X, feature_cols
 
 def run_model_for_group(df, group_name, model_id, force_cpu=False):
     """Loads the model, preprocesses the group's data, and runs inference."""
@@ -251,7 +313,7 @@ def run_model_for_group(df, group_name, model_id, force_cpu=False):
 
     # 1. Load TabNet model + scaler
     try:
-        regressor, scaler = load_model_artifacts(model_id, force_cpu)
+        regressor, scaler, expected_dim = load_model_artifacts(model_id, force_cpu)  # Get expected dimension
         if scaler is None:
             logger.warning(f"No scaler found for model {model_id}. Results may be incorrect.")
     except Exception as e:
@@ -259,18 +321,17 @@ def run_model_for_group(df, group_name, model_id, force_cpu=False):
         logger.error(traceback.format_exc())
         return None
 
-    # 2. Preprocess features
+    # 2. Preprocess features (but don't add padding yet)
     try:
-        patient_ids, X = preprocess_features(df, model_id)
+        patient_ids, X, feature_cols = preprocess_features(df, model_id)
         if len(patient_ids) == 0:
             logger.warning(f"No patients in {group_name} after preprocessing.")
             return None
-        logger.info(f"Preprocessed features shape: {X.shape} for {len(patient_ids)} patients")
         
         # Log sample of raw feature values before scaling
         logger.debug(f"Sample raw features (first row): {X[0]}")
         
-        # Apply scaler if available
+        # Apply scaler if available to the original features
         if scaler is not None:
             logger.info(f"Applying scaler to features for model: {model_id}")
             X = scaler.transform(X)
@@ -278,11 +339,23 @@ def run_model_for_group(df, group_name, model_id, force_cpu=False):
             logger.debug(f"Scaled feature min/max: {np.min(X, axis=0)[:3]}.../{np.max(X, axis=0)[:3]}...")
         else:
             logger.warning(f"No scaler available for {model_id}. Using unscaled features.")
+        
+        # NOW check if we need to pad features (AFTER scaling)
+        if expected_dim is not None and X.shape[1] < expected_dim:
+            logger.warning(f"Feature count mismatch! Model expects {expected_dim} features but got {X.shape[1]}.")
+            logger.warning(f"Adding {expected_dim - X.shape[1]} dummy features with zeros.")
+            
+            # Create padding with zeros
+            padding = np.zeros((X.shape[0], expected_dim - X.shape[1]))
+            X = np.hstack((X, padding))
+            logger.debug(f"New padded X shape: {X.shape}")
             
         # Check for uniform values that might indicate a problem
         feature_stds = np.std(X, axis=0)
         if np.any(feature_stds < 1e-6):
             logger.warning(f"Some features have near-zero standard deviation: {feature_stds}")
+
+        logger.info(f"Final preprocessed features shape: {X.shape} for {len(patient_ids)} patients")
     except Exception as e:
         logger.error(f"Error preprocessing features: {str(e)}")
         logger.error(traceback.format_exc())

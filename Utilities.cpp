@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <functional>
 #include <set>
+#include <sstream>  // Add this include for std::ostringstream
 
 namespace fs = std::filesystem;
 
@@ -152,4 +153,53 @@ void initializeDirectLookupsCaller() {
 void initializeObsAbnormalDirectCaller() {
     // Call the implementation from MedicalDictionaries.h
     initializeObsAbnormalDirect();
+}
+
+// New utility function to validate and fix feature CSV files for model compatibility
+bool validateFeatureCSV(const std::string& csvPath) {
+    std::cout << "[INFO] Validating feature CSV before Python inference: " << csvPath << "\n";
+    
+    // Use our Python feature validator if it exists
+    std::string validatorScript = "vitai_scripts/feature_validator.py";
+    if (!fs::exists(validatorScript)) {
+        // Try alternate location
+        validatorScript = "feature_validator.py";
+        if (!fs::exists(validatorScript)) {
+            std::cout << "[WARNING] Feature validator script not found, skipping validation\n";
+            return true; // Continue anyway
+        }
+    }
+    
+    // Run the validator
+#ifdef _WIN32
+    std::string pyCmd = "python";
+#else
+    std::string pyCmd = "python3";
+#endif
+
+    std::ostringstream cmd;
+    cmd << pyCmd << " " << validatorScript << " \"" << csvPath << "\"";
+    std::cout << "[INFO] Running: " << cmd.str() << "\n";
+    
+    int result = std::system(cmd.str().c_str());
+    if (result != 0) {
+        std::cerr << "[WARNING] Feature validation reported issues. Model inference may fail.\n";
+        
+        // Try to fix the issues
+        std::ostringstream fixCmd;
+        fixCmd << pyCmd << " " << validatorScript << " \"" << csvPath << "\" \"" << csvPath << "\"";
+        std::cout << "[INFO] Attempting to fix issues: " << fixCmd.str() << "\n";
+        
+        int fixResult = std::system(fixCmd.str().c_str());
+        if (fixResult != 0) {
+            std::cerr << "[ERROR] Failed to fix feature CSV issues.\n";
+            return false;
+        } else {
+            std::cout << "[INFO] Fixed feature CSV issues.\n";
+            return true;
+        }
+    }
+    
+    std::cout << "[INFO] Feature CSV validation passed.\n";
+    return true;
 }

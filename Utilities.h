@@ -69,3 +69,6 @@ float computeHealthIndex(const PatientRecord& patient);
 
 void initializeDirectLookups();
 void initializeObsAbnormalDirect();
+
+// Validate feature CSV for model compatibility
+bool validateFeatureCSV(const std::string& csvPath);
