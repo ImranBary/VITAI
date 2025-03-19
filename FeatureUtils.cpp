@@ -80,6 +80,30 @@ void writeFeaturesCSV(const std::vector<PatientRecord>& patients,
     }
     file << "\n";
     
+    // Map categorical values to integer indices for proper encoding
+    std::map<std::string, std::map<std::string, int>> categoryMaps;
+    std::vector<std::string> categoricalCols = {"GENDER", "RACE", "ETHNICITY", "MARITAL"};
+    
+    // First pass to build category maps
+    for (const auto& catCol : categoricalCols) {
+        std::map<std::string, int> valueMap;
+        int nextIndex = 0;
+        
+        for (const auto& p : patients) {
+            std::string value;
+            if (catCol == "GENDER") value = p.Gender;
+            else if (catCol == "RACE") value = p.RaceCategory;
+            else if (catCol == "ETHNICITY") value = p.EthnicityCategory;
+            else if (catCol == "MARITAL") value = p.MaritalStatus;
+            
+            if (!value.empty() && valueMap.find(value) == valueMap.end()) {
+                valueMap[value] = nextIndex++;
+            }
+        }
+        
+        categoryMaps[catCol] = valueMap;
+    }
+    
     // Write data rows
     for (const auto& p : patients) {
         file << p.Id;
@@ -87,10 +111,38 @@ void writeFeaturesCSV(const std::vector<PatientRecord>& patients,
             file << ",";
             if (col == "AGE") file << p.Age;
             else if (col == "DECEASED") file << (p.IsDeceased ? "1" : "0");  
-            else if (col == "GENDER") file << p.Gender;  // Write as string to match Python's categorical processing
-            else if (col == "RACE") file << p.RaceCategory;
-            else if (col == "ETHNICITY") file << p.EthnicityCategory;
-            else if (col == "MARITAL") file << p.MaritalStatus;
+            else if (col == "GENDER") {
+                int index = 0; // Default value
+                auto& valueMap = categoryMaps["GENDER"];
+                if (valueMap.find(p.Gender) != valueMap.end()) {
+                    index = valueMap[p.Gender];
+                }
+                file << index; // Write as integer
+            }
+            else if (col == "RACE") {
+                int index = 0;
+                auto& valueMap = categoryMaps["RACE"];
+                if (valueMap.find(p.RaceCategory) != valueMap.end()) {
+                    index = valueMap[p.RaceCategory];
+                }
+                file << index;
+            }
+            else if (col == "ETHNICITY") {
+                int index = 0;
+                auto& valueMap = categoryMaps["ETHNICITY"];
+                if (valueMap.find(p.EthnicityCategory) != valueMap.end()) {
+                    index = valueMap[p.EthnicityCategory];
+                }
+                file << index;
+            }
+            else if (col == "MARITAL") {
+                int index = 0;
+                auto& valueMap = categoryMaps["MARITAL"];
+                if (valueMap.find(p.MaritalStatus) != valueMap.end()) {
+                    index = valueMap[p.MaritalStatus];
+                }
+                file << index;
+            }
             else if (col == "HEALTHCARE_EXPENSES") file << p.HealthcareExpenses;
             else if (col == "HEALTHCARE_COVERAGE") file << p.HealthcareCoverage;
             else if (col == "INCOME") file << p.Income;

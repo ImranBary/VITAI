@@ -11,6 +11,7 @@ import argparse
 import logging
 from datetime import datetime
 import traceback
+import glob  # Add this import to fix the NameError
 
 import pandas as pd
 import numpy as np
@@ -274,10 +275,13 @@ def preprocess_features(df, model_id, expected_dim=None):
     # 2. Convert categorical columns from string -> ordinal numeric
     for col in cat_cols:
         if col in preproc_df.columns:
-            preproc_df[col] = preproc_df[col].astype(str)
-            unique_vals = preproc_df[col].unique()
-            val_to_idx = {val: idx for idx, val in enumerate(unique_vals)}
-            preproc_df[col] = preproc_df[col].map(val_to_idx).fillna(0)
+            # Ensure categorical values are properly converted to integers
+            if not pd.api.types.is_numeric_dtype(preproc_df[col]):
+                logger.warning(f"[{model_id}] Converting categorical column '{col}' from string to integer")
+                # For string values, we'll encode them as integers
+                unique_vals = preproc_df[col].astype(str).unique()
+                val_to_idx = {val: idx for idx, val in enumerate(unique_vals)}
+                preproc_df[col] = preproc_df[col].astype(str).map(val_to_idx).fillna(0).astype(int)
             
             # Ensure categorical columns are in feature_cols
             if col not in feature_cols:
@@ -334,7 +338,54 @@ def run_model_for_group(df, group_name, model_id, force_cpu=False):
         # Apply scaler if available to the original features
         if scaler is not None:
             logger.info(f"Applying scaler to features for model: {model_id}")
-            X = scaler.transform(X)
+            
+            # CRITICAL FIX: Check if scaler expects fewer features than we have
+            scaler_n_features = scaler.n_features_in_ if hasattr(scaler, 'n_features_in_') else len(scaler.mean_)
+            if scaler_n_features != X.shape[1]:
+                logger.warning(f"Feature count mismatch! Scaler expects {scaler_n_features} features but we have {X.shape[1]}")
+                
+                # Try to load feature names from metadata
+                metadata_file = None
+                model_dir = os.path.dirname(os.path.dirname(os.path.join(SCRIPT_DIR, "Data", "finals", model_id)))
+                metadata_candidates = glob.glob(os.path.join(model_dir, model_id, f"*metadata*.json"))
+                
+                if metadata_candidates:
+                    try:
+                        with open(metadata_candidates[0], 'r') as f:
+                            metadata = json.load(f)
+                            continuous_cols = metadata.get('continuous_columns', [])
+                            if continuous_cols:
+                                logger.info(f"Found continuous columns in metadata: {continuous_cols}")
+                                # Map column names to indices in our feature_cols list
+                                scaler_indices = [feature_cols.index(col) for col in continuous_cols if col in feature_cols]
+                                if len(scaler_indices) == scaler_n_features:
+                                    logger.info(f"Using only continuous columns for scaling: {[feature_cols[i] for i in scaler_indices]}")
+                                    # Scale only continuous features
+                                    X_continuous = X[:, scaler_indices]
+                                    X_continuous_scaled = scaler.transform(X_continuous)
+                                    # Put the scaled continuous features back
+                                    X[:, scaler_indices] = X_continuous_scaled
+                                else:
+                                    logger.warning("Couldn't match continuous columns to scaler dimensions")
+                    except Exception as e:
+                        logger.error(f"Error processing metadata: {e}")
+                
+                # If we couldn't find metadata or match columns, try a fallback approach
+                if scaler_n_features < X.shape[1]:
+                    logger.warning(f"Falling back to using first {scaler_n_features} features for scaling")
+                    # Scale only the first n features that the scaler expects
+                    X_subset = X[:, :scaler_n_features]
+                    X_subset_scaled = scaler.transform(X_subset)
+                    # Put the scaled subset back
+                    X[:, :scaler_n_features] = X_subset_scaled
+                else:
+                    # If scaler expects more features than we have, we can't continue
+                    logger.error(f"Scaler expects MORE features ({scaler_n_features}) than we have ({X.shape[1]}). Cannot continue.")
+                    raise ValueError("Incompatible feature dimensions")
+            else:
+                # Normal case: dimensions match, apply scaling
+                X = scaler.transform(X)
+                
             logger.debug(f"Sample scaled features (first row): {X[0]}")
             logger.debug(f"Scaled feature min/max: {np.min(X, axis=0)[:3]}.../{np.max(X, axis=0)[:3]}...")
         else:
@@ -349,7 +400,7 @@ def run_model_for_group(df, group_name, model_id, force_cpu=False):
             padding = np.zeros((X.shape[0], expected_dim - X.shape[1]))
             X = np.hstack((X, padding))
             logger.debug(f"New padded X shape: {X.shape}")
-            
+        
         # Check for uniform values that might indicate a problem
         feature_stds = np.std(X, axis=0)
         if np.any(feature_stds < 1e-6):

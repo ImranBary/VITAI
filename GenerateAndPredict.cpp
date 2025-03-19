@@ -436,6 +436,7 @@
      
      // Initialize medical dictionaries before using them
      initializeDirectLookups();
+     initializeElixhauserLookups(); // Add this call to initialize Elixhauser dictionary
      initializeObsAbnormalDirect();
      
      // 3. Always run Synthea to generate required data files
@@ -490,27 +491,87 @@
      // Conditions -> Charlson / Elixhauser / comorbidity
      std::cout << "[INFO] Processing conditions files (" << condFiles.size() << " files)...\n";
      int fileCounter = 0;
+     bool verboseDebug = true;  // Enable verbose debug output to see what's happening
+     int debugCount = 0;         // Counter to limit the number of debug messages
+     
+     // Let's print the first 10 entries in each dictionary to verify they're initialized
+     std::cout << "[DEBUG] First 10 entries in CHARLSON_CODE_TO_WEIGHT:" << std::endl;
+     int i = 0;
+     for (auto& entry : CHARLSON_CODE_TO_WEIGHT) {
+         if (i < 10) {
+             std::cout << "   " << entry.first << " -> " << entry.second << std::endl;
+             i++;
+         }
+     }
+     
+     std::cout << "[DEBUG] First 10 entries in ELIXHAUSER_CODE_TO_WEIGHT:" << std::endl;
+     i = 0;
+     for (auto& entry : ELIXHAUSER_CODE_TO_WEIGHT) {
+         if (i < 10) {
+             std::cout << "   " << entry.first << " -> " << entry.second << std::endl;
+             i++;
+         }
+     }
+     
      for (auto &condFile : condFiles) {
          fileCounter++;
-         std::cout << "[INFO] Processing condition file " << fileCounter << "/" << condFiles.size() << "\r" << std::flush;
+         std::cout << "[INFO] Processing condition file " << fileCounter << "/" << condFiles.size() << ": " 
+                   << condFile << std::endl; // Print full path
+         
          processConditionsInBatches(condFile, [&](const ConditionRow &cRow) {
+             // Debug the code to verify we're seeing actual condition codes
+             if (verboseDebug && debugCount < 20) {
+                 std::cout << "[DEBUG] Processing condition: " << cRow.CODE << " - " << cRow.DESCRIPTION << std::endl;
+                 debugCount++;
+             }
+             
              // Check dictionary for Charlson code weights
              auto charlsonIt = CHARLSON_CODE_TO_WEIGHT.find(cRow.CODE);
              if (charlsonIt != CHARLSON_CODE_TO_WEIGHT.end()) {
-                 charlsonCounter.addFloat(cRow.PATIENT, charlsonIt->second); // Fixed: added second parameter
-             }   
+                 charlsonCounter.addFloat(cRow.PATIENT, charlsonIt->second);
+                 
+                 // Optional debug to verify counter is being updated
+                 if (verboseDebug && debugCount < 40) {
+                     std::cout << "[DEBUG] Added Charlson weight " << charlsonIt->second 
+                               << " for patient " << cRow.PATIENT 
+                               << " (new total: " << charlsonCounter.getFloat(cRow.PATIENT) << ")\n";
+                     debugCount++;
+                 }
+             }
+             
              // Check dictionary for Elixhauser code weights
              auto elixhauserIt = ELIXHAUSER_CODE_TO_WEIGHT.find(cRow.CODE);
              if (elixhauserIt != ELIXHAUSER_CODE_TO_WEIGHT.end()) {
-                 elixhauserCounter.addFloat(cRow.PATIENT, elixhauserIt->second); // Fixed: added second parameter
-             }   
+                 elixhauserCounter.addFloat(cRow.PATIENT, elixhauserIt->second);
+             }
+             
              // Combined group weights
              double groupWeight = findGroupWeightFast(cRow.CODE);
              if (groupWeight > 0) {
                  comorbCounter.addFloat(cRow.PATIENT, static_cast<float>(groupWeight));
-             }   
-         }); 
-     }   
+             }
+             
+             // Also try lowercase description matching
+             std::string lowerDesc = cRow.DESCRIPTION;
+             std::transform(lowerDesc.begin(), lowerDesc.end(), lowerDesc.begin(), 
+                            [](unsigned char c){ return std::tolower(c); });
+                            
+             // Check for keywords in description
+             if (lowerDesc.find("diabetes") != std::string::npos) {
+                 charlsonCounter.addFloat(cRow.PATIENT, 1.0f); // Default diabetes weight
+                 elixhauserCounter.addFloat(cRow.PATIENT, 0.5f);
+             }
+             if (lowerDesc.find("heart failure") != std::string::npos) {
+                 charlsonCounter.addFloat(cRow.PATIENT, 1.0f);
+                 elixhauserCounter.addFloat(cRow.PATIENT, 1.5f);
+             }
+             if (lowerDesc.find("copd") != std::string::npos || 
+                 lowerDesc.find("chronic obstructive pulmonary") != std::string::npos) {
+                 charlsonCounter.addFloat(cRow.PATIENT, 1.0f);
+                 elixhauserCounter.addFloat(cRow.PATIENT, 0.9f);
+             }
+         });
+     }
      std::cout << std::endl;
      
      // Encounters -> hospitalization count
@@ -577,7 +638,7 @@
      
      // Debug counters before updating patients
      std::cout << "[DEBUG] First 5 patients from charlsonCounter:\n";
-     int debugCount = 0;
+     debugCount = 0;  // Reset the counter instead of redefining it
      for (auto& p : allPatients) {
          if (debugCount < 5) {
              std::cout << "   Patient " << p.Id << ": CharlsonIndex=" 
@@ -586,6 +647,19 @@
                        << ", Medications=" << medsCounter.getInt(p.Id) << "\n";
              debugCount++;
          }
+     }
+     
+     // Debug counter values after processing all files
+     std::cout << "[DEBUG] Random sample of counter values:\n";
+     for (int i = 0; i < 10 && i < allPatients.size(); ++i) {
+         std::string patientId = allPatients[i].Id;
+         std::cout << "Patient " << patientId << ":\n"
+                   << "  Charlson: " << charlsonCounter.getFloat(patientId) << "\n"
+                   << "  Elixhauser: " << elixhauserCounter.getFloat(patientId) << "\n" 
+                   << "  Comorbidity: " << comorbCounter.getFloat(patientId) << "\n"
+                   << "  Hospitalizations: " << hospitalCounter.getInt(patientId) << "\n"
+                   << "  Medications: " << medsCounter.getInt(patientId) << "\n"
+                   << "  Abnormal Obs: " << abnormalObsCounter.getInt(patientId) << "\n";
      }
      
      // 7. Update allPatients with these concurrency-safe counters
@@ -604,7 +678,7 @@
      
      // Debug the updated patient records
      std::cout << "[DEBUG] First 5 patient records after updating:\n";
-     debugCount = 0;
+     debugCount = 0;  // Reset the counter again
      for (auto& p : allPatients) {
          if (debugCount < 5) {
              std::cout << "   Patient " << p.Id << ": CharlsonIndex=" << p.CharlsonIndex 
