@@ -19,12 +19,12 @@ extern std::unordered_map<std::string, float> CHARLSON_CODE_TO_WEIGHT;
 extern std::unordered_map<std::string, float> ELIXHAUSER_CODE_TO_WEIGHT;
 extern std::unordered_map<std::string, std::pair<double, double>> OBS_ABNORMAL_THRESHOLDS;
 
-// Functions to initialize the dictionaries - implemented in .cpp file
+// Function declarations
 void initializeDirectLookups();
 void initializeElixhauserLookups();
 void initializeObsAbnormalDirect();
 
-// Fast lookup functions - implemented in .cpp file
+// Helper functions
 bool isAbnormalObsFast(const std::string& description, double value);
 double findGroupWeightFast(const std::string& code);
 

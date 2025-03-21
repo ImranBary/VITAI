@@ -14,6 +14,54 @@
  *   GenerateAndPredict.exe --population=100 --performance-mode
  *   GenerateAndPredict.exe --population=100 --extreme-performance
  *   GenerateAndPredict.exe --population=100 --memory-util=90 --cpu-util=95
+ *
+ * DEBUGGING GUIDE:
+ * ================
+ * This application comes with several debugging tools to diagnose issues:
+ *
+ * 1. debug_patient_data.exe - Tests patient data processing and index calculations
+ *    Usage: debug_patient_data.exe 
+ *    Output: patient_debug.csv - Contains patient IDs and their calculated indices
+ *    Use when: You suspect patient health indices aren't calculating correctly
+ *
+ * 2. run_debug.exe - Validates medical dictionaries and tests condition code matching
+ *    Usage: run_debug.exe
+ *    Output: Console logs showing dictionary contents and condition matching rates
+ *    Use when: You need to verify that condition codes map correctly to weights
+ *
+ * 3. thread_counter_debug.exe - Tests the ThreadSafeCounter class for correct operation
+ *    Usage: thread_counter_debug.exe
+ *    Output: Console logs showing counter operations and verification
+ *    Use when: You suspect threading issues with patient index calculations
+ *
+ * COMMON DEBUGGING SCENARIOS:
+ * ==========================
+ * 1. Zero/missing patient health indicators:
+ *    - Run debug_patient_data.exe to see if indices are being calculated
+ *    - Check patient_debug.csv for summary of affected patients
+ *    - Run run_debug.exe to verify condition code mappings and match rates
+ *    - Check medical dictionaries in MedicalDictionaries.cpp for correct entries
+ *
+ * 2. Python model prediction failures:
+ *    - Verify PatientFeatures.csv format using the feature_validator.py script
+ *    - Ensure Python environment has pytorch_tabnet, torch and sklearn installed
+ *    - Check that models exist in expected locations using verifyModelsExist()
+ *    - Look at Python output logs for specific error messages
+ *
+ * 3. Performance issues:
+ *    - Try reducing thread count with: --threads=4
+ *    - For large files, use --performance-mode
+ *    - On memory-constrained systems, try lower memory-util: --memory-util=50
+ *
+ * COMPILING DEBUG TOOLS:
+ * ====================
+ * Use build.bat to compile all components including debug tools:
+ *   build.bat
+ *
+ * To compile individually:
+ *   g++ -std=c++17 debug_patient_data.cpp FileProcessing.cpp MedicalDictionaries.cpp DataStructures.cpp -o debug_patient_data
+ *   g++ -std=c++17 run_debug.cpp FileProcessing.cpp MedicalDictionaries.cpp DataStructures.cpp HealthIndex.cpp -o run_debug
+ *   g++ -std=c++17 ThreadSafeCounterDebug.cpp DataStructures.cpp -o thread_counter_debug
  *****************************************************/
 
  #define NOMINMAX  // Prevent Windows macro conflicts
@@ -50,9 +98,9 @@
  #include "HealthIndex.h"          
  #include "MedicalDictionaries.h"  
  #include "ThreadPool.h"           
- #include "ResourceMonitor.h"      
- #include "SystemResources.h"      
- #include "BatchProcessorTuner.h"  
+ #include "ResourceMonitor.h"
+ #include "SystemResources.h"
+ #include "BatchProcessorTuner.h"
  
  #ifdef _WIN32
  #include <windows.h>
@@ -494,84 +542,102 @@
      bool verboseDebug = true;  // Enable verbose debug output to see what's happening
      int debugCount = 0;         // Counter to limit the number of debug messages
      
-     // Let's print the first 10 entries in each dictionary to verify they're initialized
-     std::cout << "[DEBUG] First 10 entries in CHARLSON_CODE_TO_WEIGHT:" << std::endl;
-     int i = 0;
-     for (auto& entry : CHARLSON_CODE_TO_WEIGHT) {
-         if (i < 10) {
-             std::cout << "   " << entry.first << " -> " << entry.second << std::endl;
-             i++;
-         }
-     }
+     // Add a debug counter for code matches
+     int totalConditions = 0;
+     int matchedCharlson = 0;
+     int matchedElixhauser = 0;
+     int matchedDescription = 0;
      
-     std::cout << "[DEBUG] First 10 entries in ELIXHAUSER_CODE_TO_WEIGHT:" << std::endl;
-     i = 0;
-     for (auto& entry : ELIXHAUSER_CODE_TO_WEIGHT) {
-         if (i < 10) {
-             std::cout << "   " << entry.first << " -> " << entry.second << std::endl;
-             i++;
-         }
-     }
-     
+     // Process conditions with enhanced debug output
      for (auto &condFile : condFiles) {
          fileCounter++;
          std::cout << "[INFO] Processing condition file " << fileCounter << "/" << condFiles.size() << ": " 
-                   << condFile << std::endl; // Print full path
+                   << condFile << std::endl;
          
          processConditionsInBatches(condFile, [&](const ConditionRow &cRow) {
-             // Debug the code to verify we're seeing actual condition codes
-             if (verboseDebug && debugCount < 20) {
+             totalConditions++;
+             
+             // Debug output for first 20 conditions
+             if (debugCount < 20) {
                  std::cout << "[DEBUG] Processing condition: " << cRow.CODE << " - " << cRow.DESCRIPTION << std::endl;
                  debugCount++;
              }
              
-             // Check dictionary for Charlson code weights
+             // Try exact code match first
              auto charlsonIt = CHARLSON_CODE_TO_WEIGHT.find(cRow.CODE);
              if (charlsonIt != CHARLSON_CODE_TO_WEIGHT.end()) {
                  charlsonCounter.addFloat(cRow.PATIENT, charlsonIt->second);
-                 
-                 // Optional debug to verify counter is being updated
-                 if (verboseDebug && debugCount < 40) {
+                 matchedCharlson++;
+                 if (debugCount < 40) {
                      std::cout << "[DEBUG] Added Charlson weight " << charlsonIt->second 
-                               << " for patient " << cRow.PATIENT 
-                               << " (new total: " << charlsonCounter.getFloat(cRow.PATIENT) << ")\n";
+                             << " for patient " << cRow.PATIENT 
+                             << " (code match: " << cRow.CODE << ")"<< std::endl;
                      debugCount++;
                  }
              }
              
-             // Check dictionary for Elixhauser code weights
              auto elixhauserIt = ELIXHAUSER_CODE_TO_WEIGHT.find(cRow.CODE);
              if (elixhauserIt != ELIXHAUSER_CODE_TO_WEIGHT.end()) {
                  elixhauserCounter.addFloat(cRow.PATIENT, elixhauserIt->second);
+                 matchedElixhauser++;
              }
              
-             // Combined group weights
-             double groupWeight = findGroupWeightFast(cRow.CODE);
-             if (groupWeight > 0) {
-                 comorbCounter.addFloat(cRow.PATIENT, static_cast<float>(groupWeight));
+             // Try prefix match if exact match fails
+             if (charlsonIt == CHARLSON_CODE_TO_WEIGHT.end() && cRow.CODE.length() >= 3) {
+                 std::string prefix = cRow.CODE.substr(0, 3);
+                 charlsonIt = CHARLSON_CODE_TO_WEIGHT.find(prefix);
+                 if (charlsonIt != CHARLSON_CODE_TO_WEIGHT.end()) {
+                     charlsonCounter.addFloat(cRow.PATIENT, charlsonIt->second);
+                     matchedCharlson++;
+                     if (debugCount < 60) {
+                         std::cout << "[DEBUG] Added Charlson weight " << charlsonIt->second 
+                                 << " for patient " << cRow.PATIENT 
+                                 << " (prefix match: " << prefix << " from " << cRow.CODE << ")" << std::endl;
+                         debugCount++;
+                     }
+                 }
              }
              
-             // Also try lowercase description matching
+             // Normalize description and try text matching (like Python's approach)
              std::string lowerDesc = cRow.DESCRIPTION;
              std::transform(lowerDesc.begin(), lowerDesc.end(), lowerDesc.begin(), 
-                            [](unsigned char c){ return std::tolower(c); });
-                            
-             // Check for keywords in description
+                          [](unsigned char c){ return std::tolower(c); });
+                          
+             // Check for keywords in description like Python
              if (lowerDesc.find("diabetes") != std::string::npos) {
-                 charlsonCounter.addFloat(cRow.PATIENT, 1.0f); // Default diabetes weight
+                 charlsonCounter.addFloat(cRow.PATIENT, 2.0f); // Match Python weight of 2
                  elixhauserCounter.addFloat(cRow.PATIENT, 0.5f);
+                 matchedDescription++;
+                 if (debugCount < 80) {
+                     std::cout << "[DEBUG] Added diabetes weight via description match for patient "
+                               << cRow.PATIENT << std::endl;
+                     debugCount++;
+                 }
              }
-             if (lowerDesc.find("heart failure") != std::string::npos) {
-                 charlsonCounter.addFloat(cRow.PATIENT, 1.0f);
+             else if (lowerDesc.find("heart failure") != std::string::npos) {
+                 charlsonCounter.addFloat(cRow.PATIENT, 3.0f); // Match Python cardiovascular weight
                  elixhauserCounter.addFloat(cRow.PATIENT, 1.5f);
+                 matchedDescription++;
              }
-             if (lowerDesc.find("copd") != std::string::npos || 
-                 lowerDesc.find("chronic obstructive pulmonary") != std::string::npos) {
-                 charlsonCounter.addFloat(cRow.PATIENT, 1.0f);
+             else if (lowerDesc.find("copd") != std::string::npos || 
+                      lowerDesc.find("chronic obstructive pulmonary") != std::string::npos) {
+                 charlsonCounter.addFloat(cRow.PATIENT, 2.0f); // Match Python respiratory weight
                  elixhauserCounter.addFloat(cRow.PATIENT, 0.9f);
+                 matchedDescription++;
              }
          });
      }
+     
+     // Print statistics about condition processing
+     std::cout << "[INFO] Condition processing stats:" << std::endl;
+     std::cout << "  Total conditions: " << totalConditions << std::endl;
+     std::cout << "  Matched Charlson code: " << matchedCharlson << " (" 
+               << (matchedCharlson * 100.0f / totalConditions) << "%)" << std::endl;
+     std::cout << "  Matched Elixhauser code: " << matchedElixhauser << " (" 
+               << (matchedElixhauser * 100.0f / totalConditions) << "%)" << std::endl;
+     std::cout << "  Matched by description: " << matchedDescription << " (" 
+               << (matchedDescription * 100.0f / totalConditions) << "%)" << std::endl;
+
      std::cout << std::endl;
      
      // Encounters -> hospitalization count
@@ -710,42 +776,30 @@
          // Convert to lowercase for case-insensitive matching
          std::transform(description.begin(), description.end(), description.begin(), 
                       [](unsigned char c){ return std::tolower(c); });
-         // Check for diabetes - more comprehensive checks
-         // ICD-10 codes for diabetes typically start with E10-E14
-         if (description.find("diabetes") != std::string::npos || 
-             (code.size() >= 3 && code[0] == 'E' && 
-              code[1] == '1' && code[2] >= '0' && code[2] <= '4')) {
+         
+         // Check for diabetes - match Python implementation (subset_utils.py)
+         // Python uses: mask = conditions["DESCRIPTION"].str.lower().str.contains("diabetes", na=False)
+         if (description.find("diabetes") != std::string::npos) {
              diabeticSet.insert(cond.PATIENT);
          }   
          
-         // Check for CKD - more comprehensive checks
-         if (description.find("chronic kidney disease") != std::string::npos || 
-             description.find("ckd") != std::string::npos ||
-             (code.size() >= 3 && code.substr(0, 3) == "N18")) {
+         // Check for CKD - match Python implementation (subset_ckd)
+         // Python defines the same exact codes and case-insensitive text search
+         std::set<std::string> ckdCodes = {"431855005", "431856006", "433144002", "431857002", "46177005"};
+         
+         if (ckdCodes.find(code) != ckdCodes.end() || 
+             description.find("chronic kidney disease") != std::string::npos) {
              ckdSet.insert(cond.PATIENT);
-         }   
+         }
      }   
      
-     // If we still didn't find any patients, check against all patient records
-     // This simulates what the Python code might be doing
+     // Remove arbitrary percentage allocation and replace with proper fallback check
      if (diabeticSet.empty()) {
-         std::cout << "[INFO] No diabetic patients found by condition codes/descriptions, checking alternative criteria...\n";
-         // Calculate target number (approximately 50-55% of patients for diabetes)
-         // This better matches Python's distribution seen in the logs
-         size_t targetDiabeticCount = allPatients.size() * 0.52;  
-         size_t currentCount = 0;
-         for (const auto& patient : allPatients) {
-             // Use a more deterministic approach that will give us closer to the right percentage
-             // Python reports ~52% diabetic patients (60 out of 115)
-             if (currentCount < targetDiabeticCount) {
-                 diabeticSet.insert(patient.Id);
-                 currentCount++;
-             }   
-         }   
-         std::cout << "[INFO] Assigned " << diabeticSet.size() << " patients to diabetes group using percentage-based allocation.\n";
+         std::cout << "[WARNING] No diabetic patients found by condition codes/descriptions.\n";
+         std::cout << "[INFO] This might indicate issues with the condition data or coding system.\n";
      }   
-     std::cout << "[INFO] Found " << diabeticSet.size() << " diabetic patients.\n";
-     std::cout << "[INFO] Found " << ckdSet.size() << " CKD patients.\n";
+     std::cout << "[INFO] Found " << diabeticSet.size() << " diabetic patients using clinical criteria.\n";
+     std::cout << "[INFO] Found " << ckdSet.size() << " CKD patients using clinical criteria.\n";
      
      // For verification, we can also log patient IDs to a file for debugging
      std::ofstream diabeticFile("diabetic_patients.txt");

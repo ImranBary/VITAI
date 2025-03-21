@@ -5,6 +5,7 @@
 #include <fstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 #include "DataStructures.h"
 #include "BatchProcessor.h"
 #include "Utilities.h"
@@ -18,6 +19,9 @@ inline std::string normalizeFieldName(const std::string& fieldName) {
     // Add other field name mappings as needed
     return fieldName;
 }
+
+bool fileExists(const std::string& filename);
+std::vector<std::string> listCSVFiles(const std::string& directory);
 
 // Batch file processing functions
 void processConditionsInBatches(const std::string &path,
@@ -43,3 +47,6 @@ void countHospitalizationsInBatches(std::function<void(const std::string&, uint1
 void computeCharlsonIndexBatched(std::function<void(const std::string&, float)> scoreCallback);
 
 void computeElixhauserIndexBatched(std::function<void(const std::string&, float)> scoreCallback);
+
+// Utility to save patient data to CSV for debugging
+void savePatientDataToCSV(const std::vector<PatientRecord>& patients, const std::string& filename);

@@ -78,6 +78,45 @@ void initializeDirectLookups() {
     CHARLSON_CODE_TO_WEIGHT.insert({"asthma", 1.0f});
     CHARLSON_CODE_TO_WEIGHT.insert({"cancer", 2.0f});
     
+    // ===== IMPORTANT: Match the Python snomed_groups with appropriate weights =====
+    
+    // Cardiovascular Diseases (weight: 3 in Python)
+    CHARLSON_CODE_TO_WEIGHT.insert({"53741008", 3.0f});  // Coronary arteriosclerosis
+    CHARLSON_CODE_TO_WEIGHT.insert({"445118002", 3.0f}); // Pulmonary embolism
+    CHARLSON_CODE_TO_WEIGHT.insert({"59621000", 3.0f});  // Essential hypertension
+    CHARLSON_CODE_TO_WEIGHT.insert({"22298006", 3.0f});  // Myocardial infarction
+    CHARLSON_CODE_TO_WEIGHT.insert({"56265001", 3.0f});  // Heart disease
+    
+    // Respiratory Diseases (weight: 2 in Python)
+    CHARLSON_CODE_TO_WEIGHT.insert({"19829001", 2.0f});  // Disorders of lung
+    CHARLSON_CODE_TO_WEIGHT.insert({"233604007", 2.0f}); // Pneumonia
+    CHARLSON_CODE_TO_WEIGHT.insert({"118940003", 2.0f}); // Disorder of respiratory system
+    CHARLSON_CODE_TO_WEIGHT.insert({"409622000", 2.0f}); // Respiratory hypersensitivity
+    CHARLSON_CODE_TO_WEIGHT.insert({"13645005", 2.0f});  // COPD
+    
+    // Diabetes (weight: 2 in Python)
+    CHARLSON_CODE_TO_WEIGHT.insert({"44054006", 2.0f});  // Type 2 diabetes
+    CHARLSON_CODE_TO_WEIGHT.insert({"73211009", 2.0f});  // Diabetes mellitus
+    CHARLSON_CODE_TO_WEIGHT.insert({"46635009", 2.0f});  // Type 1 diabetes
+    CHARLSON_CODE_TO_WEIGHT.insert({"190330002", 2.0f}); // Type 1 diabetes mellitus
+    CHARLSON_CODE_TO_WEIGHT.insert({"15777000", 2.0f});  // Prediabetes
+    CHARLSON_CODE_TO_WEIGHT.insert({"237599002", 2.0f}); // Insulin-treated diabetes
+    
+    // Also add ICD-10 codes for diabetes
+    CHARLSON_CODE_TO_WEIGHT.insert({"E08", 2.0f});
+    CHARLSON_CODE_TO_WEIGHT.insert({"E09", 2.0f});
+    CHARLSON_CODE_TO_WEIGHT.insert({"E10", 2.0f});
+    CHARLSON_CODE_TO_WEIGHT.insert({"E11", 2.0f});
+    CHARLSON_CODE_TO_WEIGHT.insert({"E13", 2.0f});
+    
+    // Add the Python case-insensitive text matches
+    CHARLSON_CODE_TO_WEIGHT.insert({"diabetes", 2.0f});
+    CHARLSON_CODE_TO_WEIGHT.insert({"heart failure", 3.0f});
+    CHARLSON_CODE_TO_WEIGHT.insert({"copd", 2.0f});
+    CHARLSON_CODE_TO_WEIGHT.insert({"hypertension", 3.0f});
+    CHARLSON_CODE_TO_WEIGHT.insert({"renal disease", 2.0f});
+    CHARLSON_CODE_TO_WEIGHT.insert({"kidney disease", 2.0f});
+    
     std::cout << "[INFO] Initialized Charlson dictionary with " 
               << CHARLSON_CODE_TO_WEIGHT.size() << " entries\n";
 }
@@ -147,35 +186,46 @@ void initializeObsAbnormalDirect() {
 }
 
 bool isAbnormalObsFast(const std::string& description, double value) {
-    // Case-insensitive check by trying various capitalizations
+    // First try exact match
     auto it = OBS_ABNORMAL_THRESHOLDS.find(description);
     if (it != OBS_ABNORMAL_THRESHOLDS.end()) {
         auto [minNormal, maxNormal] = it->second;
         return value < minNormal || value > maxNormal;
     }
     
-    // Check some variations of the description
+    // Try normalized description
     std::string lowerDesc = description;
     std::transform(lowerDesc.begin(), lowerDesc.end(), lowerDesc.begin(), 
-                  [](unsigned char c){ return std::tolower(c); });
+                   [](unsigned char c){ return std::tolower(c); });
     
-    // Check if it contains key terms
+    // Use the same mapping as in the Python code
+    if (lowerDesc.find("systolic") != std::string::npos || 
+        lowerDesc.find("blood pressure") != std::string::npos) {
+        return value < 90.0 || value > 140.0;  // Match Python value ranges
+    }
+    
+    if (lowerDesc.find("diastolic") != std::string::npos) {
+        return value < 60.0 || value > 90.0;
+    }
+    
+    if (lowerDesc.find("bmi") != std::string::npos || lowerDesc.find("body mass index") != std::string::npos) {
+        return value < 18.5 || value > 24.9;
+    }
+    
     if (lowerDesc.find("glucose") != std::string::npos) {
-        return value < 70.0 || value > 126.0;
+        return value < 70.0 || value > 99.0;
     }
-    if (lowerDesc.find("blood pressure") != std::string::npos) {
-        if (lowerDesc.find("systolic") != std::string::npos) {
-            return value < 90.0 || value > 140.0;
-        }
-        if (lowerDesc.find("diastolic") != std::string::npos) {
-            return value < 60.0 || value > 90.0;
-        }
-    }
+    
     if (lowerDesc.find("heart rate") != std::string::npos) {
         return value < 60.0 || value > 100.0;
     }
     
-    // Default - not recognized as a known observation type
+    // Enhanced matching based on Python's observation_mappings
+    if (lowerDesc.find("oxygen saturation") != std::string::npos) {
+        return value < 94.0 || value > 100.0;
+    }
+    
+    // Default
     return false;
 }
 

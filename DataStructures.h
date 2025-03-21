@@ -117,6 +117,15 @@ public:
         auto it = floatCounts.find(key);
         return (it != floatCounts.end()) ? it->second : 0.0f;
     }
+    
+    // Added for debugging - access to internal maps
+    const std::unordered_map<std::string, int>& internalMap() const {
+        return intCounts;
+    }
+    
+    const std::unordered_map<std::string, float>& internalFloatMap() const {
+        return floatCounts;
+    }
 };
 
 // External variable declarations

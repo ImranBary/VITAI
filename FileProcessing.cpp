@@ -8,13 +8,20 @@
 #include <vector>
 #include <functional>
 #include <filesystem>
+#include <ctime>
+#include <sstream>
+#include <iomanip>
 
 namespace fs = std::filesystem;
 
-// Helper function to check if a file exists
+// Enhanced helper function to check if a file exists and is readable
 bool fileExists(const std::string& filename) {
     std::ifstream file(filename);
-    return file.good();
+    bool exists = file.good();
+    if (!exists) {
+        std::cerr << "[ERROR] File does not exist or is not readable: " << filename << "\n";
+    }
+    return exists;
 }
 
 std::vector<std::string> listCSVFiles(const std::string& directory) {
@@ -419,29 +426,218 @@ void processEncountersInBatches(const std::string &path,
               << inpatientCount << " inpatient encounters from " << path << std::endl;
 }
 
+// Add this helper function to get the current date in YYYY-MM-DD format
+std::string getCurrentDate() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+    std::tm* now_tm = std::localtime(&now_c);
+    
+    std::ostringstream oss;
+    oss << std::put_time(now_tm, "%Y-%m-%d");
+    return oss.str();
+}
+
+// Helper function to parse date string in format YYYY-MM-DD
+bool parseDate(const std::string& dateStr, int& year, int& month, int& day) {
+    std::istringstream ss(dateStr);
+    char delimiter;
+    ss >> year >> delimiter >> month >> delimiter >> day;
+    return !ss.fail();
+}
+
+// Calculate age based on birthdate and reference date (default: 2023-01-01)
+int calculateAge(const std::string& birthDateStr, const std::string& refDateStr) {
+    // Handle empty birth date
+    if (birthDateStr.empty()) {
+        return 0; // Return default age if no birth date
+    }
+    
+    // Parse birth date
+    int birthYear, birthMonth, birthDay;
+    if (!parseDate(birthDateStr, birthYear, birthMonth, birthDay)) {
+        // Log an error and return default
+        std::cerr << "[WARNING] Failed to parse birth date: " << birthDateStr << "\n";
+        return 0;
+    }
+    
+    // Parse reference date
+    int refYear = 2023, refMonth = 1, refDay = 1; // Default reference date
+    if (!refDateStr.empty()) {
+        if (!parseDate(refDateStr, refYear, refMonth, refDay)) {
+            // Log and use default
+            std::cerr << "[WARNING] Failed to parse reference date: " << refDateStr << ", using default\n";
+        }
+    }
+    
+    // Calculate age
+    int age = refYear - birthYear;
+    
+    // Adjust age if birthday hasn't occurred yet in the reference year
+    if (refMonth < birthMonth || (refMonth == birthMonth && refDay < birthDay)) {
+        age--;
+    }
+    
+    // Validate age
+    if (age < 0) {
+        std::cerr << "[WARNING] Calculated negative age from: " << birthDateStr << " to " << refDateStr << "\n";
+        return 0; // Handle future birthdates gracefully
+    }
+    
+    return age;
+}
+
+// Process patients with age calculation
 void processPatientsInBatches(const std::string &path,
                             std::function<void(const PatientRecord&)> callback) {
     if (!fileExists(path)) {
-        std::cerr << "Error: File " << path << " not found.\n";
+        std::cerr << "[ERROR] File " << path << " not found.\n";
         return;
     }
 
+    std::cout << "[DEBUG] Processing patients file: " << path << std::endl;
     std::ifstream file(path);
     std::string line;
     
-    // Skip header line
-    std::getline(file, line);
+    // Skip header line and capture column names
+    if (!std::getline(file, line)) {
+        std::cerr << "[ERROR] Empty patients file or couldn't read header: " << path << std::endl;
+        return;
+    }
     
+    // Debug the header line to see what columns we have
+    std::cout << "[DEBUG] Patient file header: " << line << std::endl;
+    
+    std::vector<std::string> headerFields;
+    std::istringstream headerStream(line);
+    std::string headerField;
+    
+    // Parse header to find column indices - handle quoted field names
+    bool inQuotes = false;
+    std::string field;
+    for (size_t i = 0; i < line.length(); i++) {
+        char c = line[i];
+        if (c == '"') {
+            inQuotes = !inQuotes;
+        } else if (c == ',' && !inQuotes) {
+            // Trim any quotes from field name
+            if (field.length() >= 2 && field.front() == '"' && field.back() == '"') {
+                field = field.substr(1, field.length() - 2);
+            }
+            headerFields.push_back(field);
+            field.clear();
+        } else {
+            field.push_back(c);
+        }
+    }
+    
+    // Add the last field
+    if (!field.empty()) {
+        if (field.length() >= 2 && field.front() == '"' && field.back() == '"') {
+            field = field.substr(1, field.length() - 2);
+        }
+        headerFields.push_back(field);
+    }
+    
+    std::cout << "[DEBUG] Parsed " << headerFields.size() << " columns from header: ";
+    for (const auto& field : headerFields) {
+        std::cout << field << ", ";
+    }
+    std::cout << std::endl;
+    
+    int rowCount = 0;
+    
+    // Process each data row
     while (std::getline(file, line)) {
-        std::istringstream ss(line);
-        PatientRecord patient;
+        rowCount++;
         
-        // Parse CSV line into PatientRecord fields
-        std::getline(ss, patient.Id, ',');
-        // ... parse other fields
+        // Improved CSV parsing with quote handling
+        std::vector<std::string> fields;
+        field.clear();
+        inQuotes = false;
+        
+        for (size_t i = 0; i < line.length(); i++) {
+            char c = line[i];
+            if (c == '"') {
+                inQuotes = !inQuotes;
+            } else if (c == ',' && !inQuotes) {
+                fields.push_back(field);
+                field.clear();
+            } else {
+                field.push_back(c);
+            }
+        }
+        fields.push_back(field); // Add the last field
+        
+        // Debug row parsing for first 5 rows
+        if (rowCount <= 5) {
+            std::cout << "[DEBUG] Row " << rowCount << " parsed " << fields.size() 
+                      << " fields (expecting " << headerFields.size() << ")" << std::endl;
+        }
+        
+        // Skip malformed rows
+        if (fields.size() < headerFields.size()) {
+            std::cerr << "[WARNING] Skipping row " << rowCount << " with only " << fields.size() 
+                      << " fields (expected " << headerFields.size() << ")\n";
+            continue;
+        }
+        
+        // Create a map of column names to values
+        std::unordered_map<std::string, std::string> rowData;
+        for (size_t i = 0; i < headerFields.size() && i < fields.size(); i++) {
+            rowData[headerFields[i]] = fields[i];
+        }
+        
+        // Create patient record from the row data
+        PatientRecord patient;
+        patient.Id = rowData.count("Id") ? rowData["Id"] : "";
+        patient.Birthdate = rowData.count("BIRTHDATE") ? rowData["BIRTHDATE"] : "";
+        patient.Deathdate = rowData.count("DEATHDATE") ? rowData["DEATHDATE"] : "";
+        patient.Gender = rowData.count("GENDER") ? rowData["GENDER"] : "";
+        patient.RaceCategory = rowData.count("RACE") ? rowData["RACE"] : "";
+        patient.EthnicityCategory = rowData.count("ETHNICITY") ? rowData["ETHNICITY"] : "";
+        patient.MaritalStatus = rowData.count("MARITAL") ? rowData["MARITAL"] : "";
+        
+        // Parse numerical fields with error handling
+        try {
+            if (rowData.count("HEALTHCARE_EXPENSES") && !rowData["HEALTHCARE_EXPENSES"].empty()) {
+                patient.HealthcareExpenses = std::stof(rowData["HEALTHCARE_EXPENSES"]);
+            }
+        } catch (...) {
+            std::cerr << "[WARNING] Invalid HEALTHCARE_EXPENSES for patient " << patient.Id << "\n";
+        }
+        
+        try {
+            if (rowData.count("HEALTHCARE_COVERAGE") && !rowData["HEALTHCARE_COVERAGE"].empty()) {
+                patient.HealthcareCoverage = std::stof(rowData["HEALTHCARE_COVERAGE"]);
+            }
+        } catch (...) {
+            std::cerr << "[WARNING] Invalid HEALTHCARE_COVERAGE for patient " << patient.Id << "\n";
+        }
+        
+        try {
+            if (rowData.count("INCOME") && !rowData["INCOME"].empty()) {
+                patient.Income = std::stof(rowData["INCOME"]);
+            }
+        } catch (...) {
+            std::cerr << "[WARNING] Invalid INCOME for patient " << patient.Id << "\n";
+        }
+        
+        // Calculate age properly using the patient's birthdate
+        patient.Age = calculateAge(patient.Birthdate, getCurrentDate());
+        
+        // Determine if patient is deceased
+        patient.IsDeceased = !patient.Deathdate.empty();
+        
+        // Debug every 50th patient
+        if (rowCount % 50 == 1) {
+            std::cout << "[DEBUG] Sample patient: " << patient.Id << ", Gender: " << patient.Gender 
+                      << ", Birth: " << patient.Birthdate << ", Age: " << patient.Age << std::endl;
+        }
         
         callback(patient);
     }
+    
+    std::cout << "[INFO] Processed " << rowCount << " patients from " << path << std::endl;
 }
 
 static PatientRecord parsePatientCSV(const std::vector<std::string>& header, const std::vector<std::string>& row) {
@@ -466,7 +662,7 @@ static PatientRecord parsePatientCSV(const std::vector<std::string>& header, con
     record.RaceCategory = rowMap.count("RACE") ? rowMap["RACE"] : "";
     record.EthnicityCategory = rowMap.count("ETHNICITY") ? rowMap["ETHNICITY"] : "";
     record.MaritalStatus = rowMap.count("MARITAL") ? rowMap["MARITAL"] : "";
-    
+
     // Parse numerical fields with proper error handling
     if (rowMap.count("HEALTHCARE_EXPENSES")) {
         try {
@@ -491,7 +687,7 @@ static PatientRecord parsePatientCSV(const std::vector<std::string>& header, con
             std::cerr << "[WARNING] Invalid INCOME value: " << rowMap["INCOME"] << "\n";
         }
     }
-    
+
     // Calculate age from BIRTHDATE
     if (!record.Birthdate.empty()) {
         try {
@@ -505,16 +701,15 @@ static PatientRecord parsePatientCSV(const std::vector<std::string>& header, con
             if (now) {
                 currentYear = now->tm_year + 1900;
             }
-            
             record.Age = currentYear - birthYear;
         } catch (...) {
             std::cerr << "[WARNING] Invalid BIRTHDATE: " << record.Birthdate << " for patient " << record.Id << "\n";
         }
     }
-    
+
     // Determine if patient is deceased
     record.IsDeceased = !record.Deathdate.empty();
-    
+
     return record;
 }
 

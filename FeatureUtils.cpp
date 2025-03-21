@@ -8,22 +8,13 @@
 #include <algorithm>
 #include <sstream>
 
-// Define a function to get the exact feature columns expected by the model
+// This feature list now exactly matches what the Python model expects
 std::vector<std::string> getModelExpectedFeatures() {
-    // Return all features the model expects, exactly matching Python's expectations
     return {
-        "AGE", 
-        "DECEASED", 
-        "GENDER", 
-        "RACE", 
-        "ETHNICITY", 
-        "MARITAL", 
-        "HEALTHCARE_EXPENSES", 
-        "HEALTHCARE_COVERAGE", 
-        "INCOME", 
-        "Hospitalizations_Count", 
-        "Medications_Count", 
-        "Abnormal_Observations_Count"
+        "AGE", "DECEASED", "GENDER", "RACE", "ETHNICITY", "MARITAL", "HEALTHCARE_EXPENSES", 
+        "HEALTHCARE_COVERAGE", "INCOME", "CharlsonIndex", "ElixhauserIndex", 
+        "Comorbidity_Score", "Hospitalizations_Count", "Medications_Count", 
+        "Abnormal_Observations_Count", "Health_Index"
     };
 }
 
