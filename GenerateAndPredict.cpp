@@ -118,6 +118,9 @@
      // Use the utility function to ensure consistency with model expectations
      return getModelExpectedFeatures();
  }
+
+// Add this declaration before main()
+std::string getCurrentTimestampString();
  
  //-----------------------------------------------------------------------------------
  // Command-line argument parsing-----------------------------------------------------
@@ -373,9 +376,26 @@
      const std::string pyCmdBase = "python3";
      const std::string tempOutputFile = "/tmp/temp_py_output.txt";
  #endif
+
+     // Locate the Python script
+     fs::path pythonScriptPath = "run_patient_group_predictions.py";
+     if (!fs::exists(pythonScriptPath)) {
+         // Try SCRIPT_DIR location
+         pythonScriptPath = fs::path(SCRIPT_DIR) / "run_patient_group_predictions.py";
+         if (!fs::exists(pythonScriptPath)) {
+             // Try vitai_scripts subdirectory
+             pythonScriptPath = "vitai_scripts/run_patient_group_predictions.py";
+             if (!fs::exists(pythonScriptPath)) {
+                 std::cerr << "[ERROR] Required Python script not found: run_patient_group_predictions.py\n";
+                 return false;
+             }
+         }
+     }
+     std::cout << "[INFO] Found Python script at: " << pythonScriptPath << std::endl;
+
      std::ostringstream cmd;
-     cmd << pyCmdBase << " run_patient_group_predictions.py"
-         // Make sure to convert the path to string
+     // Use exact path to Python script with proper quotes
+     cmd << pyCmdBase << " \"" << pythonScriptPath.string() << "\""
          << " --input-csv=\"" << fs::absolute(inputPath).string() << "\"";
      if (forceCPU) {
          cmd << " --force-cpu";
@@ -433,10 +453,13 @@
      
      // Verify that output files were created
      std::string timestamp = std::to_string(std::time(nullptr)); // Simple timestamp
+     // Use the actual timestamp format from Python (YYYYMMDD_HHMMSS) for better matching
+     std::string currentDate = std::string("_") + getCurrentTimestampString();
+     
      std::vector<std::string> expectedOutputs = {
-         "Data/new_predictions/combined_diabetes_tabnet_predictions_",
-         "Data/new_predictions/combined_all_ckd_tabnet_predictions_",
-         "Data/new_predictions/combined_none_tabnet_predictions_"
+         "combined_diabetes_tabnet_predictions_",
+         "combined_all_ckd_tabnet_predictions_",
+         "combined_none_tabnet_predictions_"
      };
      
      bool outputsFound = false;
@@ -800,7 +823,7 @@
          // Python defines the same exact codes and case-insensitive text search
          std::set<std::string> ckdCodes = {"431855005", "431856006", "433144002", "431857002", "46177005"};
          
-         if (ckdCodes.find(code) != ckdCodes.end() || 
+         if (ckdCodes.find(code) != std::string::npos || 
              description.find("chronic kidney disease") != std::string::npos) {
              ckdSet.insert(cond.PATIENT);
          }
@@ -828,9 +851,11 @@
      // 9. Create feature CSV for inference or training
      std::string featureConfig = "combined_all"; 
      // Get expected features with exact capitalization 
-     auto featureCols = getRequiredFeatures();
+     auto featureCols = getRequiredFeatures(); 
+     // Add this before writeFeaturesCSV to normalize features
+     std::cout << "[INFO] Normalizing features to match Python scaling..." << std::endl;
+     normalizePatientFeatures(allPatients);  // Add this function to FeatureUtils.cpp
      writeFeaturesCSV(allPatients, "PatientFeatures.csv", featureCols);
-     
      // Validate the feature CSV before running predictions
      validateFeatureCSV("PatientFeatures.csv");
      
@@ -853,22 +878,25 @@
          }
      }
      std::cout << "[INFO] Found Python script at: " << pythonScriptPath << std::endl;
-
+     
      // Run model inspector to check our model requirements
      std::cout << "[INFO] Running model inspector to verify embedding dimensions...\n";
      std::system("python model_inspector.py");
-
+     
      // 10. Call Python script for patient grouping and multi-model predictions
      bool ok = false;
 
      // First try the adapted tabnet solution
      std::cout << "[INFO] Running inference with TabNet adapter...\n";
-     std::string adapterCmd = "python tabnet_adapter.py --input=\"PatientFeatures.csv\" --model=\"combined_diabetes_tabnet\"";
+     // Change the model parameter to match what tabnet_adapter.py expects
+     std::string adapterCmd = "python tabnet_adapter.py --input=\"" + fs::absolute("PatientFeatures.csv").string() + 
+                             "\" --model=\"combined_diabetes_tabnet\"";
+     // Fix: Use output-dir instead of output_dir, and remove the = sign
+     adapterCmd += " --output-dir \"Data/new_predictions\"";
      if (forceCPU) {
          adapterCmd += " --force-cpu";
      }
      int adapterResult = std::system(adapterCmd.c_str());
-
      if (adapterResult == 0) {
          ok = true;
          std::cout << "[INFO] TabNet adapter ran successfully.\n";
@@ -900,7 +928,7 @@
      } else {
          std::cout << "[INFO] GenerateAndPredict completed successfully.\n";
          return 0;
-     } 
+     }   
  }
 
 // Function to calculate age based on birthdate - moved before main
@@ -931,4 +959,20 @@ int calculateAge(const std::string& birthdate) {
         std::cerr << "[WARNING] Error calculating age from birthdate: " << birthdate << ": " << e.what() << std::endl;
         return 30; // Default on error
     }
+}
+
+// Add this helper function to get timestamp string in the same format as Python
+std::string getCurrentTimestampString() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+    struct tm local_tm;
+#ifdef _WIN32
+    localtime_s(&local_tm, &now_c);
+#else
+    localtime_r(&local_tm, &now_c);
+#endif
+    
+    char buffer[20];
+    std::strftime(buffer, sizeof(buffer), "%Y%m%d_%H%M%S", &local_tm);
+    return std::string(buffer);
 }

@@ -23,6 +23,9 @@ void saveFinalDataCSV(const std::vector<PatientRecord> &pats,
                     const std::string &outfile);
 void cleanupFiles(const std::vector<std::string> &files);
 
+// Add function prototype for feature normalization
+void normalizePatientFeatures(std::vector<PatientRecord>& patients);
+
 // Add function prototype for getPatientFieldByName
 std::string getPatientFieldByName(const PatientRecord& patient, const std::string& fieldName);
 

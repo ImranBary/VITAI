@@ -12,24 +12,25 @@
 
 // Function to get exact features needed by the TabNet model
 std::vector<std::string> getModelExpectedFeatures() {
+    // Include all columns required by run_patient_group_predictions.py
     return {
-        "Id",
-        "AGE",
-        "MARITAL",
-        "RACE",
-        "ETHNICITY",
+        "Id",  // Case-sensitive match
+        "AGE", // Python uses uppercase
         "GENDER",
-        "HEALTHCARE_COVERAGE",
+        "RACE",
+        "ETHNICITY", 
+        "MARITAL",
         "HEALTHCARE_EXPENSES",
+        "HEALTHCARE_COVERAGE", 
         "INCOME",
-        "CharlsonIndex",
-        "ElixhauserIndex",
-        "Comorbidity_Score",  // Was missing from C++ implementation
+        "CharlsonIndex",         // These next lines were previously missing
+        "ElixhauserIndex",       // in the implementation
+        "Comorbidity_Score",
         "Hospitalizations_Count",
         "Medications_Count",
         "Abnormal_Observations_Count",
         "DECEASED",
-        "Health_Index"
+        "Health_Index"           // Critical for scaling 
     };
 }
 
@@ -443,4 +444,97 @@ void debugThreadSafeCounter(const ThreadSafeCounter& counter, const std::string&
             count++;
         }
     }
+}
+
+// Function to normalize numeric features to match Python scaling
+void normalizePatientFeatures(std::vector<PatientRecord>& patients) {
+    std::cout << "[INFO] Calculating feature statistics for normalization...\n";
+    
+    // Calculate mean and standard deviation for continuous features
+    float ageMean = 0.0f, ageStd = 0.0f;
+    float expensesMean = 0.0f, expensesStd = 0.0f;
+    float coverageMean = 0.0f, coverageStd = 0.0f;
+    float incomeMean = 0.0f, incomeStd = 0.0f;
+    float hospitalMean = 0.0f, hospitalStd = 0.0f;
+    float medsMean = 0.0f, medsStd = 0.0f;
+    float abnormalMean = 0.0f, abnormalStd = 0.0f;
+    
+    // First pass: calculate means
+    for (const auto& p : patients) {
+        ageMean += p.Age;
+        expensesMean += p.HEALTHCARE_EXPENSES;
+        coverageMean += p.HEALTHCARE_COVERAGE;
+        incomeMean += p.INCOME;
+        hospitalMean += p.Hospitalizations_Count;
+        medsMean += p.Medications_Count;
+        abnormalMean += p.Abnormal_Observations_Count;
+    }
+    
+    size_t n = patients.size();
+    if (n > 0) {
+        ageMean /= n;
+        expensesMean /= n;
+        coverageMean /= n;
+        incomeMean /= n;
+        hospitalMean /= n;
+        medsMean /= n;
+        abnormalMean /= n;
+    }
+    
+    // Second pass: calculate standard deviations
+    for (const auto& p : patients) {
+        ageStd += (p.Age - ageMean) * (p.Age - ageMean);
+        expensesStd += (p.HEALTHCARE_EXPENSES - expensesMean) * (p.HEALTHCARE_EXPENSES - expensesMean);
+        coverageStd += (p.HEALTHCARE_COVERAGE - coverageMean) * (p.HEALTHCARE_COVERAGE - coverageMean);
+        incomeStd += (p.INCOME - incomeMean) * (p.INCOME - incomeMean);
+        hospitalStd += (p.Hospitalizations_Count - hospitalMean) * (p.Hospitalizations_Count - hospitalMean);
+        medsStd += (p.Medications_Count - medsMean) * (p.Medications_Count - medsMean);
+        abnormalStd += (p.Abnormal_Observations_Count - abnormalMean) * (p.Abnormal_Observations_Count - abnormalMean);
+    }
+    
+    if (n > 1) {
+        ageStd = std::sqrt(ageStd / (n - 1));
+        expensesStd = std::sqrt(expensesStd / (n - 1));
+        coverageStd = std::sqrt(coverageStd / (n - 1));
+        incomeStd = std::sqrt(incomeStd / (n - 1));
+        hospitalStd = std::sqrt(hospitalStd / (n - 1));
+        medsStd = std::sqrt(medsStd / (n - 1));
+        abnormalStd = std::sqrt(abnormalStd / (n - 1));
+    }
+    
+    // Prevent division by zero
+    ageStd = std::max(ageStd, 1.0f);
+    expensesStd = std::max(expensesStd, 1.0f);
+    coverageStd = std::max(coverageStd, 1.0f);
+    incomeStd = std::max(incomeStd, 1.0f);
+    hospitalStd = std::max(hospitalStd, 1.0f);
+    medsStd = std::max(medsStd, 1.0f);
+    abnormalStd = std::max(abnormalStd, 1.0f);
+    
+    std::cout << "[INFO] Feature statistics calculated:\n";
+    std::cout << "  AGE: mean=" << ageMean << ", std=" << ageStd << "\n";
+    std::cout << "  HEALTHCARE_EXPENSES: mean=" << expensesMean << ", std=" << expensesStd << "\n";
+    std::cout << "  HEALTHCARE_COVERAGE: mean=" << coverageMean << ", std=" << coverageStd << "\n";
+    std::cout << "  INCOME: mean=" << incomeMean << ", std=" << incomeStd << "\n";
+    std::cout << "  Hospitalizations_Count: mean=" << hospitalMean << ", std=" << hospitalStd << "\n";
+    std::cout << "  Medications_Count: mean=" << medsMean << ", std=" << medsStd << "\n";
+    std::cout << "  Abnormal_Observations_Count: mean=" << abnormalMean << ", std=" << abnormalStd << "\n";
+    
+    // Apply standardization (mean=0, std=1) to match what StandardScaler would do in Python
+    std::cout << "[INFO] Applying normalization to patient features...\n";
+    for (auto& p : patients) {
+        // For continuous features, use z-score normalization (standardization)
+        p.Age = (p.Age - ageMean) / ageStd;
+        p.HEALTHCARE_EXPENSES = (p.HEALTHCARE_EXPENSES - expensesMean) / expensesStd;
+        p.HEALTHCARE_COVERAGE = (p.HEALTHCARE_COVERAGE - coverageMean) / coverageStd;
+        p.INCOME = (p.INCOME - incomeMean) / incomeStd;
+        p.Hospitalizations_Count = static_cast<int>((p.Hospitalizations_Count - hospitalMean) / hospitalStd);
+        p.Medications_Count = static_cast<int>((p.Medications_Count - medsMean) / medsStd);
+        p.Abnormal_Observations_Count = static_cast<int>((p.Abnormal_Observations_Count - abnormalMean) / abnormalStd);
+        
+        // IMPORTANT: Don't normalize categorical features
+        // GENDER, RACE, ETHNICITY, MARITAL, DECEASED are categorical and should be left as-is
+    }
+    
+    std::cout << "[INFO] Feature normalization complete.\n";
 }

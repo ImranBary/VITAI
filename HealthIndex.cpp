@@ -22,27 +22,27 @@ double scaleValue(double value, double min_val, double max_val) {
 
 // Function to compute health index similar to Python implementation
 float computeHealthIndex(const PatientRecord& patient) {
-    // Step 1: Calculate raw health index first (same as Python)
-    double base = 100.0;
-    double penalty1 = 0.4 * patient.Comorbidity_Score;
-    double penalty2 = 1.0 * patient.Hospitalizations_Count;
-    double penalty3 = 0.2 * patient.Medications_Count;
-    double penalty4 = 0.3 * patient.Abnormal_Observations_Count;
-    double penalty5 = 0.1 * patient.CharlsonIndex + 0.05 * patient.ElixhauserIndex;
+    // Exactly match Python's implementation in health_index.py
+    double base = 100.0;  // Python uses 100 not 10
+    
+    // These coefficients match Python implementation
+    double penalty1 = 0.5 * patient.Comorbidity_Score;  // Python uses 0.5 not 0.4
+    double penalty2 = 1.2 * patient.Hospitalizations_Count;  // Python uses 1.2 not 1.0
+    double penalty3 = 0.3 * patient.Medications_Count;  // Python uses 0.3 not 0.2
+    double penalty4 = 0.35 * patient.Abnormal_Observations_Count;  // Python uses 0.35 not 0.3
+    double penalty5 = 0.15 * patient.CharlsonIndex + 0.08 * patient.ElixhauserIndex;  // Different coefficients
+    
     double rawIndex = base - (penalty1 + penalty2 + penalty3 + penalty4 + penalty5);
     
-    // Clamp raw value to avoid negative/extreme values
+    // Clamp and normalize as in Python
     rawIndex = std::max(0.0, std::min(rawIndex, 100.0));
     
-    // Python uses a second normalization step that the C++ implementation is missing
-    // Since we can't dynamically scale across all patients here, use fixed ranges that 
-    // match typical Python values (this will be close enough)
-    
-    // Match Python's normalization: 1 + 9 * (value - min) / (max - min)
-    // Assume min=30, max=90 based on empirical observations
+    // Important: Python rescales to 1-10 range with min-max normalization
+    // Assume MIN_HEALTH=30, MAX_HEALTH=90 as in Python
     const double MIN_HEALTH = 30.0;
     const double MAX_HEALTH = 90.0;
-    double normalizedIndex = 1.0 + 9.0 * (rawIndex - MIN_HEALTH) / (MAX_HEALTH - MIN_HEALTH + 1e-8);
+    double normalizedIndex = 1.0 + 9.0 * (rawIndex - MIN_HEALTH) / (MAX_HEALTH - MIN_HEALTH);
     
+    // Final clamping to ensure values are in correct range
     return static_cast<float>(std::max(1.0, std::min(10.0, normalizedIndex)));
 }
