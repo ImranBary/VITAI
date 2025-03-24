@@ -1,262 +1,279 @@
 #include "MedicalDictionaries.h"
+#include <unordered_map>
+#include <string>
+#include <algorithm>
 #include <iostream>
+#include <cctype>
 
-// Global variables - defined here
+// Global lookup tables
 std::unordered_map<std::string, float> CHARLSON_CODE_TO_WEIGHT;
 std::unordered_map<std::string, float> ELIXHAUSER_CODE_TO_WEIGHT;
-std::unordered_map<std::string, std::pair<double, double>> OBS_ABNORMAL_THRESHOLDS;
+std::unordered_map<std::string, float> COMORBIDITY_CODE_TO_WEIGHT;
 
-// Implementation of the functions declared in the header
+// For abnormal observation quick lookup
+std::unordered_map<std::string, std::pair<double, double>> OBS_NORMAL_RANGES;
+
+// Initialize lookup tables that match Python implementation from charlson_comorbidity.py
 void initializeDirectLookups() {
-    // Clear existing values first
-    CHARLSON_CODE_TO_WEIGHT.clear();
+    std::cout << "[INFO] Initializing Charlson lookup tables with SNOMED CT codes\n";
     
-    // Add common ICD-10 codes for Charlson Index with expanded coverage
-    // Diabetes codes - expanded with more specific codes
-    CHARLSON_CODE_TO_WEIGHT.insert({"E08", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"E09", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"E10", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"E11", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"E11.9", 1.0f}); // Type 2 diabetes without complications
-    CHARLSON_CODE_TO_WEIGHT.insert({"E13", 1.0f});
+    // Charlson comorbidity SNOMED CT codes and weights - directly from charlson_comorbidity.py
     
-    // Also add full Synthea condition codes (not just the prefix)
-    CHARLSON_CODE_TO_WEIGHT.insert({"44054006", 1.0f});    // Type 2 diabetes 
-    CHARLSON_CODE_TO_WEIGHT.insert({"73211009", 1.0f});    // Diabetes mellitus
-    CHARLSON_CODE_TO_WEIGHT.insert({"46635009", 1.0f});    // Type 1 diabetes
-    CHARLSON_CODE_TO_WEIGHT.insert({"15777000", 1.0f});    // Prediabetes
-    CHARLSON_CODE_TO_WEIGHT.insert({"237599002", 1.0f});   // Insulin-treated type 2 diabetes
+    // MYOCARDIAL INFARCTION (weight 1)
+    CHARLSON_CODE_TO_WEIGHT["22298006"] = 1.0f;    // Myocardial infarction (disorder)
+    CHARLSON_CODE_TO_WEIGHT["401303003"] = 1.0f;   // Acute ST segment elevation myocardial infarction
+    CHARLSON_CODE_TO_WEIGHT["401314000"] = 1.0f;   // Acute non-ST segment elevation myocardial infarction
+    CHARLSON_CODE_TO_WEIGHT["129574000"] = 1.0f;   // Postoperative myocardial infarction (disorder)
     
-    // Heart failure 
-    CHARLSON_CODE_TO_WEIGHT.insert({"I50", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"I50.0", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"I50.1", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"I50.9", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"84114007", 1.0f});    // Heart failure
-    CHARLSON_CODE_TO_WEIGHT.insert({"88805009", 1.0f});    // Chronic heart failure
+    // CONGESTIVE HEART FAILURE (weight 1)
+    CHARLSON_CODE_TO_WEIGHT["88805009"] = 1.0f;    // Chronic congestive heart failure (disorder)
+    CHARLSON_CODE_TO_WEIGHT["84114007"] = 1.0f;    // Heart failure (disorder)
     
-    // COPD and respiratory diseases
-    CHARLSON_CODE_TO_WEIGHT.insert({"J44", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"J44.9", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"J45", 1.0f});         // Asthma
-    CHARLSON_CODE_TO_WEIGHT.insert({"J45.9", 1.0f});       // Asthma, unspecified
-    CHARLSON_CODE_TO_WEIGHT.insert({"13645005", 1.0f});    // COPD
-    CHARLSON_CODE_TO_WEIGHT.insert({"195967001", 1.0f});   // Asthma
+    // CEREBROVASCULAR DISEASE (weight 1)
+    CHARLSON_CODE_TO_WEIGHT["230690007"] = 1.0f;   // Cerebrovascular accident (disorder)
     
-    // Hypertension
-    CHARLSON_CODE_TO_WEIGHT.insert({"I10", 0.5f}); 
-    CHARLSON_CODE_TO_WEIGHT.insert({"59621000", 0.5f});    // Essential hypertension
-    CHARLSON_CODE_TO_WEIGHT.insert({"38341003", 0.5f});    // Hypertensive disorder
+    // DEMENTIA (weight 1)
+    CHARLSON_CODE_TO_WEIGHT["26929004"] = 1.0f;    // Alzheimer's disease (disorder)
+    CHARLSON_CODE_TO_WEIGHT["230265002"] = 1.0f;   // Familial Alzheimer's disease of early onset (disorder)
     
-    // Cardiovascular diseases
-    CHARLSON_CODE_TO_WEIGHT.insert({"I25.9", 1.0f});       // Chronic ischemic heart disease
-    CHARLSON_CODE_TO_WEIGHT.insert({"53741008", 1.0f});    // Coronary arteriosclerosis
-    CHARLSON_CODE_TO_WEIGHT.insert({"22298006", 1.0f});    // Myocardial infarction
-    CHARLSON_CODE_TO_WEIGHT.insert({"399211009", 1.0f});   // History of myocardial infarction
+    // CHRONIC PULMONARY DISEASE (weight 1)
+    CHARLSON_CODE_TO_WEIGHT["185086009"] = 1.0f;   // Chronic obstructive bronchitis (disorder)
+    CHARLSON_CODE_TO_WEIGHT["87433001"] = 1.0f;    // Pulmonary emphysema (disorder)
+    CHARLSON_CODE_TO_WEIGHT["195967001"] = 1.0f;   // Asthma (disorder)
+    CHARLSON_CODE_TO_WEIGHT["233678006"] = 1.0f;   // Childhood asthma (disorder)
     
-    // Renal/Kidney disease
-    CHARLSON_CODE_TO_WEIGHT.insert({"N18", 2.0f});         // Chronic kidney disease
-    CHARLSON_CODE_TO_WEIGHT.insert({"N18.9", 2.0f});       // Chronic kidney disease, unspecified
-    CHARLSON_CODE_TO_WEIGHT.insert({"433144002", 2.0f});   // Chronic kidney disease stage 2
-    CHARLSON_CODE_TO_WEIGHT.insert({"431855005", 2.0f});   // Chronic kidney disease stage 1
+    // CONNECTIVE TISSUE DISEASE (weight 1)
+    CHARLSON_CODE_TO_WEIGHT["69896004"] = 1.0f;    // Rheumatoid arthritis (disorder)
+    CHARLSON_CODE_TO_WEIGHT["200936003"] = 1.0f;   // Lupus erythematosus (disorder)
     
-    // Cancer
-    CHARLSON_CODE_TO_WEIGHT.insert({"C50", 2.0f});         // Breast cancer
-    CHARLSON_CODE_TO_WEIGHT.insert({"C61", 2.0f});         // Prostate cancer
-    CHARLSON_CODE_TO_WEIGHT.insert({"C34", 2.0f});         // Lung cancer
-    CHARLSON_CODE_TO_WEIGHT.insert({"C18", 2.0f});         // Colon cancer
-    CHARLSON_CODE_TO_WEIGHT.insert({"254837009", 2.0f});   // Malignant tumor of breast
-    CHARLSON_CODE_TO_WEIGHT.insert({"254901000", 2.0f});   // Tumor of prostate
+    // MILD LIVER DISEASE (weight 1)
+    CHARLSON_CODE_TO_WEIGHT["128302006"] = 1.0f;   // Chronic hepatitis C (disorder)
+    CHARLSON_CODE_TO_WEIGHT["61977001"] = 1.0f;    // Chronic type B viral hepatitis (disorder)
     
-    // Text descriptions (case-insensitive)
-    CHARLSON_CODE_TO_WEIGHT.insert({"diabetes", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"heart failure", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"copd", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"hypertension", 0.5f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"renal disease", 2.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"kidney disease", 2.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"asthma", 1.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"cancer", 2.0f});
+    // DIABETES WITHOUT END-ORGAN DAMAGE (weight 1)
+    CHARLSON_CODE_TO_WEIGHT["44054006"] = 1.0f;    // Diabetes mellitus type 2 (disorder)
     
-    // ===== IMPORTANT: Match the Python snomed_groups with appropriate weights =====
+    // DIABETES WITH END-ORGAN DAMAGE (weight 2)
+    CHARLSON_CODE_TO_WEIGHT["368581000119106"] = 2.0f;  // Neuropathy due to type 2 diabetes mellitus
+    CHARLSON_CODE_TO_WEIGHT["422034002"] = 2.0f;        // Retinopathy due to type 2 diabetes mellitus
+    CHARLSON_CODE_TO_WEIGHT["127013003"] = 2.0f;        // Disorder of kidney due to diabetes mellitus
+    CHARLSON_CODE_TO_WEIGHT["90781000119102"] = 2.0f;   // Microalbuminuria due to type 2 diabetes mellitus
+    CHARLSON_CODE_TO_WEIGHT["157141000119108"] = 2.0f;  // Proteinuria due to type 2 diabetes mellitus
+    CHARLSON_CODE_TO_WEIGHT["60951000119105"] = 2.0f;   // Blindness due to type 2 diabetes mellitus
+    CHARLSON_CODE_TO_WEIGHT["97331000119101"] = 2.0f;   // Macular edema & retinopathy due to T2DM
+    CHARLSON_CODE_TO_WEIGHT["1501000119109"] = 2.0f;    // Proliferative retinopathy due to T2DM
+    CHARLSON_CODE_TO_WEIGHT["1551000119108"] = 2.0f;    // Nonproliferative retinopathy due to T2DM
     
-    // Cardiovascular Diseases (weight: 3 in Python)
-    CHARLSON_CODE_TO_WEIGHT.insert({"53741008", 3.0f});  // Coronary arteriosclerosis
-    CHARLSON_CODE_TO_WEIGHT.insert({"445118002", 3.0f}); // Pulmonary embolism
-    CHARLSON_CODE_TO_WEIGHT.insert({"59621000", 3.0f});  // Essential hypertension
-    CHARLSON_CODE_TO_WEIGHT.insert({"22298006", 3.0f});  // Myocardial infarction
-    CHARLSON_CODE_TO_WEIGHT.insert({"56265001", 3.0f});  // Heart disease
+    // MODERATE OR SEVERE KIDNEY DISEASE (weight 2)
+    CHARLSON_CODE_TO_WEIGHT["431855005"] = 2.0f;        // CKD stage 1 (disorder)
+    CHARLSON_CODE_TO_WEIGHT["431856006"] = 2.0f;        // CKD stage 2 (disorder)
+    CHARLSON_CODE_TO_WEIGHT["433144002"] = 2.0f;        // CKD stage 3 (disorder)
+    CHARLSON_CODE_TO_WEIGHT["431857002"] = 2.0f;        // CKD stage 4 (disorder)
+    CHARLSON_CODE_TO_WEIGHT["46177005"] = 2.0f;         // End-stage renal disease (disorder)
+    CHARLSON_CODE_TO_WEIGHT["129721000119106"] = 2.0f;  // Acute renal failure on dialysis (disorder)
     
-    // Respiratory Diseases (weight: 2 in Python)
-    CHARLSON_CODE_TO_WEIGHT.insert({"19829001", 2.0f});  // Disorders of lung
-    CHARLSON_CODE_TO_WEIGHT.insert({"233604007", 2.0f}); // Pneumonia
-    CHARLSON_CODE_TO_WEIGHT.insert({"118940003", 2.0f}); // Disorder of respiratory system
-    CHARLSON_CODE_TO_WEIGHT.insert({"409622000", 2.0f}); // Respiratory hypersensitivity
-    CHARLSON_CODE_TO_WEIGHT.insert({"13645005", 2.0f});  // COPD
+    // ANY TUMOUR (solid tumor), LEUKEMIA, LYMPHOMA (weight 2)
+    CHARLSON_CODE_TO_WEIGHT["254637007"] = 2.0f;   // Non-small cell lung cancer (disorder)
+    CHARLSON_CODE_TO_WEIGHT["254632001"] = 2.0f;   // Small cell carcinoma of lung (disorder)
+    CHARLSON_CODE_TO_WEIGHT["93761005"] = 2.0f;    // Primary malignant neoplasm of colon
+    CHARLSON_CODE_TO_WEIGHT["363406005"] = 2.0f;   // Malignant neoplasm of colon
+    CHARLSON_CODE_TO_WEIGHT["109838007"] = 2.0f;   // Overlapping malignant neoplasm of colon
+    CHARLSON_CODE_TO_WEIGHT["126906006"] = 2.0f;   // Neoplasm of prostate (disorder)
+    CHARLSON_CODE_TO_WEIGHT["92691004"] = 2.0f;    // Carcinoma in situ of prostate
+    CHARLSON_CODE_TO_WEIGHT["254837009"] = 2.0f;   // Malignant neoplasm of breast
+    CHARLSON_CODE_TO_WEIGHT["109989006"] = 2.0f;   // Multiple myeloma (disorder)
+    CHARLSON_CODE_TO_WEIGHT["93143009"] = 2.0f;    // Leukemia disease (disorder)
+    CHARLSON_CODE_TO_WEIGHT["91861009"] = 2.0f;    // Acute myeloid leukemia (disorder)
     
-    // Diabetes (weight: 2 in Python)
-    CHARLSON_CODE_TO_WEIGHT.insert({"44054006", 2.0f});  // Type 2 diabetes
-    CHARLSON_CODE_TO_WEIGHT.insert({"73211009", 2.0f});  // Diabetes mellitus
-    CHARLSON_CODE_TO_WEIGHT.insert({"46635009", 2.0f});  // Type 1 diabetes
-    CHARLSON_CODE_TO_WEIGHT.insert({"190330002", 2.0f}); // Type 1 diabetes mellitus
-    CHARLSON_CODE_TO_WEIGHT.insert({"15777000", 2.0f});  // Prediabetes
-    CHARLSON_CODE_TO_WEIGHT.insert({"237599002", 2.0f}); // Insulin-treated diabetes
+    // METASTATIC SOLID TUMOUR (weight 6)
+    CHARLSON_CODE_TO_WEIGHT["94503003"] = 6.0f;    // Metastatic malignant neoplasm to prostate
+    CHARLSON_CODE_TO_WEIGHT["94260004"] = 6.0f;    // Metastatic malignant neoplasm to colon
     
-    // Also add ICD-10 codes for diabetes
-    CHARLSON_CODE_TO_WEIGHT.insert({"E08", 2.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"E09", 2.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"E10", 2.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"E11", 2.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"E13", 2.0f});
-    
-    // Add the Python case-insensitive text matches
-    CHARLSON_CODE_TO_WEIGHT.insert({"diabetes", 2.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"heart failure", 3.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"copd", 2.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"hypertension", 3.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"renal disease", 2.0f});
-    CHARLSON_CODE_TO_WEIGHT.insert({"kidney disease", 2.0f});
-    
-    std::cout << "[INFO] Initialized Charlson dictionary with " 
-              << CHARLSON_CODE_TO_WEIGHT.size() << " entries\n";
+    // AIDS/HIV (weight 6)
+    CHARLSON_CODE_TO_WEIGHT["62479008"] = 6.0f;   // Acquired immune deficiency syndrome (disorder)
+    CHARLSON_CODE_TO_WEIGHT["86406008"] = 6.0f;   // Human immunodeficiency virus infection (disorder)
+
+    // Add string versions of common diabetes and CKD codes for subset identification
+    // (no need to convert all numeric codes to strings since the lookup will handle it)
+    CHARLSON_CODE_TO_WEIGHT["73211009"] = 1.0f;   // Diabetes mellitus
+    CHARLSON_CODE_TO_WEIGHT["46635009"] = 1.0f;   // Diabetes mellitus type 1
+    CHARLSON_CODE_TO_WEIGHT["190330002"] = 1.0f;  // Type 2 diabetes mellitus
+
+    std::cout << "[INFO] Added " << CHARLSON_CODE_TO_WEIGHT.size() << " SNOMED CT codes to Charlson dictionary\n";
 }
 
-// Initialize Elixhauser indices
 void initializeElixhauserLookups() {
-    ELIXHAUSER_CODE_TO_WEIGHT.clear();
+    std::cout << "[INFO] Initializing Elixhauser lookup tables with SNOMED CT codes\n";
     
-    // Diabetes codes with expanded coverage
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"E08", 0.5f});
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"E09", 0.5f});
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"E10", 0.5f});
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"E11", 0.5f});
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"E11.9", 0.7f}); // Type 2 diabetes without complications
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"E13", 0.5f});
+    // Elixhauser comorbidity codes and weights - directly from elixhauser_comorbidity.py
+
+    // Congestive Heart Failure (weight 7)
+    ELIXHAUSER_CODE_TO_WEIGHT["88805009"] = 7.0f;   // Chronic congestive heart failure
+    ELIXHAUSER_CODE_TO_WEIGHT["84114007"] = 7.0f;   // Heart failure
+
+    // Cardiac Arrhythmias (weight 5)
+    ELIXHAUSER_CODE_TO_WEIGHT["49436004"] = 5.0f;   // Cardiac arrhythmias
+
+    // Valvular Disease (weight 4)
+    ELIXHAUSER_CODE_TO_WEIGHT["48724000"] = 4.0f;   // Valvular disease
+    ELIXHAUSER_CODE_TO_WEIGHT["91434003"] = 4.0f;   // Pulmonic valve regurgitation
+    ELIXHAUSER_CODE_TO_WEIGHT["79619009"] = 4.0f;   // Mitral valve stenosis
+    ELIXHAUSER_CODE_TO_WEIGHT["111287006"] = 4.0f;  // Tricuspid valve regurgitation
+    ELIXHAUSER_CODE_TO_WEIGHT["49915006"] = 4.0f;   // Tricuspid valve stenosis
+    ELIXHAUSER_CODE_TO_WEIGHT["60573004"] = 4.0f;   // Aortic valve stenosis
+    ELIXHAUSER_CODE_TO_WEIGHT["60234000"] = 4.0f;   // Aortic valve regurgitation
+
+    // Pulmonary Circulation Disorders (weight 6)
+    ELIXHAUSER_CODE_TO_WEIGHT["65710008"] = 6.0f;   // Pulmonary circulation disorders
+    ELIXHAUSER_CODE_TO_WEIGHT["706870000"] = 6.0f;  // Acute pulmonary embolism
+    ELIXHAUSER_CODE_TO_WEIGHT["67782005"] = 6.0f;   // Acute respiratory distress syndrome
+
+    // Peripheral Vascular Disorders (weight 2)
+    ELIXHAUSER_CODE_TO_WEIGHT["698754002"] = 2.0f;  // Peripheral vascular disorders
+
+    // Hypertension, uncomplicated (weight -1)
+    ELIXHAUSER_CODE_TO_WEIGHT["59621000"] = -1.0f;  // Hypertension, uncomplicated
+
+    // Paralysis (weight 7)
+    ELIXHAUSER_CODE_TO_WEIGHT["698754002"] = 7.0f;  // Paralysis (note: duplicate with peripheral vascular disorders)
+    ELIXHAUSER_CODE_TO_WEIGHT["128188000"] = 7.0f;  // Paralysis
+
+    // Other Neurological Disorders (weight 6)
+    ELIXHAUSER_CODE_TO_WEIGHT["69896004"] = 6.0f;   // Other neurological disorders
+    ELIXHAUSER_CODE_TO_WEIGHT["128613002"] = 6.0f;  // Seizure disorder
+
+    // Chronic Pulmonary Disease (weight 3)
+    ELIXHAUSER_CODE_TO_WEIGHT["195967001"] = 3.0f;  // Chronic pulmonary disease
+    ELIXHAUSER_CODE_TO_WEIGHT["233678006"] = 3.0f;  // Chronic pulmonary disease
+
+    // Diabetes, Complicated (weight 7)
+    ELIXHAUSER_CODE_TO_WEIGHT["368581000119106"] = 7.0f;  // Diabetes, complicated
+    ELIXHAUSER_CODE_TO_WEIGHT["422034002"] = 7.0f;        // Diabetes, complicated
+    ELIXHAUSER_CODE_TO_WEIGHT["90781000119102"] = 7.0f;   // Diabetes, complicated
+
+    // Diabetes, Uncomplicated (weight 0)
+    ELIXHAUSER_CODE_TO_WEIGHT["44054006"] = 0.0f;   // Diabetes, uncomplicated
+
+    // Renal Failure (weight 5)
+    ELIXHAUSER_CODE_TO_WEIGHT["129721000119106"] = 5.0f;  // Renal failure
+    ELIXHAUSER_CODE_TO_WEIGHT["433144002"] = 5.0f;        // Renal failure
+
+    // Liver Disease (weight 11)
+    ELIXHAUSER_CODE_TO_WEIGHT["128302006"] = 11.0f;  // Liver disease
+    ELIXHAUSER_CODE_TO_WEIGHT["61977001"] = 11.0f;   // Liver disease
+
+    // AIDS/HIV (weight 0)
+    ELIXHAUSER_CODE_TO_WEIGHT["62479008"] = 0.0f;   // AIDS/HIV
+    ELIXHAUSER_CODE_TO_WEIGHT["86406008"] = 0.0f;   // AIDS/HIV
+
+    // Lymphoma (weight 9)
+    ELIXHAUSER_CODE_TO_WEIGHT["93143009"] = 9.0f;   // Lymphoma
+
+    // Metastatic Cancer (weight 14)
+    ELIXHAUSER_CODE_TO_WEIGHT["94503003"] = 14.0f;  // Metastatic cancer
+    ELIXHAUSER_CODE_TO_WEIGHT["94260004"] = 14.0f;  // Metastatic cancer
+
+    // Solid Tumour Without Metastasis (weight 8)
+    ELIXHAUSER_CODE_TO_WEIGHT["126906006"] = 8.0f;  // Solid tumour without metastasis
+    ELIXHAUSER_CODE_TO_WEIGHT["254637007"] = 8.0f;  // Solid tumour without metastasis
+
+    // Rheumatoid Arthritis / Collagen Vascular Diseases (weight 4)
+    ELIXHAUSER_CODE_TO_WEIGHT["69896004"] = 4.0f;    // Rheumatoid arthritis/collagen vascular diseases
+    ELIXHAUSER_CODE_TO_WEIGHT["200936003"] = 4.0f;   // Rheumatoid arthritis/collagen vascular diseases
+
+    // Coagulopathy (weight 11)
+    ELIXHAUSER_CODE_TO_WEIGHT["234466008"] = 11.0f;  // Coagulopathy
+
+    // Obesity (weight 0)
+    ELIXHAUSER_CODE_TO_WEIGHT["408512008"] = 0.0f;  // Obesity
+    ELIXHAUSER_CODE_TO_WEIGHT["162864005"] = 0.0f;  // Obesity
+
+    // Weight Loss (weight 6)
+    ELIXHAUSER_CODE_TO_WEIGHT["278860009"] = 6.0f;  // Weight loss
+
+    // Fluid and Electrolyte Disorders (weight 5)
+    ELIXHAUSER_CODE_TO_WEIGHT["389087006"] = 5.0f;  // Fluid and electrolyte disorders
+
+    // Deficiency Anaemias (weight 0)
+    ELIXHAUSER_CODE_TO_WEIGHT["271737000"] = 0.0f;  // Deficiency anaemias
+
+    // Alcohol Abuse (weight 0)
+    ELIXHAUSER_CODE_TO_WEIGHT["7200002"] = 0.0f;    // Alcohol abuse
+
+    // Drug Abuse (weight 0)
+    ELIXHAUSER_CODE_TO_WEIGHT["6525002"] = 0.0f;    // Drug abuse
+
+    // Psychoses (weight 0)
+    ELIXHAUSER_CODE_TO_WEIGHT["47505003"] = 0.0f;   // Psychoses
+
+    // Depression (weight -3)
+    ELIXHAUSER_CODE_TO_WEIGHT["370143000"] = -3.0f;  // Depression
+    ELIXHAUSER_CODE_TO_WEIGHT["36923009"] = -3.0f;   // Depression
+
+    // Add additional codes for CKD and diabetes used in subset identification
+    ELIXHAUSER_CODE_TO_WEIGHT["431855005"] = 5.0f;  // Chronic kidney disease
+    ELIXHAUSER_CODE_TO_WEIGHT["431856006"] = 5.0f;  // Chronic kidney disease stage 1
+    ELIXHAUSER_CODE_TO_WEIGHT["433144002"] = 5.0f;  // Chronic kidney disease stage 2
+    ELIXHAUSER_CODE_TO_WEIGHT["431857002"] = 5.0f;  // Chronic kidney disease stage 3
+    ELIXHAUSER_CODE_TO_WEIGHT["46177005"] = 5.0f;   // End stage renal disease
     
-    // SNOMED codes for diabetes
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"73211009", 0.5f}); // Diabetes mellitus
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"44054006", 0.5f}); // Type 2 diabetes
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"46635009", 0.5f}); // Type 1 diabetes
-    
-    // Heart failure
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"I50", 1.5f});
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"I50.0", 1.5f});
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"I50.1", 1.5f});
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"I50.9", 1.5f});
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"84114007", 1.5f});  // Heart failure
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"88805009", 1.5f});  // Chronic heart failure
-    
-    // Hypertension
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"I10", 0.3f}); // Essential (primary) hypertension
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"59621000", 0.3f}); // Essential hypertension
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"38341003", 0.3f}); // Hypertensive disorder
-    
-    // COPD
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"J44", 0.9f});
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"J44.9", 0.9f}); // COPD, unspecified
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"13645005", 0.9f}); // COPD
-    
-    // Common text descriptions
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"diabetes", 0.5f});
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"heart failure", 1.5f});
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"hypertension", 0.7f});
-    ELIXHAUSER_CODE_TO_WEIGHT.insert({"copd", 0.9f});
-    
-    std::cout << "[INFO] Initialized Elixhauser dictionary with " 
-              << ELIXHAUSER_CODE_TO_WEIGHT.size() << " entries\n";
+    ELIXHAUSER_CODE_TO_WEIGHT["73211009"] = 0.5f;   // Diabetes mellitus
+    ELIXHAUSER_CODE_TO_WEIGHT["46635009"] = 0.5f;   // Diabetes mellitus type 1
+    ELIXHAUSER_CODE_TO_WEIGHT["190330002"] = 0.5f;  // Type 2 diabetes mellitus
+
+    std::cout << "[INFO] Added " << ELIXHAUSER_CODE_TO_WEIGHT.size() << " SNOMED CT codes to Elixhauser dictionary\n";
 }
 
-// Initialize abnormal observation thresholds
 void initializeObsAbnormalDirect() {
-    OBS_ABNORMAL_THRESHOLDS.clear();
+    std::cout << "[INFO] Initializing observation normal range lookup\n";
     
-    // Format: {"description", {min_normal, max_normal}}
-    OBS_ABNORMAL_THRESHOLDS.insert({"Systolic Blood Pressure", {90.0, 140.0}});
-    OBS_ABNORMAL_THRESHOLDS.insert({"Diastolic Blood Pressure", {60.0, 90.0}});
-    OBS_ABNORMAL_THRESHOLDS.insert({"Heart Rate", {60.0, 100.0}});
-    OBS_ABNORMAL_THRESHOLDS.insert({"Respiratory Rate", {12.0, 20.0}});
-    OBS_ABNORMAL_THRESHOLDS.insert({"Body Mass Index", {18.5, 24.9}});
-    OBS_ABNORMAL_THRESHOLDS.insert({"Body Temperature", {36.5, 37.5}}); // Celsius
-    OBS_ABNORMAL_THRESHOLDS.insert({"Glucose", {70.0, 126.0}});
-    OBS_ABNORMAL_THRESHOLDS.insert({"A1C", {4.0, 6.5}});
-    OBS_ABNORMAL_THRESHOLDS.insert({"Oxygen Saturation", {94.0, 100.0}});
-    
-    std::cout << "[INFO] Initialized abnormal observation thresholds with "
-              << OBS_ABNORMAL_THRESHOLDS.size() << " entries\n";
+    // Normal ranges for common observations - these match health_index.py
+    OBS_NORMAL_RANGES = {
+        {"Systolic Blood Pressure", {90.0, 120.0}},
+        {"Diastolic Blood Pressure", {60.0, 80.0}},
+        {"Body Mass Index", {18.5, 24.9}},
+        {"Blood Glucose Level", {70.0, 99.0}},
+        {"Heart Rate", {60.0, 100.0}}
+    };
 }
 
-bool isAbnormalObsFast(const std::string& description, double value) {
-    // First try exact match
-    auto it = OBS_ABNORMAL_THRESHOLDS.find(description);
-    if (it != OBS_ABNORMAL_THRESHOLDS.end()) {
-        auto [minNormal, maxNormal] = it->second;
-        return value < minNormal || value > maxNormal;
+// Helper function to check if observation value is abnormal
+bool isAbnormalObsFast(const std::string &obsDescription, double value) {
+    // Fast path using direct lookup table
+    auto it = OBS_NORMAL_RANGES.find(obsDescription);
+    if (it != OBS_NORMAL_RANGES.end()) {
+        auto [min_val, max_val] = it->second;
+        return value < min_val || value > max_val;
     }
     
-    // Try normalized description
-    std::string lowerDesc = description;
-    std::transform(lowerDesc.begin(), lowerDesc.end(), lowerDesc.begin(), 
-                   [](unsigned char c){ return std::tolower(c); });
-    
-    // Use the same mapping as in the Python code
-    if (lowerDesc.find("systolic") != std::string::npos || 
-        lowerDesc.find("blood pressure") != std::string::npos) {
-        return value < 90.0 || value > 140.0;  // Match Python value ranges
+    // Try alternate common descriptions
+    if (obsDescription.find("systolic") != std::string::npos || 
+        obsDescription.find("SYSTOLIC") != std::string::npos) {
+        return value < 90.0 || value > 120.0;
     }
     
-    if (lowerDesc.find("diastolic") != std::string::npos) {
-        return value < 60.0 || value > 90.0;
+    if (obsDescription.find("diastolic") != std::string::npos || 
+        obsDescription.find("DIASTOLIC") != std::string::npos) {
+        return value < 60.0 || value > 80.0;
     }
     
-    if (lowerDesc.find("bmi") != std::string::npos || lowerDesc.find("body mass index") != std::string::npos) {
+    if (obsDescription.find("BMI") != std::string::npos || 
+        obsDescription.find("body mass index") != std::string::npos) {
         return value < 18.5 || value > 24.9;
     }
     
-    if (lowerDesc.find("glucose") != std::string::npos) {
+    if (obsDescription.find("glucose") != std::string::npos || 
+        obsDescription.find("GLUCOSE") != std::string::npos) {
         return value < 70.0 || value > 99.0;
     }
     
-    if (lowerDesc.find("heart rate") != std::string::npos) {
+    if (obsDescription.find("heart rate") != std::string::npos || 
+        obsDescription.find("HEART RATE") != std::string::npos) {
         return value < 60.0 || value > 100.0;
     }
     
-    // Enhanced matching based on Python's observation_mappings
-    if (lowerDesc.find("oxygen saturation") != std::string::npos) {
-        return value < 94.0 || value > 100.0;
-    }
+    // For unrecognized observations, fall back to domain-specific thresholds
+    if (value > 500.0) return true; // Large values are usually abnormal
     
-    // Default
-    return false;
-}
-
-double findGroupWeightFast(const std::string& code) {
-    // First check if code is directly in Charlson dictionary
-    auto charlsonIt = CHARLSON_CODE_TO_WEIGHT.find(code);
-    if (charlsonIt != CHARLSON_CODE_TO_WEIGHT.end()) {
-        return static_cast<double>(charlsonIt->second);
-    }
-    
-    // Check Elixhauser if not in Charlson
-    auto elixIt = ELIXHAUSER_CODE_TO_WEIGHT.find(code);
-    if (elixIt != ELIXHAUSER_CODE_TO_WEIGHT.end()) {
-        return static_cast<double>(elixIt->second);
-    }
-    
-    // Try prefix matching for both dictionaries
-    if (code.length() >= 3) {
-        std::string prefix3 = code.substr(0, 3);
-        
-        charlsonIt = CHARLSON_CODE_TO_WEIGHT.find(prefix3);
-        if (charlsonIt != CHARLSON_CODE_TO_WEIGHT.end()) {
-            return static_cast<double>(charlsonIt->second);
-        }
-        
-        elixIt = ELIXHAUSER_CODE_TO_WEIGHT.find(prefix3);
-        if (elixIt != ELIXHAUSER_CODE_TO_WEIGHT.end()) {
-            return static_cast<double>(elixIt->second);
-        }
-    }
-    
-    // Not found
-    return 0.0;
+    return false;  // Don't mark as abnormal if we don't recognize it
 }

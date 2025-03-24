@@ -16,7 +16,7 @@ extern unsigned int THREAD_COUNT;
 // Patient record structure
 struct PatientRecord {
     std::string Id;
-    std::string Birthdate;
+    std::string Birthdate;  // Make sure this field exists
     std::string Deathdate;
     std::string SSN;
     std::string Drivers;
@@ -42,6 +42,11 @@ struct PatientRecord {
     float HealthcareCoverage = 0.0f;
     float Income = 0.0f;
     int Age = 0;  // Added Age field with default value
+    std::string Marital_Status;
+    std::string Race;
+    std::string Ethnicity;
+    float Healthcare_Coverage;
+    float Healthcare_Expenses;
 };
 
 // Condition row structure

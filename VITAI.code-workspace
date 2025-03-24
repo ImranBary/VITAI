@@ -86,7 +86,8 @@
 			"bitset": "cpp",
 			"coroutine": "cpp",
 			"resumable": "cpp",
-			"filesystem": "cpp"
+			"filesystem": "cpp",
+			"numeric": "cpp"
 		},
 		"java.compile.nullAnalysis.mode": "automatic"
 	}

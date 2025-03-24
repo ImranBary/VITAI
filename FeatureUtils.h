@@ -1,5 +1,8 @@
 #pragma once
 
+#ifndef FEATURE_UTILS_H
+#define FEATURE_UTILS_H
+
 #include <string>
 #include <vector>
 #include <fstream>
@@ -45,3 +48,8 @@ inline std::vector<std::string> convertFeatureNamesToLowercase(const std::vector
 
 // Define a function to get the exact feature columns expected by the model
 std::vector<std::string> getModelExpectedFeatures();
+
+// Validate the CSV features against expected model inputs
+bool validateFeatureCSV(const std::string &filename);
+
+#endif // FEATURE_UTILS_H

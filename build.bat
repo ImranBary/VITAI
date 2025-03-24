@@ -20,6 +20,23 @@ cl %COMPILER_FLAGS% %INCLUDE_PATH% %SOURCE_FILES% /Fe:GenerateAndPredict.exe /li
 
 if %ERRORLEVEL% == 0 (
   echo Build successful.
+  
+  REM Copy Python helper scripts to the output directory
+  echo Copying Python helper scripts...
+  if exist "tabnet_adapter.py" echo tabnet_adapter.py already exists
+  if not exist "tabnet_adapter.py" copy "%~dp0tabnet_adapter.py" .
+  
+  if exist "model_inspector.py" echo model_inspector.py already exists
+  if not exist "model_inspector.py" copy "%~dp0model_inspector.py" .
+  
+  if exist "run_feature_verification.py" echo run_feature_verification.py already exists
+  if not exist "run_feature_verification.py" copy "%~dp0run_feature_verification.py" .
+  
+  echo Python helper scripts ready.
 ) else (
   echo Build failed with error level %ERRORLEVEL%.
 )
+
+echo.
+echo NOTE: This application requires Python with pytorch_tabnet, torch, and sklearn packages.
+echo Please ensure these are installed in your Python environment before running GenerateAndPredict.exe

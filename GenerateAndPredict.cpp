@@ -109,6 +109,9 @@
  #endif
  
  namespace fs = std::filesystem;
+
+ // Function to calculate age based on birthdate - declare it before main
+ int calculateAge(const std::string& birthdate);
  
  // Add this function to select only the features expected by the model
  static std::vector<std::string> getRequiredFeatures() {
@@ -294,22 +297,26 @@
              baseModelName = model.substr(0, modelPos);
          }
          
-         // Create paths and explicitly convert them to strings
-         std::string path1 = (fs::path(SCRIPT_DIR) / (model + ".zip")).string();
-         std::string path2 = (fs::path(SCRIPT_DIR) / "Data" / "finals" / baseModelName / (model + ".zip")).string();
-         std::string path3 = (fs::path(SCRIPT_DIR) / "Data" / "models" / (model + ".zip")).string();
-         std::string path4 = (fs::path(SCRIPT_DIR) / model).string();
-         std::string path5 = (fs::path(SCRIPT_DIR) / "Data" / "finals" / baseModelName / model).string();
-         std::string path6 = (fs::path(SCRIPT_DIR) / "Data" / "models" / model).string();
-         
-         // Add paths to the vector
+         // Create paths to search with additional paths from Python implementation
          std::vector<std::string> searchPaths;
-         searchPaths.push_back(path1);
-         searchPaths.push_back(path2);
-         searchPaths.push_back(path3);
-         searchPaths.push_back(path4);
-         searchPaths.push_back(path5);
-         searchPaths.push_back(path6);
+         
+         // Add main script directory paths
+         searchPaths.push_back((fs::path(SCRIPT_DIR) / (model + ".zip")).string());
+         searchPaths.push_back((fs::path(SCRIPT_DIR) / model).string());
+         
+         // Add Data/finals paths (matches Python's FINALS_DIR)
+         searchPaths.push_back((fs::path(SCRIPT_DIR) / "Data" / "finals" / (model + ".zip")).string());
+         searchPaths.push_back((fs::path(SCRIPT_DIR) / "Data" / "finals" / model).string());
+         searchPaths.push_back((fs::path(SCRIPT_DIR) / "Data" / "finals" / baseModelName / (model + ".zip")).string());
+         searchPaths.push_back((fs::path(SCRIPT_DIR) / "Data" / "finals" / baseModelName / model).string());
+         
+         // Add Data/models paths
+         searchPaths.push_back((fs::path(SCRIPT_DIR) / "Data" / "models" / (model + ".zip")).string());
+         searchPaths.push_back((fs::path(SCRIPT_DIR) / "Data" / "models" / model).string());
+         
+         // Add paths that match the exact TabNet model format used in Python
+         searchPaths.push_back((fs::path(SCRIPT_DIR) / "Data" / "finals" / baseModelName / (model + "_model.zip")).string());
+         searchPaths.push_back((fs::path(SCRIPT_DIR) / "Data" / "models" / (model + "_model.zip")).string());
          
          for (const auto& path : searchPaths) {
              if (fs::exists(path)) {
@@ -526,6 +533,12 @@
          std::cerr << "[ERROR] Failed to process patient files: " << e.what() << "\n";
          return 1;
      }   
+     
+     // Update ages after loading patient data but before calculating health metrics
+     std::cout << "[INFO] Calculating patient ages based on birthdate..." << std::endl;
+     for (auto &p : allPatients) {
+         p.Age = calculateAge(p.Birthdate);
+     }
      
      // 6. Use concurrency for calculating indexes/counters (Charlson, Elixhauser, meds, etc.)
      // Shared concurrency-safe counters
@@ -825,29 +838,45 @@
      saveFinalDataCSV(allPatients, "AllPatientsData.csv");
      
      // Before running predictions, ensure the Python script exists
-     if (!fs::exists("run_patient_group_predictions.py")) {
-         std::cerr << "[ERROR] Required Python script not found: run_patient_group_predictions.py\n";
-         return 1;
+     // Check multiple locations for required Python scripts
+     fs::path pythonScriptPath = "run_patient_group_predictions.py";
+     if (!fs::exists(pythonScriptPath)) {
+         // Try SCRIPT_DIR location
+         pythonScriptPath = fs::path(SCRIPT_DIR) / "run_patient_group_predictions.py";
+         if (!fs::exists(pythonScriptPath)) {
+             // Try vitai_scripts subdirectory
+             pythonScriptPath = "vitai_scripts/run_patient_group_predictions.py";
+             if (!fs::exists(pythonScriptPath)) {
+                 std::cerr << "[ERROR] Required Python script not found: run_patient_group_predictions.py\n";
+                 return 1;
+             }
+         }
      }
-     
+     std::cout << "[INFO] Found Python script at: " << pythonScriptPath << std::endl;
+
+     // Run model inspector to check our model requirements
+     std::cout << "[INFO] Running model inspector to verify embedding dimensions...\n";
+     std::system("python model_inspector.py");
+
      // 10. Call Python script for patient grouping and multi-model predictions
-     bool ok = runMultiModelPredictions("PatientFeatures.csv", forceCPU);
-     if (!ok) {
-         std::cerr << "[ERROR] Multi-model inference failed.\n";
-         GPU_INFERENCE_FAILED = true;
-         
-         // If GPU inference failed and we weren't already forcing CPU, try with CPU
-         if (!forceCPU) {
-             std::cout << "[INFO] Attempting fallback to CPU inference...\n";
-             ok = runMultiModelPredictions("PatientFeatures.csv", true);
-             if (ok) {
-                 std::cout << "[INFO] CPU inference completed successfully after GPU failure.\n";
-                 GPU_INFERENCE_FAILED = false;  // Reset the failure flag since CPU worked
-             } else {
-                 std::cerr << "[ERROR] Both GPU and CPU inference failed.\n";
-             }   
-         }   
-     }   
+     bool ok = false;
+
+     // First try the adapted tabnet solution
+     std::cout << "[INFO] Running inference with TabNet adapter...\n";
+     std::string adapterCmd = "python tabnet_adapter.py --input=\"PatientFeatures.csv\" --model=\"combined_diabetes_tabnet\"";
+     if (forceCPU) {
+         adapterCmd += " --force-cpu";
+     }
+     int adapterResult = std::system(adapterCmd.c_str());
+
+     if (adapterResult == 0) {
+         ok = true;
+         std::cout << "[INFO] TabNet adapter ran successfully.\n";
+     } else {
+         std::cout << "[INFO] TabNet adapter failed, falling back to standard method.\n";
+         // Fall back to standard method
+         ok = runMultiModelPredictions("PatientFeatures.csv", forceCPU);
+     }
      
      // (Optional) If XAI is enabled, do something here
      if (enableXAI) {
@@ -873,3 +902,33 @@
          return 0;
      } 
  }
+
+// Function to calculate age based on birthdate - moved before main
+int calculateAge(const std::string& birthdate) {
+    if (birthdate.empty() || birthdate.length() < 10) {
+        return 30; // Default age if birthdate is invalid
+    }
+    
+    try {
+        // Extract year from birthdate (format: YYYY-MM-DD)
+        int birthYear = std::stoi(birthdate.substr(0, 4));
+        
+        // Get current year
+        auto now = std::chrono::system_clock::now();
+        std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+        struct tm* currentTime = std::localtime(&now_c);
+        int currentYear = currentTime->tm_year + 1900;
+        
+        // Calculate age
+        int age = currentYear - birthYear;
+        
+        // Basic validation
+        if (age < 0) age = 0;
+        if (age > 120) age = 120;
+        
+        return age;
+    } catch (const std::exception& e) {
+        std::cerr << "[WARNING] Error calculating age from birthdate: " << birthdate << ": " << e.what() << std::endl;
+        return 30; // Default on error
+    }
+}

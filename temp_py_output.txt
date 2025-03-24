@@ -1,0 +1,168 @@
+[2025-03-23 23:05:26][INFO] Loaded utilities from vitai_scripts package
+[2025-03-23 23:05:26][INFO] Loaded 113 patients total from C:\Users\imran\Documents\VITAI\PatientFeatures.csv.
+[2025-03-23 23:05:26][DEBUG] Data columns: ['Id', 'AGE', 'MARITAL', 'RACE', 'ETHNICITY', 'GENDER', 'HEALTHCARE_COVERAGE', 'HEALTHCARE_EXPENSES', 'INCOME', 'CharlsonIndex', 'ElixhauserIndex', 'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count', 'DECEASED', 'Health_Index']
+[2025-03-23 23:05:26][DEBUG] Data sample:
+                                     Id  AGE  ...  DECEASED  Health_Index
+0  8720dc88-67a7-1d91-7f9a-94260576b244    8  ...         0          62.9
+1  6b95f57a-467f-6277-3b54-a060cbdcdd1a   19  ...         0          68.3
+2  01db07b1-d925-c7f7-2d54-19a417c34e20   19  ...         0          69.6
+3  1d986b5e-ad06-468a-adb0-440dae47b717   21  ...         0          78.6
+4  7e64f0dc-1da6-45ca-8543-29c5936360a0   30  ...         0          72.1
+
+[5 rows x 16 columns]
+[2025-03-23 23:05:26][INFO] Loaded 40 diabetic patients from file
+[2025-03-23 23:05:26][INFO] Patient groups => Diabetes=40, CKD=0, None=73
+[2025-03-23 23:05:26][INFO] Running model 'combined_diabetes_tabnet' for group 'diabetes' with 40 patients.
+[2025-03-23 23:05:26][DEBUG] Group 'diabetes' DataFrame columns: ['Id', 'AGE', 'MARITAL', 'RACE', 'ETHNICITY', 'GENDER', 'HEALTHCARE_COVERAGE', 'HEALTHCARE_EXPENSES', 'INCOME', 'CharlsonIndex', 'ElixhauserIndex', 'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count', 'DECEASED', 'Health_Index']
+[2025-03-23 23:05:26][DEBUG] Group 'diabetes' DataFrame sample:
+                                      Id  AGE  ...  DECEASED  Health_Index
+5   c621670f-e88a-55b9-703d-f12b76225672   29  ...         0          62.7
+10  641e93ac-964f-bb57-d4a3-63fb822153aa   59  ...         0          43.3
+18  5a5250df-63f7-e099-65a0-d428d7362941   26  ...         0          72.7
+
+[3 rows x 16 columns]
+[2025-03-23 23:05:26][INFO] Found model at: C:\Users\imran\Documents\VITAI\Data\finals\combined_diabetes_tabnet\combined_diabetes_tabnet_model.zip
+[2025-03-23 23:05:26][INFO] Loading model combined_diabetes_tabnet on device: cpu
+C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\pytorch_tabnet\abstract_model.py:82: UserWarning: Device used : cpu
+  warnings.warn(f"Device used : {self.device}")
+C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\pytorch_tabnet\abstract_model.py:454: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  saved_state_dict = torch.load(f, map_location=self.device)
+[2025-03-23 23:05:26][INFO] Model expects input dimension: 12
+[2025-03-23 23:05:26][INFO] Loaded scaler from C:\Users\imran\Documents\VITAI\Data\finals\combined_diabetes_tabnet\combined_diabetes_tabnet_scaler.joblib
+[2025-03-23 23:05:26][DEBUG] [combined_diabetes_tabnet] Preprocessing 40 rows with columns: ['Id', 'AGE', 'MARITAL', 'RACE', 'ETHNICITY', 'GENDER', 'HEALTHCARE_COVERAGE', 'HEALTHCARE_EXPENSES', 'INCOME', 'CharlsonIndex', 'ElixhauserIndex', 'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count', 'DECEASED', 'Health_Index']
+[2025-03-23 23:05:26][DEBUG] [combined_diabetes_tabnet] Sample data:
+                                      Id  AGE  ...  DECEASED  Health_Index
+5   c621670f-e88a-55b9-703d-f12b76225672   29  ...         0          62.7
+10  641e93ac-964f-bb57-d4a3-63fb822153aa   59  ...         0          43.3
+18  5a5250df-63f7-e099-65a0-d428d7362941   26  ...         0          72.7
+
+[3 rows x 16 columns]
+[2025-03-23 23:05:26][DEBUG] [combined_diabetes_tabnet] Numeric feature_cols: ['AGE', 'MARITAL', 'RACE', 'ETHNICITY', 'GENDER', 'HEALTHCARE_COVERAGE', 'HEALTHCARE_EXPENSES', 'INCOME', 'CharlsonIndex', 'ElixhauserIndex', 'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count', 'DECEASED']
+[2025-03-23 23:05:26][INFO] Selected features: ['AGE', 'MARITAL', 'RACE', 'ETHNICITY', 'GENDER', 'HEALTHCARE_COVERAGE', 'HEALTHCARE_EXPENSES', 'INCOME', 'CharlsonIndex', 'ElixhauserIndex', 'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count', 'DECEASED']
+[2025-03-23 23:05:26][DEBUG] [combined_diabetes_tabnet] Original feature shape: (40, 14)
+[2025-03-23 23:05:26][DEBUG] Sample raw features (first row): [2.9000e+01 0.0000e+00 4.0000e+00 1.0000e+00 0.0000e+00 0.0000e+00
+ 0.0000e+00 3.4894e+04 2.0000e+00 6.5000e+00 0.0000e+00 2.1000e+01
+ 2.0000e+01 0.0000e+00]
+[2025-03-23 23:05:26][INFO] Applying scaler to features for model: combined_diabetes_tabnet
+[2025-03-23 23:05:26][WARNING] Feature count mismatch! Scaler expects 7 features but we have 14
+[2025-03-23 23:05:26][WARNING] Falling back to using first 7 features for scaling
+C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\sklearn\base.py:493: UserWarning: X does not have valid feature names, but StandardScaler was fitted with feature names
+  warnings.warn(
+[2025-03-23 23:05:26][DEBUG] Sample scaled features (first row): [ 2.90000000e+01  1.64058067e-17  4.00000000e+00  1.00000000e+00
+ -1.46927506e-17 -1.63135652e-16  3.75225177e-17  3.48940000e+04
+  2.00000000e+00  6.50000000e+00  0.00000000e+00  2.10000000e+01
+  2.00000000e+01  0.00000000e+00]
+[2025-03-23 23:05:26][DEBUG] Scaled feature min/max: [2.60000000e+01 1.64058067e-17 4.00000000e+00].../[9.00000000e+01 1.64058067e-17 4.00000000e+00]...
+[2025-03-23 23:05:26][WARNING] Some features have near-zero standard deviation: [1.77816619e+01 0.00000000e+00 0.00000000e+00 0.00000000e+00
+ 4.97493719e-01 0.00000000e+00 0.00000000e+00 1.62157796e+05
+ 6.41170804e+00 8.48082396e+00 1.56124950e+00 8.17021879e+01
+ 3.62668495e+01 0.00000000e+00]
+[2025-03-23 23:05:26][INFO] Final preprocessed features shape: (40, 14) for 40 patients
+[2025-03-23 23:05:26][INFO] Inference input shape for 'combined_diabetes_tabnet': (40, 14)
+[2025-03-23 23:05:26][ERROR] Inference error: index out of range in self
+[2025-03-23 23:05:26][ERROR] Traceback (most recent call last):
+  File "C:\Users\imran\Documents\VITAI\run_patient_group_predictions.py", line 418, in run_model_for_group
+    preds = regressor.predict(X).flatten()
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\pytorch_tabnet\abstract_model.py", line 312, in predict
+    output, M_loss = self.network(data)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\pytorch_tabnet\tab_network.py", line 615, in forward
+    x = self.embedder(x)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\pytorch_tabnet\tab_network.py", line 890, in forward
+    self.embeddings[cat_feat_counter](x[:, feat_init_idx].long())
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\sparse.py", line 190, in forward
+    return F.embedding(
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\functional.py", line 2551, in embedding
+    return torch.embedding(weight, input, padding_idx, scale_grad_by_freq, sparse)
+IndexError: index out of range in self
+
+[2025-03-23 23:05:26][ERROR] Failed to get predictions for model 'combined_diabetes_tabnet'
+[2025-03-23 23:05:26][INFO] No patients in 'ckd' group. Skipping combined_all_ckd_tabnet.
+[2025-03-23 23:05:26][INFO] Running model 'combined_none_tabnet' for group 'none' with 73 patients.
+[2025-03-23 23:05:26][DEBUG] Group 'none' DataFrame columns: ['Id', 'AGE', 'MARITAL', 'RACE', 'ETHNICITY', 'GENDER', 'HEALTHCARE_COVERAGE', 'HEALTHCARE_EXPENSES', 'INCOME', 'CharlsonIndex', 'ElixhauserIndex', 'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count', 'DECEASED', 'Health_Index']
+[2025-03-23 23:05:26][DEBUG] Group 'none' DataFrame sample:
+                                     Id  AGE  ...  DECEASED  Health_Index
+0  8720dc88-67a7-1d91-7f9a-94260576b244    8  ...         0          62.9
+1  6b95f57a-467f-6277-3b54-a060cbdcdd1a   19  ...         0          68.3
+2  01db07b1-d925-c7f7-2d54-19a417c34e20   19  ...         0          69.6
+
+[3 rows x 16 columns]
+[2025-03-23 23:05:26][INFO] Found model at: C:\Users\imran\Documents\VITAI\Data\finals\combined_none_tabnet\combined_none_tabnet_model.zip
+[2025-03-23 23:05:26][INFO] Loading model combined_none_tabnet on device: cpu
+C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\pytorch_tabnet\abstract_model.py:82: UserWarning: Device used : cpu
+  warnings.warn(f"Device used : {self.device}")
+C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\pytorch_tabnet\abstract_model.py:454: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  saved_state_dict = torch.load(f, map_location=self.device)
+[2025-03-23 23:05:26][INFO] Model expects input dimension: 12
+[2025-03-23 23:05:26][INFO] Loaded scaler from C:\Users\imran\Documents\VITAI\Data\finals\combined_none_tabnet\combined_none_tabnet_scaler.joblib
+[2025-03-23 23:05:26][DEBUG] [combined_none_tabnet] Preprocessing 73 rows with columns: ['Id', 'AGE', 'MARITAL', 'RACE', 'ETHNICITY', 'GENDER', 'HEALTHCARE_COVERAGE', 'HEALTHCARE_EXPENSES', 'INCOME', 'CharlsonIndex', 'ElixhauserIndex', 'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count', 'DECEASED', 'Health_Index']
+[2025-03-23 23:05:26][DEBUG] [combined_none_tabnet] Sample data:
+                                     Id  AGE  ...  DECEASED  Health_Index
+0  8720dc88-67a7-1d91-7f9a-94260576b244    8  ...         0          62.9
+1  6b95f57a-467f-6277-3b54-a060cbdcdd1a   19  ...         0          68.3
+2  01db07b1-d925-c7f7-2d54-19a417c34e20   19  ...         0          69.6
+
+[3 rows x 16 columns]
+[2025-03-23 23:05:26][DEBUG] [combined_none_tabnet] Numeric feature_cols: ['AGE', 'MARITAL', 'RACE', 'ETHNICITY', 'GENDER', 'HEALTHCARE_COVERAGE', 'HEALTHCARE_EXPENSES', 'INCOME', 'CharlsonIndex', 'ElixhauserIndex', 'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count', 'DECEASED']
+[2025-03-23 23:05:26][INFO] Selected features: ['AGE', 'MARITAL', 'RACE', 'ETHNICITY', 'GENDER', 'HEALTHCARE_COVERAGE', 'HEALTHCARE_EXPENSES', 'INCOME', 'CharlsonIndex', 'ElixhauserIndex', 'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count', 'DECEASED']
+[2025-03-23 23:05:26][DEBUG] [combined_none_tabnet] Original feature shape: (73, 14)
+[2025-03-23 23:05:26][DEBUG] Sample raw features (first row): [8.00000e+00 0.00000e+00 4.00000e+00 1.00000e+00 0.00000e+00 0.00000e+00
+ 0.00000e+00 1.95477e+05 1.00000e+00 3.00000e+00 0.00000e+00 2.00000e+01
+ 3.70000e+01 0.00000e+00]
+[2025-03-23 23:05:26][INFO] Applying scaler to features for model: combined_none_tabnet
+[2025-03-23 23:05:26][WARNING] Feature count mismatch! Scaler expects 7 features but we have 14
+[2025-03-23 23:05:26][WARNING] Falling back to using first 7 features for scaling
+C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\sklearn\base.py:493: UserWarning: X does not have valid feature names, but StandardScaler was fitted with feature names
+  warnings.warn(
+[2025-03-23 23:05:26][DEBUG] Sample scaled features (first row): [ 8.37298542e+00  3.61136534e-16  4.00000000e+00  1.00000000e+00
+ -2.70018966e-17 -2.12473940e-17  3.01004749e-17  1.95477000e+05
+  1.00000000e+00  3.00000000e+00  0.00000000e+00  2.00000000e+01
+  3.70000000e+01  0.00000000e+00]
+[2025-03-23 23:05:26][DEBUG] Scaled feature min/max: [1.04662318e+00 3.61136534e-16 4.00000000e+00].../[1.14081926e+02 3.61136534e-16 4.00000000e+00]...
+[2025-03-23 23:05:26][WARNING] Some features have near-zero standard deviation: [2.42925041e+01 0.00000000e+00 0.00000000e+00 0.00000000e+00
+ 4.92007808e-01 3.08148791e-33 0.00000000e+00 2.20028332e+05
+ 1.55200099e+00 3.80874885e+00 1.06937091e+00 1.98254818e+01
+ 1.54239154e+01 0.00000000e+00]
+[2025-03-23 23:05:26][INFO] Final preprocessed features shape: (73, 14) for 73 patients
+[2025-03-23 23:05:26][INFO] Inference input shape for 'combined_none_tabnet': (73, 14)
+[2025-03-23 23:05:26][ERROR] Inference error: index out of range in self
+[2025-03-23 23:05:26][ERROR] Traceback (most recent call last):
+  File "C:\Users\imran\Documents\VITAI\run_patient_group_predictions.py", line 418, in run_model_for_group
+    preds = regressor.predict(X).flatten()
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\pytorch_tabnet\abstract_model.py", line 312, in predict
+    output, M_loss = self.network(data)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\pytorch_tabnet\tab_network.py", line 615, in forward
+    x = self.embedder(x)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\pytorch_tabnet\tab_network.py", line 890, in forward
+    self.embeddings[cat_feat_counter](x[:, feat_init_idx].long())
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\modules\sparse.py", line 190, in forward
+    return F.embedding(
+  File "C:\Users\imran\miniconda3\envs\tf_gpu_env\lib\site-packages\torch\nn\functional.py", line 2551, in embedding
+    return torch.embedding(weight, input, padding_idx, scale_grad_by_freq, sparse)
+IndexError: index out of range in self
+
+[2025-03-23 23:05:26][ERROR] Failed to get predictions for model 'combined_none_tabnet'
+[2025-03-23 23:05:26][ERROR] Multi-model inference completed with errors.
