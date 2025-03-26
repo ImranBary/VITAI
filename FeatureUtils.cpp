@@ -462,9 +462,9 @@ void normalizePatientFeatures(std::vector<PatientRecord>& patients) {
     // First pass: calculate means
     for (const auto& p : patients) {
         ageMean += p.Age;
-        expensesMean += p.HEALTHCARE_EXPENSES;
-        coverageMean += p.HEALTHCARE_COVERAGE;
-        incomeMean += p.INCOME;
+        expensesMean += p.Healthcare_Expenses;
+        coverageMean += p.Healthcare_Coverage;
+        incomeMean += p.Income;
         hospitalMean += p.Hospitalizations_Count;
         medsMean += p.Medications_Count;
         abnormalMean += p.Abnormal_Observations_Count;
@@ -484,9 +484,9 @@ void normalizePatientFeatures(std::vector<PatientRecord>& patients) {
     // Second pass: calculate standard deviations
     for (const auto& p : patients) {
         ageStd += (p.Age - ageMean) * (p.Age - ageMean);
-        expensesStd += (p.HEALTHCARE_EXPENSES - expensesMean) * (p.HEALTHCARE_EXPENSES - expensesMean);
-        coverageStd += (p.HEALTHCARE_COVERAGE - coverageMean) * (p.HEALTHCARE_COVERAGE - coverageMean);
-        incomeStd += (p.INCOME - incomeMean) * (p.INCOME - incomeMean);
+        expensesStd += (p.Healthcare_Expenses - expensesMean) * (p.Healthcare_Expenses - expensesMean);
+        coverageStd += (p.Healthcare_Coverage - coverageMean) * (p.Healthcare_Coverage - coverageMean);
+        incomeStd += (p.Income - incomeMean) * (p.Income - incomeMean);
         hospitalStd += (p.Hospitalizations_Count - hospitalMean) * (p.Hospitalizations_Count - hospitalMean);
         medsStd += (p.Medications_Count - medsMean) * (p.Medications_Count - medsMean);
         abnormalStd += (p.Abnormal_Observations_Count - abnormalMean) * (p.Abnormal_Observations_Count - abnormalMean);
@@ -525,9 +525,9 @@ void normalizePatientFeatures(std::vector<PatientRecord>& patients) {
     for (auto& p : patients) {
         // For continuous features, use z-score normalization (standardization)
         p.Age = (p.Age - ageMean) / ageStd;
-        p.HEALTHCARE_EXPENSES = (p.HEALTHCARE_EXPENSES - expensesMean) / expensesStd;
-        p.HEALTHCARE_COVERAGE = (p.HEALTHCARE_COVERAGE - coverageMean) / coverageStd;
-        p.INCOME = (p.INCOME - incomeMean) / incomeStd;
+        p.Healthcare_Expenses = (p.Healthcare_Expenses - expensesMean) / expensesStd;
+        p.Healthcare_Coverage = (p.Healthcare_Coverage - coverageMean) / coverageStd;
+        p.Income = (p.Income - incomeMean) / incomeStd;
         p.Hospitalizations_Count = static_cast<int>((p.Hospitalizations_Count - hospitalMean) / hospitalStd);
         p.Medications_Count = static_cast<int>((p.Medications_Count - medsMean) / medsStd);
         p.Abnormal_Observations_Count = static_cast<int>((p.Abnormal_Observations_Count - abnormalMean) / abnormalStd);

@@ -823,7 +823,7 @@ std::string getCurrentTimestampString();
          // Python defines the same exact codes and case-insensitive text search
          std::set<std::string> ckdCodes = {"431855005", "431856006", "433144002", "431857002", "46177005"};
          
-         if (ckdCodes.find(code) != std::string::npos || 
+         if (ckdCodes.find(code) != ckdCodes.end() || 
              description.find("chronic kidney disease") != std::string::npos) {
              ckdSet.insert(cond.PATIENT);
          }
