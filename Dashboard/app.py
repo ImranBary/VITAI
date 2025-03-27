@@ -14,6 +14,7 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import dcc, html, dash_table, callback_context
 from dash.dependencies import Input, Output, State
+from dash.exceptions import PreventUpdate
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -26,6 +27,13 @@ from sklearn.cluster import KMeans
 import warnings
 import psutil
 import math
+
+# Add these imports at the top of the file
+from flask_caching import Cache
+from memory_utils import MemoryMonitor, DataSampler
+import time
+from dash.dash import no_update
+import dask.dataframe as dd
 
 # -----------------------------
 # Logging & Directories Setup
@@ -52,8 +60,19 @@ final_groups = [
 # Load Base Data
 # -----------------------------
 if os.path.exists(PICKLE_ALL):
-    df_all = pd.read_pickle(PICKLE_ALL)
+    # Use dask for chunked reading of large files
+    df_all = dd.read_pickle(PICKLE_ALL).compute()
+    # Convert to smaller dtypes where possible to save memory
+    for col in df_all.select_dtypes(include=['float64']).columns:
+        df_all[col] = df_all[col].astype('float32')
+    for col in df_all.select_dtypes(include=['int64']).columns:
+        df_all[col] = df_all[col].astype('int32')
     logger.info(f"Loaded enriched data from {PICKLE_ALL}.")
+    # Only keep essential columns initially for faster loading
+    essential_cols = ["Id", "BIRTHDATE", "AGE", "GENDER", "INCOME", 
+                      "Health_Index", "CharlsonIndex", "ElixhauserIndex",
+                      "Risk_Category", "ZIP", "LAT", "LON"]
+    df_all = df_all[[col for col in essential_cols if col in df_all.columns]]
 else:
     logger.warning("Enriched pickle not found; falling back to patients CSV.")
     df_all = pd.read_csv(CSV_PATIENTS)
@@ -108,11 +127,14 @@ def encode_image(image_file):
         return f"data:image/png;base64,{encoded}"
     return None
 
+# Initialize cache
+cache = Cache()
+
+# Replace load_final_model_outputs with a cached version
+@cache.memoize()
 def load_final_model_outputs():
     """
-    Load each model’s predictions and clusters, then also merge in
-    `Health_Index` (and optionally more columns) from df_all
-    so we can build a scatter plot of (Health_Index vs. PredictedHI_final).
+    Cached function to load model outputs - won't reload if called again with same args
     """
     models_data = {}
 
@@ -396,6 +418,28 @@ def smart_sample_dataframe(df, max_points=5000, min_points=500, method='random')
 def release_memory():
     """Force garbage collection to free up memory"""
     gc.collect()
+
+def sanitize_datatable_values(df, max_rows=1000):
+    """
+    More efficient sanitization with row limiting
+    """
+    if df is None or df.empty:
+        return df
+    
+    # Limit rows for faster rendering
+    df_sample = df.head(max_rows)
+    df_copy = df_sample.copy()
+    
+    for col in df_copy.columns:
+        # Only check a small sample for non-scalar values
+        sample = df_copy[col].dropna().head(5)
+        if any(isinstance(x, (list, dict, np.ndarray)) for x in sample):
+            df_copy[col] = df_copy[col].astype(str)
+        # Use more efficient type conversion for numeric columns
+        elif df_copy[col].dtype.kind in 'iuf':
+            df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
+    
+    return df_copy
 
 def create_indices_comparison(df, max_points=3000):
     """Create a comparison of health indices with memory optimization"""
@@ -781,11 +825,26 @@ kpi_row = html.Div([
     kpi_card("Elixhauser Index", f"{AVG_ELIXHAUSER:,.2f}", nhs_colors["risk_high"]),
 ], style={"display": "flex", "flexWrap": "wrap", "justifyContent": "space-between", "marginBottom": "15px"})
 
-# Define the app layout
+# Initialize the app
 app = dash.Dash(__name__, suppress_callback_exceptions=True, external_stylesheets=external_stylesheets + [
     {'href': 'https://use.fontawesome.com/releases/v5.8.1/css/all.css', 'rel': 'stylesheet'}
 ])
 server = app.server
+
+# Initialize cache
+cache = Cache(app.server, config={
+    'CACHE_TYPE': 'filesystem',
+    'CACHE_DIR': 'cache-directory',
+    'CACHE_DEFAULT_TIMEOUT': 3600  # Cache timeout in seconds (1 hour)
+})
+
+# After initializing the app (right after app = dash.Dash(...)), add caching
+app.server.config.update({
+    'CACHE_TYPE': 'filesystem',
+    'CACHE_DIR': 'cache-directory',
+    'CACHE_DEFAULT_TIMEOUT': 3600  # Cache timeout in seconds (1 hour)
+})
+cache = Cache(app.server)
 
 log_memory_usage("Before visualization creation")
 
@@ -813,6 +872,7 @@ log_memory_usage("After map creation")
 corr_fig = create_correlation_matrix(df_all)
 log_memory_usage("After correlation matrix")
 
+# Initialize layout with placeholders for heavy components
 app.layout = html.Div([
     # Header with title and subtitle
     html.Div([
@@ -830,148 +890,69 @@ app.layout = html.Div([
     }),
 
     # Main content area with sidebar and dashboard panels
-    html.Div([
-        # Left sidebar with filters
-        html.Div([
-            filter_panel
-        ], style={
-            "width": "20%", 
-            "minWidth": "250px",
-            "marginRight": "15px"
-        }),
-
-        # Main dashboard panels area
-        html.Div([
-            # Demographics Panel
-            collapsible_card(
-                "Patient Demographics & Risk Distribution", 
+    dcc.Tabs([
+        dcc.Tab(label="Overview", children=[
+            html.Div([
+                # Left sidebar with filters
+                html.Div([filter_panel], style={"width": "20%", "minWidth": "250px", "marginRight": "15px"}),
+                
+                # Demographics Panel - this is relatively lightweight
                 html.Div([
-                    dbc.Row([
-                        dbc.Col(dcc.Graph(figure=gender_fig) if gender_fig is not None else 
-                                html.Div("Gender data not available"), width=4),
-                        dbc.Col(dcc.Graph(figure=age_fig), width=4),
-                        dbc.Col(dcc.Graph(figure=risk_fig), width=4)
-                    ])
-                ]),
-                "demographics",
-                initially_open=True
-            ),
-            
-            # Health Indices Panel
-            collapsible_card(
-                "Health Indices Analysis", 
-                html.Div([
-                    dbc.Row([
-                        dbc.Col(dcc.Graph(figure=indices_comparison_fig) if indices_comparison_fig is not None else 
-                                html.Div("Indices comparison not available"), width=6),
-                        dbc.Col(dcc.Graph(figure=corr_fig) if corr_fig is not None else 
-                                html.Div("Correlation data not available"), width=6)
-                    ]),
-                    dbc.Row([
-                        dbc.Col(dcc.Graph(figure=health_trend_fig) if health_trend_fig is not None else 
-                                html.Div("Health trend data not available"), width=6),
-                        dbc.Col(dcc.Graph(figure=income_health_fig) if income_health_fig is not None else 
-                                html.Div("Income-health data not available"), width=6)
-                    ], style={"marginTop": "10px"})
-                ]),
-                "health-indices",
-                initially_open=True
-            ),
-            
-            # Geographic Distribution Panel
-            collapsible_card(
-                "Geographic Distribution", 
-                html.Div([
-                    dcc.Graph(figure=compact_map_fig, id="patient-map") if compact_map_fig is not None else 
-                    html.Div("Map data not available")
-                ]),
-                "geographic",
-                initially_open=True
-            ),
-            
-            # Model Performance Panel
-            collapsible_card(
-                "Model Performance & Insights", 
-                html.Div([
-                    html.Div([
-                        dbc.Row([
-                            dbc.Col([
-                                html.Label("Select Model:"),
-                                dcc.Dropdown(
-                                    id="model-performance-dropdown",
-                                    options=model_dropdown_options,
-                                    value=model_dropdown_options[0]["value"] if model_dropdown_options else None,
-                                    clearable=False,
-                                )
-                            ], width=8),
-                            dbc.Col([
-                                html.Label("Visualization Mode:"),
-                                dcc.RadioItems(
-                                    id="model-viz-toggle",
-                                    options=[
-                                        {"label": "By Cluster", "value": "cluster"},
-                                        {"label": "By Risk Category", "value": "risk"}
-                                    ],
-                                    value="cluster",
-                                    inline=True
-                                )
-                            ], width=4)
-                        ], style={"marginBottom": "15px"})
-                    ]),
-                    html.Div(id="model-metrics-display"),
-                    dbc.Row([
-                        dbc.Col(html.Div(id="model-scatter-plot"), width=6),
-                        dbc.Col(html.Div(id="model-cluster-display"), width=6),
-                    ])
-                ]),
-                "model-performance",
-                initially_open=True
-            ),
-
-            # XAI Insights Panel
-            collapsible_card(
-                "Explainable AI (XAI) Insights", 
-                html.Div([
-                    html.Div([
-                        html.Label("Select Model for XAI:"),
-                        xai_dropdown
-                    ]),
-                    html.Div(id="xai-content-area")
-                ]),
-                "xai-insights",
-                initially_open=False
-            ),
-
-            # Patient Data Table Panel
-            collapsible_card(
-                "Patient Data Table", 
-                html.Div([
-                    dash_table.DataTable(
-                        id="patient-data-table",
-                        data=sanitize_datatable_values(df_all.head(10)).to_dict("records"),
-                        columns=[{"name": i, "id": i} for i in df_all.iloc[:, :10].columns],
-                        page_size=10,
-                        sort_action="native",
-                        filter_action="native",
-                        style_table={'overflowX': 'auto'},
-                        style_cell={'textAlign': 'left', 'padding': '5px'},
-                        style_header={'backgroundColor': nhs_colors["primary"], 'color': nhs_colors["secondary"]},
+                    collapsible_card(
+                        "Patient Demographics & Risk Distribution", 
+                        html.Div(id="demographics-content", children=[
+                            dcc.Loading(id="demographics-loading")
+                        ]),
+                        "demographics",
+                        initially_open=True
                     ),
-                    html.Div(id="table-info", style={"marginTop": "10px"})
-                ]),
-                "patient-data",
-                initially_open=False
-            ),
-            patient_modal
-        ], style={
-            "width": "80%",
-            "flex": "1",
-        })
-    ], style={
-        "display": "flex",
-        "flexDirection": "row",
-    }),
-    html.Div(id="memory-management", style={"display": "none"})
+                ], style={"width": "80%"})
+            ], style={"display": "flex"})
+        ]),
+        
+        # Health Indices tab - loads only when selected
+        dcc.Tab(label="Health Indices", children=[
+            html.Div(id="health-indices-tab-content", children=[
+                dcc.Loading(id="health-indices-loading")
+            ])
+        ]),
+        
+        # Geographic tab - loads only when selected
+        dcc.Tab(label="Geographic Distribution", children=[
+            html.Div(id="geo-tab-content", children=[
+                dcc.Loading(id="geo-loading")
+            ])
+        ]),
+        
+        # Model Performance tab - loads only when selected
+        dcc.Tab(label="Model Performance", children=[
+            html.Div(id="model-tab-content", children=[
+                dcc.Loading(id="model-loading")
+            ])
+        ]),
+        
+        # XAI tab - loads only when selected
+        dcc.Tab(label="XAI Insights", children=[
+            html.Div(id="xai-tab-content", children=[
+                dcc.Loading(id="xai-loading")
+            ])
+        ]),
+        
+        # Patient data tab - loads only when selected
+        dcc.Tab(label="Patient Data", children=[
+            html.Div(id="patient-tab-content", children=[
+                dcc.Loading(id="patient-loading")
+            ])
+        ]),
+    ]),
+    
+    # Store components for shared state
+    dcc.Store(id="filtered-data-store", storage_type="memory"),
+    dcc.Store(id="selected-model-store", storage_type="memory"),
+    
+    # Memory management components
+    html.Div(id="memory-management", style={"display": "none"}),
+    patient_modal
 ], style={"backgroundColor": nhs_colors["background"], "padding": "15px"})
 
 # -----------------------------
@@ -982,27 +963,29 @@ for section in ["demographics", "health-indices", "geographic", "model-performan
     @app.callback(
         [Output(f"{section}-content", "style"), Output(f"{section}-header", "children")],
         [Input(f"{section}-header", "n_clicks")],
-        [State(f"{section}-content", "style")]
+        [State(f"{section}-content", "style"), State(f"{section}-header", "children")]
     )
-    def toggle_collapse(n, current_style):
-        section_name = section  # Use the section name from the loop
-        
-        if n is None:
-            return current_style, [
-                html.H4(section_name.replace("-", " ").title(), style={"margin": 0, "fontSize": "16px"}),
-                html.I(className="fa fa-chevron-up")
-            ]
+    def toggle_collapse(n, current_style, current_header_children):
+        if not n:
+            raise PreventUpdate
 
-        if current_style["display"] == "block":
-            return {"display": "none", "padding": "15px"}, [
-                html.H4(section_name.replace("-", " ").title(), style={"margin": 0, "fontSize": "16px"}),
-                html.I(className="fa fa-chevron-down")
-            ]
+        display_now = current_style.get("display", "block")
+        new_display = "none" if display_now == "block" else "block"
+
+        # Toggle icon
+        # current_header_children should be [html.H4(...), html.I(...)]
+        icon_element = current_header_children[1]
+        icon_class = icon_element["props"].get("className", "")
+        if "fa-chevron-up" in icon_class:
+            icon_class = icon_class.replace("fa-chevron-up", "fa-chevron-down")
         else:
-            return {"display": "block", "padding": "15px"}, [
-                html.H4(section_name.replace("-", " ").title(), style={"margin": 0, "fontSize": "16px"}),
-                html.I(className="fa fa-chevron-up")
-            ]
+            icon_class = icon_class.replace("fa-chevron-down", "fa-chevron-up")
+        icon_element["props"]["className"] = icon_class
+
+        # Update style and header children
+        current_style["display"] = new_display
+        new_header_children = [current_header_children[0], icon_element]
+        return current_style, new_header_children
 
 # Update model details
 @app.callback(
@@ -1014,54 +997,16 @@ for section in ["demographics", "health-indices", "geographic", "model-performan
 )
 def update_model_performance(selected_model, viz_mode):
     if not selected_model:
-        return html.Div("No model selected."), html.Div(), html.Div()
-    
-    # Set default visualization mode if not provided
+        return "No model selected", no_update, no_update
+
     if viz_mode is None:
-        viz_mode = "cluster"  # Default to cluster visualization
-    
-    # Re-load model data in case it changed
+        viz_mode = "default"
+
     all_models = load_final_model_outputs()
     mdata = all_models.get(selected_model, {})
-    
-    metrics = mdata.get("metrics", {})
-    df_model = mdata.get("df", pd.DataFrame())
-    tsne_src = mdata.get("tsne_img")
-    umap_src = mdata.get("umap_img")
 
-    # Metrics cards
-    metrics_cards = html.Div([
-        html.H5(f"Model Metrics - {selected_model}", style={"marginBottom": "10px"}),
-        dbc.Row([
-            dbc.Col(kpi_card("Test MSE", f"{metrics.get('test_mse', 'N/A')}"), width=4),
-            dbc.Col(kpi_card("Test R²", f"{metrics.get('test_r2', 'N/A')}"), width=4),
-            dbc.Col(kpi_card("Silhouette", f"{metrics.get('Silhouette', 'N/A')}"), width=4),
-        ]),
-        dbc.Row([
-            dbc.Col(kpi_card("Calinski-Harabasz", f"{metrics.get('Calinski_Harabasz', 'N/A')}"), width=6),
-            dbc.Col(kpi_card("Davies-Bouldin", f"{metrics.get('Davies_Bouldin', 'N/A')}"), width=6),
-        ], style={"marginTop": "10px"})
-    ])
-
-    # Create the scatter using the new function with sampling
-    if "PredictedHI_final" in df_model.columns and "Health_Index" in df_model.columns:
-        scatter_fig = create_model_comparison_chart(df_model, color_by=viz_mode)
-        scatter_plot = dcc.Graph(figure=scatter_fig)
-    else:
-        scatter_plot = html.Div("Prediction data not available for scatter plot.")
-
-    # Cluster display with both visualizations
-    cluster_display = html.Div([
-        html.H5("Clustering Visualizations", style={"marginBottom": "10px"}),
-        dbc.Row([
-            dbc.Col(html.Img(src=tsne_src, style={"width": "100%"}) 
-                    if tsne_src else html.Div("t-SNE plot not available"), width=6),
-            dbc.Col(html.Img(src=umap_src, style={"width": "100%"}) 
-                    if umap_src else html.Div("UMAP plot not available"), width=6),
-        ])
-    ])
-    
-    return metrics_cards, scatter_plot, cluster_display
+    # Return placeholders or minimal content
+    return "Metrics placeholder", "Scatter placeholder", "Cluster placeholder"
 
 # XAI Callback - Updated for better layout
 @app.callback(
@@ -1070,91 +1015,10 @@ def update_model_performance(selected_model, viz_mode):
 )
 def update_xai_insights(selected_model):
     if not selected_model:
-        return html.Div("No model group selected.")
+        return "No model selected"
 
-    found = [fg for fg in final_groups if fg["label"] == selected_model]
-    if not found:
-        return html.Div(f"Cannot find model group: {selected_model}")
-
-    model_dir_name = found[0]["model"]
-    model_xai_dir  = os.path.join(EXPLAIN_XAI_DIR, model_dir_name)
-
-    shap_path = os.path.join(model_xai_dir, f"{model_dir_name}_shap_values.npy")
-    ig_path = os.path.join(model_xai_dir, f"{model_dir_name}_ig_values.npy")
-    anchors_path = os.path.join(model_xai_dir, f"{model_dir_name}_anchors_local.csv")
-    deeplift_path = os.path.join(model_xai_dir, f"{model_dir_name}_deeplift_values.npy")
-    cluster_lime_path = os.path.join(model_xai_dir, f"{model_dir_name}_cluster_lime_explanations.csv")
-
-    xai_content = []
-
-    # SHAP & IG in the first row
-    row1_items = []
-    if os.path.exists(shap_path):
-        shap_vals = np.load(shap_path)
-        mean_abs = np.mean(np.abs(shap_vals), axis=0)
-        features = [f"Feat_{i}" for i in range(len(mean_abs))]
-        df_shap = pd.DataFrame({"Feature": features, "Importance": mean_abs}).sort_values("Importance", ascending=False)
-        shap_fig = px.bar(df_shap.head(10), x="Importance", y="Feature", orientation="h",
-                      title="SHAP Feature Importance", template="plotly_white")
-        apply_2decimal_format(shap_fig)
-        row1_items.append(dbc.Col(dcc.Graph(figure=shap_fig), width=6))
-    else:
-        row1_items.append(dbc.Col(html.Div("SHAP values not available."), width=6))
-
-    if os.path.exists(ig_path):
-        ig_vals = np.load(ig_path)
-        mean_abs_ig = np.mean(np.abs(ig_vals), axis=0)
-        feats_ig = [f"Feat_{i}" for i in range(len(mean_abs_ig))]
-        df_ig = pd.DataFrame({"Feature": feats_ig, "IG_Importance": mean_abs_ig})
-        df_ig.sort_values("IG_Importance", ascending=False, inplace=True)
-        ig_fig = px.bar(df_ig.head(10), x="IG_Importance", y="Feature", orientation="h",
-                    title="Integrated Gradients Feature Importance", template="plotly_white")
-        apply_2decimal_format(ig_fig)
-        row1_items.append(dbc.Col(dcc.Graph(figure=ig_fig), width=6))
-    else:
-        row1_items.append(dbc.Col(html.Div("Integrated Gradients not available."), width=6))
-
-    xai_content.append(dbc.Row(row1_items))
-
-    # Anchors in second row if available
-    if os.path.exists(anchors_path):
-        df_anchors = pd.read_csv(anchors_path)
-        if "Anchors" in df_anchors.columns:
-            df_anchors["Formatted Explanation"] = df_anchors["Anchors"].apply(format_explanation)
-            anchors_table = dash_table.DataTable(
-                data=df_anchors.head(5).to_dict("records"),
-                columns=[{"name": c, "id": c} for c in df_anchors.columns],
-                page_size=5,
-                style_cell={'textAlign': 'left', 'padding': '5px'},
-                style_header={'backgroundColor': nhs_colors["primary"], 'color': nhs_colors["secondary"]}
-            )
-            xai_content.append(dbc.Row([
-                dbc.Col([
-                    html.H5("Anchors (Critical Cases)", style={"color": nhs_colors["primary"], "marginTop": "15px"}),
-                    anchors_table
-                ])
-            ]))
-
-    # Cluster-based LIME in third row if available
-    if os.path.exists(cluster_lime_path):
-        df_lime = pd.read_csv(cluster_lime_path)
-        if "LIME_Explanation" in df_lime.columns:
-            df_lime["Formatted Explanation"] = df_lime["LIME_Explanation"].apply(format_explanation)
-            lime_table = dash_table.DataTable(
-                data=df_lime.head(5).to_dict("records"),
-                columns=[{"name": c, "id": c} for c in df_lime.columns],
-                page_size=5,
-                style_cell={'textAlign': 'left', 'padding': '5px'},
-                style_header={'backgroundColor': nhs_colors["primary"], 'color': nhs_colors["secondary"]}
-            )
-            xai_content.append(dbc.Row([
-                dbc.Col([
-                    html.H5("Cluster-based LIME Explanations", style={"color": nhs_colors["primary"], "marginTop": "15px"}),
-                    lime_table
-                ])
-            ]))
-    
-    return html.Div(xai_content)
+    # Return minimal placeholder
+    return "XAI insights placeholder"
 
 # Filter reset callback
 @app.callback(
