@@ -61,7 +61,8 @@ final_groups = [
 # -----------------------------
 if os.path.exists(PICKLE_ALL):
     # Use dask for chunked reading of large files
-    df_all = dd.read_pickle(PICKLE_ALL).compute()
+    df_temp = pd.read_pickle(PICKLE_ALL)
+    df_all = dd.from_pandas(df_temp, npartitions=8).compute()
     # Convert to smaller dtypes where possible to save memory
     for col in df_all.select_dtypes(include=['float64']).columns:
         df_all[col] = df_all[col].astype('float32')
@@ -117,6 +118,27 @@ df_all["Risk_Category"] = pd.cut(
 )
 
 # -----------------------------
+# Color / Theme Config
+# -----------------------------
+nhs_colors = {
+    "background": "#F7F7F7",
+    "text": "#333333", 
+    "primary": "#005EB8",
+    "secondary": "#FFFFFF",
+    "accent": "#00843D",
+    "highlight": "#FFB81C",
+    "risk_high": "#DA291C",
+    "risk_medium": "#ED8B00",
+    "risk_low": "#00843D",
+    "risk_verylow": "#0072CE"
+}
+external_stylesheets = [dbc.themes.FLATLY]
+
+# Color scales for consistent styling
+risk_colors = [nhs_colors["risk_high"], nhs_colors["risk_medium"], 
+               nhs_colors["risk_low"], nhs_colors["risk_verylow"]]
+
+# -----------------------------
 # Helper Functions
 # -----------------------------
 def encode_image(image_file):
@@ -127,10 +149,20 @@ def encode_image(image_file):
         return f"data:image/png;base64,{encoded}"
     return None
 
-# Initialize cache
-cache = Cache()
+# Initialize the app early, before defining cached functions
+app = dash.Dash(__name__, suppress_callback_exceptions=True, external_stylesheets=external_stylesheets + [
+    {'href': 'https://use.fontawesome.com/releases/v5.8.1/css/all.css', 'rel': 'stylesheet'}
+])
+server = app.server
 
-# Replace load_final_model_outputs with a cached version
+# Initialize cache with app.server
+cache = Cache(app.server, config={
+    "CACHE_TYPE": "filesystem",
+    "CACHE_DIR": "cache-directory",
+    "CACHE_DEFAULT_TIMEOUT": 3600
+})
+
+# Now define the cached function after cache is properly initialized
 @cache.memoize()
 def load_final_model_outputs():
     """
@@ -831,20 +863,11 @@ app = dash.Dash(__name__, suppress_callback_exceptions=True, external_stylesheet
 ])
 server = app.server
 
-# Initialize cache
 cache = Cache(app.server, config={
-    'CACHE_TYPE': 'filesystem',
-    'CACHE_DIR': 'cache-directory',
-    'CACHE_DEFAULT_TIMEOUT': 3600  # Cache timeout in seconds (1 hour)
+    "CACHE_TYPE": "filesystem",
+    "CACHE_DIR": "cache-directory",
+    "CACHE_DEFAULT_TIMEOUT": 3600
 })
-
-# After initializing the app (right after app = dash.Dash(...)), add caching
-app.server.config.update({
-    'CACHE_TYPE': 'filesystem',
-    'CACHE_DIR': 'cache-directory',
-    'CACHE_DEFAULT_TIMEOUT': 3600  # Cache timeout in seconds (1 hour)
-})
-cache = Cache(app.server)
 
 log_memory_usage("Before visualization creation")
 
@@ -900,7 +923,7 @@ app.layout = html.Div([
                 html.Div([
                     collapsible_card(
                         "Patient Demographics & Risk Distribution", 
-                        html.Div(id="demographics-content", children=[
+                        html.Div(children=[  # Remove the id="demographics-content" here
                             dcc.Loading(id="demographics-loading")
                         ]),
                         "demographics",
@@ -927,7 +950,44 @@ app.layout = html.Div([
         # Model Performance tab - loads only when selected
         dcc.Tab(label="Model Performance", children=[
             html.Div(id="model-tab-content", children=[
-                dcc.Loading(id="model-loading")
+                # Add the model performance content directly here instead of as standalone components
+                collapsible_card(
+                    "Model Performance & Insights", 
+                    html.Div([
+                        html.Div([
+                            dbc.Row([
+                                dbc.Col([
+                                    html.Label("Select Model:"),
+                                    dcc.Dropdown(
+                                        id="model-performance-dropdown",
+                                        options=model_dropdown_options,
+                                        value=model_dropdown_options[0]["value"] if model_dropdown_options else None,
+                                        clearable=False,
+                                    )
+                                ], width=8),
+                                dbc.Col([
+                                    html.Label("Visualization Mode:"),
+                                    dcc.RadioItems(
+                                        id="model-viz-toggle",
+                                        options=[
+                                            {"label": "By Cluster", "value": "cluster"},
+                                            {"label": "By Risk Category", "value": "risk"}
+                                        ],
+                                        value="cluster",
+                                        inline=True
+                                    )
+                                ], width=4)
+                            ], style={"marginBottom": "15px"})
+                        ]),
+                        html.Div(id="model-metrics-display"),
+                        dbc.Row([
+                            dbc.Col(html.Div(id="model-scatter-plot"), width=6),
+                            dbc.Col(html.Div(id="model-cluster-display"), width=6),
+                        ])
+                    ]),
+                    "model-performance",
+                    initially_open=True
+                )
             ])
         ]),
         
@@ -941,7 +1001,26 @@ app.layout = html.Div([
         # Patient data tab - loads only when selected
         dcc.Tab(label="Patient Data", children=[
             html.Div(id="patient-tab-content", children=[
-                dcc.Loading(id="patient-loading")
+                # Add the patient data table content directly here
+                collapsible_card(
+                    "Patient Data Table", 
+                    html.Div([
+                        dash_table.DataTable(
+                            id="patient-data-table",
+                            data=sanitize_datatable_values(df_all.head(10)).to_dict("records"),
+                            columns=[{"name": i, "id": i} for i in df_all.iloc[:, :10].columns],
+                            page_size=10,
+                            sort_action="native",
+                            filter_action="native",
+                            style_table={'overflowX': 'auto'},
+                            style_cell={'textAlign': 'left', 'padding': '5px'},
+                            style_header={'backgroundColor': nhs_colors["primary"], 'color': nhs_colors["secondary"]},
+                        ),
+                        html.Div(id="table-info", style={"marginTop": "10px"})
+                    ]),
+                    "patient-data",
+                    initially_open=True
+                )
             ])
         ]),
     ]),
