@@ -86,7 +86,14 @@ VITAI/
 - **Hyperparameter Tuning:** Optuna
 - **Development:** Jupyter Notebook, VS Code / PyCharm
 - **Hardware:** NVIDIA CUDA-enabled GPU
+- **Optional C++ Module:** Provides faster file reading and data loading for large EHR datasets.
 
+## GenerateAndPredict C++ Script
+The GenerateAndPredict.cpp file orchestrates:
+- Automated Synthea data generation and handling of patient records.
+- Parallelized extraction and preprocessing, improving runtime performance.
+- Optional multi-threading and resource usage controls for large EHR datasets.
+- Direct invocation of Python-based TabNet models, leveraging GPU or CPU as needed.
 
 ## Acknowledgements and References
 This project was developed as part of my placement year at the NHS with contributions from healthcare professionals, academic supervisors, and industry experts.
