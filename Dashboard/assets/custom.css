@@ -1,0 +1,17 @@
+.stage-marker .stage-icon-container {
+    transition: all 0.3s ease;
+}
+.stage-marker .stage-icon-container.active {
+    box-shadow: 0 0 10px rgba(0, 94, 184, 0.7);
+}
+.stage-marker .stage-icon-container.completed {
+    background-color: #52A373 !important;
+}
+@keyframes pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.1); }
+    100% { transform: scale(1); }
+}
+.stage-marker.active .stage-icon-container {
+    animation: pulse 2s infinite;
+}

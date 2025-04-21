@@ -14,6 +14,9 @@ Usage:
 """
 
 import re
+import os
+import json
+from typing import Dict, Any, Optional
 
 # Mapping of raw feature names to more friendly labels.
 FRIENDLY_NAMES = {
@@ -124,6 +127,69 @@ def format_explanation(raw_explanation):
     parts = raw_explanation.split(" AND ")
     formatted_conditions = [format_condition(part) for part in parts]
     return "\n".join(f"- {cond}" for cond in formatted_conditions)
+
+def format_explanation_dashboard(model_name: str) -> Optional[str]:
+    """
+    Format XAI explanation for display in the dashboard
+    
+    Args:
+        model_name: The name of the model to get explanation for
+    
+    Returns:
+        A formatted HTML string with the explanation, or None if not found
+    """
+    # Define the path to look for XAI explanations
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    data_dir = os.path.join(base_dir, "Data")
+    explain_dir = os.path.join(data_dir, "explain_xai")
+    
+    # Map model display names to file prefixes
+    model_map = {
+        "Diabetes": "combined_diabetes_tabnet",
+        "CKD": "combined_all_ckd_tabnet",
+        "General": "combined_none_tabnet"
+    }
+    
+    if model_name not in model_map:
+        return None
+        
+    model_key = model_map[model_name]
+    explanation_file = os.path.join(explain_dir, model_key, f"{model_key}_explanation.json")
+    
+    if not os.path.exists(explanation_file):
+        return f"No explanation found for {model_name} model."
+        
+    try:
+        with open(explanation_file, 'r') as f:
+            data = json.load(f)
+            
+        # Format the explanation into HTML
+        explanation = "<div style='font-size: 14px; line-height: 1.5;'>"
+        
+        # Add model overview
+        if "overview" in data:
+            explanation += f"<h3>Model Overview</h3><p>{data['overview']}</p>"
+            
+        # Add feature importance explanation
+        if "feature_importance" in data:
+            explanation += f"<h3>Feature Importance</h3><p>{data['feature_importance']}</p>"
+            
+        # Add detailed feature explanations if available
+        if "feature_explanations" in data and isinstance(data["feature_explanations"], dict):
+            explanation += "<h3>Key Features Explained</h3><ul>"
+            for feature, desc in data["feature_explanations"].items():
+                explanation += f"<li><strong>{feature}:</strong> {desc}</li>"
+            explanation += "</ul>"
+            
+        # Add clinical implications if available
+        if "clinical_implications" in data:
+            explanation += f"<h3>Clinical Implications</h3><p>{data['clinical_implications']}</p>"
+            
+        explanation += "</div>"
+        return explanation
+        
+    except Exception as e:
+        return f"Error loading explanation for {model_name} model: {str(e)}"
 
 if __name__ == "__main__":
     # Example test strings (feel free to add more)
