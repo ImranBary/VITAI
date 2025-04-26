@@ -12,6 +12,7 @@ import subprocess
 import threading
 import queue
 import signal
+import re  # Add this import for regex operations
 from datetime import datetime
 from typing import Optional, Union  # Add this import for older Python compatibility
 
@@ -836,8 +837,10 @@ def sanitize_datatable_values(df):
 
 
 # ------------------------------------------------------------
-# DASH APP INITIALIZATION & LAYOUT
+# DASHBOARD COMPONENTS & LAYOUT HELPERS
 # ------------------------------------------------------------
+
+# Define color scheme first before any components use it
 nhs_colors = {
     "background": "#F7F7F7",
     "text": "#333333",
@@ -850,7 +853,6 @@ nhs_colors = {
     "risk_low": "#52A373",
     "risk_verylow": "#5A9BD5",
 }
-external_stylesheets = [dbc.themes.FLATLY]
 
 risk_colors = [
     nhs_colors["risk_verylow"],
@@ -858,6 +860,230 @@ risk_colors = [
     nhs_colors["risk_medium"],
     nhs_colors["risk_high"],
 ]
+
+# Define model dropdown options
+model_dropdown_options = [{"label": group["label"], "value": group["label"]} for group in final_groups]
+
+# Create collapsible card component
+def collapsible_card(title, content, card_id, initially_open=False):
+    return html.Div(
+        [
+            html.H5(
+                [
+                    html.Span(title),
+                    html.I(
+                        className=f"fas {'fa-chevron-down' if initially_open else 'fa-chevron-right'} ml-2",
+                        id=f"{card_id}-toggle-icon",
+                    ),
+                ],
+                id=f"{card_id}-header",
+                style={
+                    "cursor": "pointer",
+                    "display": "flex",
+                    "justifyContent": "space-between",
+                    "padding": "10px",
+                    "backgroundColor": "#f8f9fa",
+                    "borderRadius": "5px",
+                },
+            ),
+            html.Div(
+                content,
+                id=f"{card_id}-content",
+                style={"display": "block" if initially_open else "none", "padding": "15px"},
+            ),
+        ],
+        className="mb-3",
+        style={"backgroundColor": "white", "borderRadius": "5px", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"},
+    )
+
+# Define KPI row component
+kpi_row = html.Div(
+    [
+        dbc.Row(
+            [
+                dbc.Col(
+                    html.Div(
+                        [
+                            html.H5("Total Patients", className="kpi-title"),
+                            html.H3(f"{len(df_all):,}", className="kpi-value"),
+                        ],
+                        className="kpi-card",
+                    ),
+                    width=12, lg=3,
+                ),
+                dbc.Col(
+                    html.Div(
+                        [
+                            html.H5("High Risk Patients", className="kpi-title"),
+                            html.H3(
+                                f"{len(df_all[df_all['Risk_Category'] == 'High Risk']) if 'Risk_Category' in df_all.columns else 0:,}", 
+                                className="kpi-value"
+                            ),
+                        ],
+                        className="kpi-card",
+                        style={"backgroundColor": "#FADBD8"},
+                    ),
+                    width=12, lg=3,
+                ),
+                dbc.Col(
+                    html.Div(
+                        [
+                            html.H5("Average Health Index", className="kpi-title"),
+                            html.H3(
+                                f"{df_all['Health_Index'].mean():.2f}" if 'Health_Index' in df_all.columns else "N/A", 
+                                className="kpi-value"
+                            ),
+                        ],
+                        className="kpi-card",
+                        style={"backgroundColor": "#D5F5E3"},
+                    ),
+                    width=12, lg=3,
+                ),
+                dbc.Col(
+                    html.Div(
+                        [
+                            html.H5("Avg. Charlson Index", className="kpi-title"),
+                            html.H3(
+                                f"{df_all['CharlsonIndex'].mean():.2f}" if 'CharlsonIndex' in df_all.columns else "N/A", 
+                                className="kpi-value"
+                            ),
+                        ],
+                        className="kpi-card",
+                        style={"backgroundColor": "#D6EAF8"},
+                    ),
+                    width=12, lg=3,
+                ),
+            ],
+            className="g-2",
+        ),
+    ],
+    style={"marginBottom": "15px"},
+)
+
+# Define patient modal component
+patient_modal = dbc.Modal(
+    [
+        dbc.ModalHeader("Patient Details"),
+        dbc.ModalBody(id="patient-detail-body"),
+        dbc.ModalFooter(
+            dbc.Button("Close", id="close-modal", className="ml-auto", n_clicks=0)
+        ),
+    ],
+    id="patient-modal",
+    size="lg",
+)
+
+# Initialize final_models_data and XAI dropdown
+final_models_data = {group["label"]: {"metrics": {"test_mse": "N/A", "test_r2": "N/A", "Silhouette": "N/A"}, 
+                                     "df": pd.DataFrame(), "tsne_img": None, "umap_img": None} 
+                     for group in final_groups}
+
+xai_dropdown = dcc.Dropdown(
+    id="xai-model-dropdown",
+    options=[{"label": group["label"], "value": group["label"]} for group in final_groups],
+    value=final_groups[0]["label"] if final_groups else None,
+    clearable=False,
+)
+
+# Define filter panel component (now all dependencies are defined)
+filter_panel = html.Div(
+    [
+        html.H5(
+            "Dashboard Filters",
+            style={"color": nhs_colors["primary"], "marginBottom": "15px"},
+        ),
+        html.Label("Model Group:"),
+        dcc.Dropdown(
+            id="global-model-dropdown",
+            options=[{"label": "All", "value": "All"}] + model_dropdown_options,
+            value="All",
+            clearable=False,
+        ),
+        html.Label("Risk Category:", style={"marginTop": "15px"}),
+        dcc.Dropdown(
+            id="global-risk-dropdown",
+            options=[
+                {"label": "All", "value": "All"},
+                {"label": "High Risk", "value": "High Risk"},
+                {"label": "Moderate Risk", "value": "Moderate Risk"},
+                {"label": "Low Risk", "value": "Low Risk"},
+                {"label": "Very Low Risk", "value": "Very Low Risk"},
+            ],
+            value="All",
+            clearable=False,
+        ),
+        html.Label("Age Range:", style={"marginTop": "15px"}),
+        dcc.RangeSlider(
+            id="age-range-slider",
+            min=df_all["AGE"].min() if "AGE" in df_all.columns else 0,
+            max=df_all["AGE"].max() if "AGE" in df_all.columns else 100,
+            step=1,
+            marks={i: str(i) for i in range(0, 101, 20)},
+            value=[
+                df_all["AGE"].min() if "AGE" in df_all.columns else 0,
+                df_all["AGE"].max() if "AGE" in df_all.columns else 100,
+            ],
+            tooltip={"placement": "bottom", "always_visible": True},
+        ),
+        html.Label("Income Range:", style={"marginTop": "15px"}),
+        dcc.RangeSlider(
+            id="income-range-slider",
+            min=df_all["INCOME"].min() if "INCOME" in df_all.columns else 0,
+            max=df_all["INCOME"].max() if "INCOME" in df_all.columns else 100000,
+            step=1000,
+            marks={i: f"£{i:,}" for i in range(0, 100001, 25000)},
+            value=[
+                df_all["INCOME"].min() if "INCOME" in df_all.columns else 0,
+                df_all["INCOME"].max() if "INCOME" in df_all.columns else 100000,
+            ],
+            tooltip={"placement": "bottom", "always_visible": True},
+        ),
+        html.Label("Health Index Range:", style={"marginTop": "15px"}),
+        dcc.RangeSlider(
+            id="health-index-slider",
+            min=df_all["Health_Index"].min(),
+            max=df_all["Health_Index"].max(),
+            step=0.1,
+            marks={i: str(i) for i in range(0, 11, 2)},
+            value=[df_all["Health_Index"].min(), df_all["Health_Index"].max()],
+            tooltip={"placement": "bottom", "always_visible": True},
+        ),
+        html.Div(
+            [
+                dbc.Button(
+                    "Apply Filters",
+                    id="apply-filters-btn",
+                    color="primary",
+                    className="mr-1",
+                    style={"marginRight": "5px"},
+                ),
+                dbc.Button(
+                    "Reset Filters",
+                    id="reset-filters-btn",
+                    color="secondary",
+                    className="mr-1",
+                    style={"marginRight": "5px"},
+                ),
+            ],
+            style={
+                "marginTop": "20px",
+                "display": "flex",
+                "justifyContent": "space-between",
+            },
+        ),
+    ],
+    style={
+        "backgroundColor": nhs_colors["secondary"],
+        "padding": "15px",
+        "borderRadius": "5px",
+        "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
+    },
+)
+
+# ------------------------------------------------------------
+# DASH APP INITIALIZATION & LAYOUT
+# ------------------------------------------------------------
+external_stylesheets = [dbc.themes.FLATLY]
 
 progress_stage_icons = {
     "Initializing": "fa fa-cog",
@@ -869,10 +1095,33 @@ progress_stage_icons = {
     "Completed": "fa fa-check-circle",
 }
 
-
 def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
-    stages = list(progress_stage_icons.keys())
-
+    """
+    Create a progress bar with stage markers that map directly to the stages 
+    reported by GenerateAndPredict.cpp
+    """
+    # Updated to match exactly the stages from GenerateAndPredict.cpp
+    stages = [
+        "Initializing",
+        "GeneratingData",
+        "ProcessingFiles", 
+        "CalculatingIndices",
+        "NormalizingFeatures",
+        "RunningPredictions",
+        "Completed"
+    ]
+    
+    # The stage percentages defined in GenerateAndPredict.cpp
+    stage_percentages = {
+        "Initializing": 5.0,
+        "GeneratingData": 15.0,
+        "ProcessingFiles": 30.0,
+        "CalculatingIndices": 25.0,
+        "NormalizingFeatures": 10.0,
+        "RunningPredictions": 15.0,
+        "Completed": 0.0
+    }
+    
     stage_markers = []
     cumulative_percentage = 0
 
@@ -880,12 +1129,14 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
         if stage == "Completed" and current_stage != "Completed":
             continue
 
+        # Calculate position based on the cumulative percentage from C++
         if i == 0:
             position_percent = 0
-        elif i == len(stages) - 1 and stage == "Completed":
+        elif stage == "Completed":
             position_percent = 100
         else:
-            position_percent = (i / (len(stages) - 1)) * 100
+            # Calculate position based on cumulative percentage of previous stages
+            position_percent = sum([stage_percentages[s] for s in stages[:i]])
 
         is_active = stage == current_stage
         is_completed = False
@@ -893,25 +1144,26 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
         if overall_progress > position_percent:
             is_completed = True
 
+        # Make the marker container vertically taller for better visibility
         stage_marker = html.Div(
             className=f"stage-marker {'active' if is_active else ''} {'completed' if is_completed else ''}",
             style={
                 "left": f"{position_percent}%",
                 "transform": "translateX(-50%)",
                 "position": "absolute",
-                "bottom": "-25px",
+                "bottom": "-30px",  # Increased from -25px
                 "display": "flex",
                 "flexDirection": "column",
                 "alignItems": "center",
-                "width": "60px",
+                "width": "65px",  # Increased from 60px
                 "transition": "all 0.3s ease",
             },
             children=[
                 html.Div(
                     className=f"stage-icon-container {'active' if is_active else ''} {'completed' if is_completed else ''}",
                     style={
-                        "width": "30px",
-                        "height": "30px",
+                        "width": "35px",  # Increased from 30px 
+                        "height": "35px",  # Increased from 30px
                         "borderRadius": "50%",
                         "backgroundColor": nhs_colors["primary"]
                         if is_active
@@ -920,29 +1172,44 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
                         "justifyContent": "center",
                         "alignItems": "center",
                         "color": "white",
-                        "marginBottom": "5px",
-                        "boxShadow": "0 2px 4px rgba(0,0,0,0.2)"
+                        "marginBottom": "8px",  # Increased from 5px
+                        "boxShadow": "0 2px 6px rgba(0,0,0,0.3)"  # Enhanced shadow
                         if is_active
                         else "none",
-                        "transform": "scale(1.2)" if is_active else "scale(1)",
+                        "transform": "scale(1.3)" if is_active else "scale(1)",  # Increased from 1.2
                         "transition": "all 0.3s ease",
+                        "zIndex": "10" if is_active else "1",  # Make active stage appear above others
                     },
                     children=[html.I(className=progress_stage_icons[stage])],
                 ),
                 html.Span(
                     stage,
                     style={
-                        "fontSize": "10px",
+                        "fontSize": "11px",  # Increased from 10px
                         "textAlign": "center",
                         "fontWeight": "bold" if is_active else "normal",
                         "color": nhs_colors["primary"] if is_active else "#666",
                         "transition": "all 0.3s ease",
+                        "maxWidth": "65px",
+                        "overflow": "hidden",
+                        "textOverflow": "ellipsis",
+                        "whiteSpace": "nowrap",
                     },
                 ),
+                # Add percentage from stage_percentages as a small tag
+                html.Span(
+                    f"{stage_percentages[stage]}%",
+                    style={
+                        "fontSize": "9px",
+                        "color": "#888",
+                        "marginTop": "2px",
+                    },
+                ) if stage_percentages[stage] > 0 else None,
             ],
         )
         stage_markers.append(stage_marker)
 
+    # The rest of the function remains similar but with enhanced styling for the timer display
     eta_display = None
     if current_stage != "Completed" and eta != "calculating...":
         eta_display = html.Div(
@@ -955,30 +1222,37 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
                     style={"fontWeight": "bold", "marginBottom": "5px"},
                 ),
                 html.Div(
-                    eta, style={"fontSize": "16px", "color": nhs_colors["primary"]}
+                    eta, 
+                    style={
+                        "fontSize": "18px",  # Increased from 16px
+                        "color": nhs_colors["primary"],
+                        "fontWeight": "bold",
+                    }
                 ),
             ],
             style={
                 "position": "absolute",
                 "right": "0",
-                "top": "-45px",
+                "top": "-50px",  # Increased from -45px
                 "backgroundColor": "white",
-                "padding": "8px 12px",
-                "borderRadius": "4px",
-                "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
+                "padding": "10px 15px",  # Increased padding
+                "borderRadius": "6px",  # Increased from 4px
+                "boxShadow": "0 2px 8px rgba(0,0,0,0.15)",  # Enhanced shadow
                 "border": f"1px solid {nhs_colors['primary']}",
+                "zIndex": "5",  # Ensure it's above other elements
             },
         )
 
+    # Main component return with improved layout for progress tracking
     return html.Div(
         [
             eta_display,
             html.Div(
                 style={
                     "width": "100%",
-                    "height": "40px",
+                    "height": "50px",  # Increased from 40px
                     "position": "relative",
-                    "marginBottom": "40px",
+                    "marginBottom": "50px",  # Increased from 40px for the larger markers
                 },
                 children=[
                     dbc.Progress(
@@ -986,9 +1260,10 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
                         striped=False,
                         animated=True,
                         style={
-                            "height": "10px",
-                            "borderRadius": "5px",
+                            "height": "12px",  # Increased from 10px
+                            "borderRadius": "6px",  # Increased from 5px
                             "backgroundColor": "#e0e0e0",
+                            "marginTop": "10px",  # Add some margin at top
                         },
                         className="mb-0",
                         color="primary" if current_stage != "Completed" else "success",
@@ -998,7 +1273,6 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
             ),
         ]
     )
-
 
 app = dash.Dash(
     __name__,
@@ -1026,7 +1300,7 @@ app.server.config.update(
         "CACHE_TYPE": "filesystem",
         "CACHE_DIR": "cache-directory",
         "CACHE_DEFAULT_TIMEOUT": 3600,
-    }
+    },
 )
 cache = Cache(app.server)
 
@@ -1177,21 +1451,40 @@ def stream_progress(_tick, state):
         line = progress_queue.get_nowait()
         changed = True
 
-        # --- process finished? ---------------------------------------------
-        if line.startswith("[EXITCODE]"):
-            rc = int(line.split()[1])
-            state["status"]   = "completed" if rc == 0 else "error"
-            state["stage"]    = "Completed"
-            state["progress"] = 100
-            if rc != 0:
-                state["error"] = f"Process returned {rc}"
-            continue
-
         # --- normal log / progress line ------------------------------------
         state["output"].append(line)
         if len(state["output"]) > 500:
             state["output"] = state["output"][-500:]
 
+        # --- Check for successful completion message -----------------------
+        if "[INFO] GenerateAndPredict completed successfully" in line:
+            state["status"] = "completed"
+            state["stage"] = "Completed"
+            state["progress"] = 100
+            continue
+
+        # --- process finished? ---------------------------------------------
+        if line.startswith("[EXITCODE]"):
+            try:
+                rc = int(line.split()[1])
+                # Only set status if not already set by success message
+                if state["status"] != "completed":
+                    state["status"] = "completed" if rc == 0 else "error"
+                    if rc != 0:
+                        state["error"] = f"Process returned {rc}"
+            except (ValueError, IndexError):
+                # Handle unknown exit code - don't override success status
+                if state["status"] != "completed":
+                    state["status"] = "error"
+                    state["error"] = "Process terminated with unknown exit code"
+            
+            # Set completed stage if not already set
+            if state["stage"] != "Completed":
+                state["stage"] = "Completed"
+                state["progress"] = 100
+            continue
+
+        # --- progress line parsing ----------------------------------------
         m = re.search(
             r'\[PROGRESS\] stage="([^"]+)" percent=([\d.]+) remaining="([^"]+)"',
             line,
@@ -1387,9 +1680,7 @@ tabs_component = dcc.Tabs(
                                     "Patient Demographics & Risk Distribution",
                                     html.Div(
                                         id="demographics-container",
-                                        children=[
-                                            dcc.Loading(id="demographics-loading")
-                                        ],
+                                        children=[dcc.Loading(id="demographics-loading")],
                                     ),
                                     "demographics",
                                     initially_open=True,
@@ -1668,8 +1959,10 @@ def update_demographics_content(filtered_data):
             style={"padding": "20px", "textAlign": "center"},
         )
 
+    # Generate all required visualizations
     gender_chart, age_chart, risk_chart = create_demographic_charts(df_to_use)
     race_chart, healthcare_expense_chart = create_race_demographics(df_to_use)
+    income_health_fig = create_income_health_chart(df_to_use)
 
     return html.Div(
         [
@@ -1828,113 +2121,353 @@ def load_geo_content(filtered_data):
     Output("model-tab-content", "children"), [Input("filtered-data-store", "data")]
 )
 def load_model_performance_content(filtered_data):
+    """
+    Load and display comprehensive model performance data from the finals directory
+    using data generated by final_three_tabnet.py
+    """
+    # Initialize storage for model results
     model_cards = []
-    for label, model_data in final_models_data.items():
-        metrics = model_data["metrics"]
-        metrics_rows = [
-            html.Div(
-                [
-                    html.Strong("Test MSE: "),
-                    html.Span(
-                        f"{metrics['test_mse']:.4f}"
-                        if isinstance(metrics["test_mse"], (int, float))
-                        else metrics["test_mse"]
-                    ),
-                ],
-                style={"marginBottom": "8px"},
-            ),
-            html.Div(
-                [
-                    html.Strong("Test R²: "),
-                    html.Span(
-                        f"{metrics['test_r2']:.4f}"
-                        if isinstance(metrics["test_r2"], (int, float))
-                        else metrics["test_r2"]
-                    ),
-                ],
-                style={"marginBottom": "8px"},
-            ),
-            html.Div(
-                [
-                    html.Strong("Silhouette Score: "),
-                    html.Span(
-                        f"{metrics['Silhouette']:.4f}"
-                        if isinstance(metrics["Silhouette"], (int, float))
-                        else metrics["Silhouette"]
-                    ),
-                ],
-                style={"marginBottom": "8px"},
-            ),
-        ]
-        visualizations = []
-        if model_data["tsne_img"]:
-            visualizations.append(
-                dbc.Col(
-                    html.Img(src=model_data["tsne_img"], style={"width": "100%"}),
-                    width=6,
+    
+    # Load data for each model
+    for group in final_groups:
+        model_id = group["model"]
+        model_label = group["label"]
+        
+        # Path to model directory
+        model_dir = os.path.join(FINALS_DIR, model_id)
+        
+        # Skip if model directory doesn't exist
+        if not os.path.exists(model_dir):
+            continue
+            
+        # Initialize storage for this model
+        metrics = {}
+        visualization_images = {"tsne": None, "umap": None}
+        cluster_info = {}
+        model_df = pd.DataFrame()
+        
+        # Load metrics
+        metrics_path = os.path.join(model_dir, f"{model_id}_metrics.json")
+        if os.path.exists(metrics_path):
+            try:
+                with open(metrics_path, 'r') as f:
+                    metrics = json.load(f)
+                logger.info(f"Loaded metrics for {model_id}: {metrics}")
+            except Exception as e:
+                logger.error(f"Error loading metrics for {model_id}: {e}")
+        
+        # Load cluster metrics
+        cluster_metrics_path = os.path.join(model_dir, f"{model_id}_clusters.json")
+        if os.path.exists(cluster_metrics_path):
+            try:
+                with open(cluster_metrics_path, 'r') as f:
+                    cluster_info = json.load(f)
+                logger.info(f"Loaded cluster metrics for {model_id}")
+            except Exception as e:
+                logger.error(f"Error loading cluster metrics for {model_id}: {e}")
+        
+        # Load prediction data
+        pred_path = os.path.join(model_dir, f"{model_id}_predictions.csv")
+        cluster_path = os.path.join(model_dir, f"{model_id}_clusters.csv")
+        
+        if os.path.exists(pred_path):
+            try:
+                pred_df = pd.read_csv(pred_path)
+                # If we have cluster data, merge it
+                if os.path.exists(cluster_path):
+                    cluster_df = pd.read_csv(cluster_path)
+                    model_df = pd.merge(pred_df, cluster_df, on="Id", how="left", suffixes=('', '_cluster'))
+                else:
+                    model_df = pred_df
+                
+                # If we have the original data, merge actual values
+                if filtered_data is not None:
+                    df_filtered = pd.DataFrame(filtered_data)
+                    if "Id" in df_filtered.columns and not df_filtered.empty:
+                        # Only keep common columns to avoid duplicates
+                        cols_to_merge = ["Id", "Health_Index"]
+                        cols_to_merge = [col for col in cols_to_merge if col in df_filtered.columns]
+                        model_df = pd.merge(model_df, df_filtered[cols_to_merge], on="Id", how="inner")
+                
+                logger.info(f"Loaded prediction data for {model_id}: {len(model_df)} rows")
+            except Exception as e:
+                logger.error(f"Error loading prediction data for {model_id}: {e}")
+        
+        # Load visualization images
+        tsne_path = os.path.join(model_dir, f"{model_id}_tsne.png")
+        umap_path = os.path.join(model_dir, f"{model_id}_umap.png")
+        
+        if os.path.exists(tsne_path):
+            visualization_images["tsne"] = encode_image(tsne_path)
+        if os.path.exists(umap_path):
+            visualization_images["umap"] = encode_image(umap_path)
+        
+        # Create metrics display
+        metrics_rows = []
+        
+        # Basic metrics (MSE, R2)
+        if metrics:
+            for metric_name, metric_value in metrics.items():
+                if isinstance(metric_value, (int, float)):
+                    formatted_value = f"{metric_value:.4f}"
+                else:
+                    formatted_value = str(metric_value)
+                
+                metrics_rows.append(
+                    html.Div(
+                        [
+                            html.Strong(f"{metric_name.replace('_', ' ').title()}: "),
+                            html.Span(formatted_value)
+                        ],
+                        style={"marginBottom": "8px"}
+                    )
                 )
-            )
-        if model_data["umap_img"]:
-            visualizations.append(
-                dbc.Col(
-                    html.Img(src=model_data["umap_img"], style={"width": "100%"}),
-                    width=6,
+        
+        # Cluster metrics
+        if cluster_info:
+            metrics_rows.append(html.Hr(style={"marginTop": "15px", "marginBottom": "15px"}))
+            metrics_rows.append(html.H6("Clustering Information"))
+            
+            # Format k value
+            if "chosen_k" in cluster_info:
+                metrics_rows.append(
+                    html.Div(
+                        [
+                            html.Strong("Number of Clusters (K): "),
+                            html.Span(f"{cluster_info['chosen_k']}")
+                        ],
+                        style={"marginBottom": "8px"}
+                    )
                 )
-            )
+            
+            # Format silhouette score with alert color based on value
+            if "silhouette" in cluster_info:
+                silhouette = cluster_info["silhouette"]
+                if isinstance(silhouette, (int, float)):
+                    silhouette_color = "#52A373" if silhouette > 0.5 else "#F0A860" if silhouette > 0.3 else "#E66C6C"
+                    metrics_rows.append(
+                        html.Div(
+                            [
+                                html.Strong("Silhouette Score: "),
+                                html.Span(
+                                    f"{silhouette:.4f}",
+                                    style={"color": silhouette_color, "fontWeight": "bold"}
+                                ),
+                                html.Span(
+                                    " (higher is better, >0.5 good, >0.3 fair, <0.3 poor)",
+                                    style={"fontSize": "smaller", "color": "#666"}
+                                )
+                            ],
+                            style={"marginBottom": "8px"}
+                        )
+                    )
+            
+            # Other clustering metrics
+            for metric_name, metric_value in cluster_info.items():
+                if metric_name not in ["chosen_k", "silhouette"] and isinstance(metric_value, (int, float)):
+                    metrics_rows.append(
+                        html.Div(
+                            [
+                                html.Strong(f"{metric_name.replace('_', ' ').title()}: "),
+                                html.Span(f"{metric_value:.4f}")
+                            ],
+                            style={"marginBottom": "8px"}
+                        )
+                    )
+        
+        # Create model performance scatterplot if we have data
+        if not model_df.empty and "Health_Index" in model_df.columns and "Predicted_Health_Index" in model_df.columns:
+            # Sample the dataframe if it's too large
+            plot_df = smart_sample_dataframe(model_df, max_points=3000, method="stratified")
+            
+            # Create scatterplot with cluster coloring if available
+            if "Cluster" in plot_df.columns:
+                perf_fig = px.scatter(
+                    plot_df,
+                    x="Health_Index",
+                    y="Predicted_Health_Index",
+                    color="Cluster",
+                    color_continuous_scale=["#5A9BD5", "#52A373", "#F0A860", "#E66C6C"],
+                    opacity=0.7,
+                    title=f"Health Index and Prediction ({model_label}) - {len(plot_df)} patients",
+                    hover_data=["Id"],
+                    labels={"Health_Index": "Actual Health Index", "Predicted_Health_Index": "Predicted Health Index"}
+                )
+            else:
+                perf_fig = px.scatter(
+                    plot_df,
+                    x="Health_Index",
+                    y="Predicted_Health_Index",
+                    opacity=0.7,
+                    title=f"Health Index and Prediction ({model_label}) - {len(plot_df)} patients",
+                    hover_data=["Id"],
+                    labels={"Health_Index": "Actual Health Index", "Predicted_Health_Index": "Predicted Health Index"}
+                )
 
-        if not model_data["df"].empty:
-            df = model_data["df"]
-            perf_fig = px.scatter(
-                df,
-                x="Health_Index",
-                y="PredictedHI_final",
-                color="Cluster_final" if "Cluster_final" in df.columns else None,
-                color_continuous_scale=["#5A9BD5", "#52A373", "#F0A860", "#E66C6C"],
-                opacity=0.7,
-                title=f"Health Index and Prediction ({label}) - {len(df)} patients",
-                hover_data=["Id"],
-            )
-
-            x_range = [df["Health_Index"].min(), df["Health_Index"].max()]
+            # Add perfect prediction line
+            x_range = [plot_df["Health_Index"].min(), plot_df["Health_Index"].max()]
             perf_fig.add_trace(
                 go.Scatter(
                     x=x_range,
                     y=x_range,
                     mode="lines",
                     line=dict(color="black", width=2, dash="dash"),
-                    name="Perfect Prediction",
+                    name="Perfect Prediction"
                 )
             )
 
+            # Add regression line
+            # Try to calculate regression line coefficients
+            try:
+                slope, intercept, r_value, p_value, std_err = stats.linregress(
+                    plot_df["Health_Index"].values, 
+                    plot_df["Predicted_Health_Index"].values
+                )
+                
+                perf_fig.add_trace(
+                    go.Scatter(
+                        x=x_range,
+                        y=[slope * x_range[0] + intercept, slope * x_range[1] + intercept],
+                        mode="lines",
+                        line=dict(color="red", width=2),
+                        name=f"Regression Line (R²={r_value**2:.3f})"
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"Could not add regression line: {e}")
+                
+            # Enhance layout
+            perf_fig.update_layout(
+                xaxis_title="Actual Health Index",
+                yaxis_title="Predicted Health Index",
+                legend_title="Cluster",
+                height=500
+            )
+            
             model_plot = dcc.Graph(figure=perf_fig)
         else:
-            model_plot = "No prediction data available"
-
+            model_plot = html.Div("No prediction data available", style={"padding": "20px", "textAlign": "center"})
+        
+        # Create visualization row
+        visualizations = []
+        if visualization_images["tsne"]:
+            visualizations.append(
+                dbc.Col(
+                    html.Div([
+                        html.H6("t-SNE Visualization", style={"textAlign": "center", "marginBottom": "10px"}),
+                        html.Img(
+                            src=visualization_images["tsne"], 
+                            style={"width": "100%", "border": "1px solid #ddd", "borderRadius": "5px"}
+                        )
+                    ]),
+                    width=12, md=6
+                )
+            )
+        
+        if visualization_images["umap"]:
+            visualizations.append(
+                dbc.Col(
+                    html.Div([
+                        html.H6("UMAP Visualization", style={"textAlign": "center", "marginBottom": "10px"}),
+                        html.Img(
+                            src=visualization_images["umap"], 
+                            style={"width": "100%", "border": "1px solid #ddd", "borderRadius": "5px"}
+                        )
+                    ]),
+                    width=12, md=6
+                )
+            )
+        
+        # Create model card with all information
         model_card = collapsible_card(
-            f"{label} Model Performance",
+            f"{model_label} Model Performance",
             html.Div(
                 [
                     dbc.Row(
                         [
-                            dbc.Col(html.Div(metrics_rows), width=12, md=4),
+                            dbc.Col(
+                                html.Div([
+                                    html.H6("Model Metrics", style={"marginBottom": "10px"}),
+                                    html.Div(metrics_rows)
+                                ]), 
+                                width=12, md=4, style={"backgroundColor": "#f9f9f9", "padding": "15px", "borderRadius": "5px"}
+                            ),
                             dbc.Col(model_plot, width=12, md=8),
-                        ]
+                        ],
+                        className="mb-4"
                     ),
-                    dbc.Row(visualizations, style={"marginTop": "15px"})
-                    if visualizations
-                    else None,
+                    dbc.Row(visualizations, style={"marginTop": "15px"}) if visualizations else None,
+                    html.Div(
+                        [
+                            html.H6("Model Information", style={"marginBottom": "10px"}),
+                            html.Div(
+                                [
+                                    html.P([
+                                        html.Strong("Model ID: "),
+                                        html.Span(model_id)
+                                    ]),
+                                    html.P([
+                                        html.Strong("Description: "),
+                                        html.Span(f"TabNet model trained on {model_label.lower()} patient population")
+                                    ]),
+                                    html.P([
+                                        html.Strong("Clustering Algorithm: "),
+                                        html.Span(f"K-Means with K={cluster_info.get('chosen_k', 'N/A')} clusters")
+                                    ]),
+                                ]
+                            )
+                        ],
+                        style={"marginTop": "20px", "backgroundColor": "#f9f9f9", "padding": "15px", "borderRadius": "5px"}
+                    ) if cluster_info else None,
+                    # Distribution of clusters if we have them
+                    html.Div(
+                        [
+                            html.H6("Cluster Distribution", style={"marginBottom": "10px", "marginTop": "20px"}),
+                            dcc.Graph(
+                                figure=px.histogram(
+                                    model_df, 
+                                    x="Cluster",
+                                    title=f"Distribution of Patients Across Clusters ({model_label})",
+                                    color="Cluster",
+                                    color_discrete_sequence=risk_colors,
+                                    labels={"Cluster": "Cluster ID"}
+                                ).update_layout(showlegend=False)
+                            )
+                        ]
+                    ) if "Cluster" in model_df.columns and not model_df.empty else None,
                 ]
             ),
-            f"model-{label.lower().replace(' ', '-')}",
+            f"model-{model_label.lower().replace(' ', '-')}",
             initially_open=True,
         )
+        
         model_cards.append(model_card)
+    
+    # Display a message if no models were loaded
     if not model_cards:
         return html.Div(
-            "No model performance data available",
-            style={"padding": "20px", "textAlign": "center"},
+            [
+                html.H4("Model Performance", style={"marginBottom": "15px"}),
+                html.Div(
+                    "No model performance data available. Please run the models using the Model Execution tab.",
+                    style={"padding": "20px", "textAlign": "center", "backgroundColor": "white", "borderRadius": "5px"}
+                )
+            ],
+            style={"padding": "15px"}
         )
-    return html.Div(model_cards)
+    
+    return html.Div(
+        [
+            html.H4("Model Performance Analysis", style={"marginBottom": "15px"}),
+            html.P(
+                "The following models were trained to predict Health Index values for different patient populations. "
+                "Each model includes performance metrics, visualization of predictions, and clustering analysis.",
+                style={"marginBottom": "20px"}
+            ),
+            html.Div(model_cards)
+        ],
+        style={"padding": "15px"}
+    )
 
 
 @app.callback(
@@ -2187,6 +2720,124 @@ def close_modal(n_clicks):
     if n_clicks:
         return None
     return n_clicks
+
+
+@app.callback(
+    [
+        Output("current-stage", "children"),
+        Output("progress-bar-with-stages", "children"),
+        Output("execution-log", "children"),
+        Output("error-message", "style"),
+        Output("error-message", "children"),
+        Output("progress-container", "style"),
+        Output("execution-status", "children")
+    ],
+    [Input("execution-state-store", "data")],
+    prevent_initial_call=True,
+)
+def update_progress_ui(state):
+    """Update all UI elements related to execution progress."""
+    if not state:
+        raise PreventUpdate
+    
+    # Current stage display
+    current_stage = state.get("stage", "Initializing")
+    
+    # Progress bar with stage markers
+    progress_value = state.get("progress", 0)
+    eta_remaining = state.get("remaining", "calculating...")
+    progress_bar = create_stage_markers(current_stage, progress_value, eta_remaining)
+    
+    # Log display 
+    log_lines = state.get("output", [])
+    log_content = html.Div([
+        html.Div(line, style={
+            "padding": "2px 5px",
+            "borderBottom": "1px solid #f0f0f0",
+            "color": "#333" if not line.startswith("[ERROR]") else "red"
+        }) for line in log_lines[-100:]  # Show last 100 lines
+    ])
+    
+    # Error display
+    error_msg = state.get("error", None)
+    error_style = {"color": "red", "marginBottom": "15px", "display": "block"} if error_msg else {"display": "none"}
+    
+    # Container visibility
+    container_style = {"display": "block"}
+    
+    # Status summary
+    status = state.get("status", "running")
+    if status == "completed":
+        status_element = html.Div([
+            html.I(className="fas fa-check-circle", style={"color": "green", "marginRight": "8px"}),
+            "Execution completed successfully"
+        ], style={"color": "green", "fontWeight": "bold"})
+    elif status == "error":
+        status_element = html.Div([
+            html.I(className="fas fa-exclamation-circle", style={"color": "red", "marginRight": "8px"}),
+            "Execution failed with errors"
+        ], style={"color": "red", "fontWeight": "bold"})
+    else:
+        status_element = html.Div([
+            html.I(className="fas fa-spinner fa-spin", style={"marginRight": "8px"}),
+            f"Running: {current_stage} ({progress_value:.1f}%)"
+        ])
+    
+    return current_stage, progress_bar, log_content, error_style, error_msg, container_style, status_element
+
+
+@app.callback(
+    [
+        Output("results-container", "children"),
+        Output("results-container", "style")
+    ],
+    [Input("execution-state-store", "data")],
+    prevent_initial_call=True
+)
+def show_results_when_complete(state):
+    """Show results section when execution completes successfully."""
+    if not state or state.get("status") != "completed":
+        return None, {"display": "none"}
+    
+    # Gather results from Data/new_predictions directory
+    results_elements = []
+    try:
+        # Look for prediction files created by the process
+        new_pred_dir = os.path.join(BASE_DIR, "Data", "new_predictions")
+        if os.path.exists(new_pred_dir):
+            files = [f for f in os.listdir(new_pred_dir) if f.endswith(".csv") and "_predictions_" in f]
+            
+            if files:
+                results_elements.append(html.H4("Generated Predictions"))
+                for file in files[:5]:  # Show first 5 files
+                    model_name = file.split("_predictions_")[0]
+                    results_elements.append(html.Div([
+                        html.Strong(f"{model_name}: "),
+                        html.Span(file),
+                        html.A(" (View)", href=f"/download/{file}", target="_blank", 
+                               style={"marginLeft": "10px", "color": nhs_colors["primary"]})
+                    ], style={"marginBottom": "8px"}))
+        
+        # Check for XAI results if enabled
+        xai_dir = os.path.join(BASE_DIR, "Data", "explain_xai")
+        if os.path.exists(xai_dir):
+            xai_files = []
+            for root, dirs, files in os.walk(xai_dir):
+                for file in files:
+                    if file.endswith(".png") and ("shap" in file or "feature_importance" in file):
+                        xai_files.append(os.path.join(root, file))
+            
+            if xai_files:
+                results_elements.append(html.H4("Generated XAI Visualizations", style={"marginTop": "20px"}))
+                results_elements.append(html.P("XAI visualizations are available in the XAI Insights tab."))
+    
+    except Exception as e:
+        results_elements.append(html.Div(f"Error checking results: {str(e)}", style={"color": "red"}))
+    
+    if not results_elements:
+        results_elements = [html.Div("No results found. The process may not have generated any output files.")]
+    
+    return html.Div(results_elements, style={"marginTop": "20px"}), {"display": "block"}
 
 
 if __name__ == "__main__":
