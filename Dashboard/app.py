@@ -528,8 +528,206 @@ def create_compact_map(df, height=600, health_index_range=None, center=None, zoo
         })
 
 def create_enhanced_geo_disparities_map(df, height=600, health_index_range=None, center=None, zoom=7):
-    logger.warning("create_enhanced_geo_disparities_map is not fully implemented. Returning placeholder.")
-    return go.Figure(layout={"title": "Geographic Health Disparities (Placeholder)", "height": height})
+    """Create a visualization of geographic health disparities by demographic factors."""
+    logger.info(f"Creating enhanced geo disparities map. Input df shape: {df.shape if df is not None else 'None'}")
+    
+    if df is None or df.empty:
+         logger.warning("Input dataframe for disparities map is None or empty.")
+         return go.Figure().update_layout(
+             title="No data provided for disparities map", height=height,
+             xaxis={"visible": False}, yaxis={"visible": False},
+             annotations=[{"text": "No data available", "xref": "paper", "yref": "paper", "showarrow": False, "font": {"size": 16}}]
+         )
+
+    if "LAT" not in df.columns or "LON" not in df.columns:
+        logger.warning("LAT or LON columns missing from dataframe.")
+        return go.Figure().update_layout(
+            title="Geographic data columns (LAT, LON) not found", height=height,
+            xaxis={"visible": False}, yaxis={"visible": False},
+            annotations=[{"text": "LAT/LON columns missing", "xref": "paper", "yref": "paper", "showarrow": False, "font": {"size": 16}}]
+        )
+    
+    # Check available demographic columns
+    has_income = "INCOME" in df.columns
+    has_race = "RACE" in df.columns
+    has_health_index = "Health_Index" in df.columns
+    
+    df_map = df.dropna(subset=["LAT", "LON"])
+    
+    if health_index_range and has_health_index:
+        df_map = df_map[(df_map["Health_Index"] >= health_index_range[0]) & (df_map["Health_Index"] <= health_index_range[1])]
+    
+    if len(df_map) == 0:
+        logger.warning("No valid location data available after filtering/dropping NaNs.")
+        return go.Figure(layout={
+            "title": "No Valid Geographic Data Points for Disparities Analysis",
+            "height": height,
+            "mapbox": {
+                "style": "carto-positron",
+                "center": center if center else {"lat": 39.8283, "lon": -98.5795},
+                "zoom": 3
+            },
+            "annotations": [{
+                "text": "No patients with valid location data found in the current selection.",
+                "xref": "paper",
+                "yref": "paper",
+                "showarrow": False,
+                "font": {"size": 14, "color": "grey"}
+            }]
+        })
+
+    if not center and not df_map.empty:
+        center = dict(lat=df_map["LAT"].mean(), lon=df_map["LON"].mean())
+    elif not center:
+        center = dict(lat=39.8283, lon=-98.5795)
+    
+    # Create sampled dataset for visualization (avoid too many points)
+    df_sample = smart_sample_dataframe(df_map, max_points=5000, method="stratified")
+    
+    # Create visualization based on available demographics
+    if has_income and has_health_index:
+        # Create income quartiles for coloring
+        df_sample['Income_Quartile'] = pd.qcut(
+            df_sample['INCOME'], 
+            q=4, 
+            labels=['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']
+        ).astype(str)
+        
+        # Create scatter map showing health index by income quartile
+        fig = px.scatter_mapbox(
+            df_sample,
+            lat="LAT",
+            lon="LON",
+            color="Income_Quartile",
+            color_discrete_map={
+                "Q1 (Low)": "#E66C6C",    # Red for low income
+                "Q2": "#F0A860",          # Orange for lower-middle income
+                "Q3": "#52A373",          # Green for upper-middle income
+                "Q4 (High)": "#5A9BD5",   # Blue for high income
+            },
+            size="Health_Index",
+            size_max=15,
+            opacity=0.7,
+            title="Income-Based Health Disparities Map",
+            mapbox_style="carto-positron",
+            height=height,
+            hover_data=["INCOME", "Health_Index"]
+        )
+        
+        # Add a legend title
+        fig.update_layout(
+            legend_title="Income Quartile",
+            mapbox=dict(
+                center=center,
+                zoom=zoom
+            ),
+            margin={"r": 0, "t": 40, "l": 0, "b": 0},
+        )
+        
+    elif has_race and has_health_index:
+        # Get the top races to avoid too many categories
+        top_races = df_map['RACE'].value_counts().nlargest(5).index.tolist()
+        df_filtered = df_sample[df_sample['RACE'].isin(top_races)]
+        
+        if not df_filtered.empty:
+            # Create scatter map with racial health disparities
+            fig = px.scatter_mapbox(
+                df_filtered,
+                lat="LAT",
+                lon="LON",
+                color="RACE",
+                size="Health_Index",
+                size_max=15,
+                opacity=0.7,
+                title="Racial Health Disparities Map",
+                mapbox_style="carto-positron",
+                height=height,
+                hover_data=["RACE", "Health_Index"]
+            )
+            
+            # Add a legend title
+            fig.update_layout(
+                legend_title="Race",
+                mapbox=dict(
+                    center=center,
+                    zoom=zoom
+                ),
+                margin={"r": 0, "t": 40, "l": 0, "b": 0},
+            )
+        else:
+            fig = go.Figure(layout={
+                "title": "Insufficient race data for disparities analysis",
+                "height": height,
+                "mapbox": {
+                    "style": "carto-positron",
+                    "center": center,
+                    "zoom": zoom
+                },
+                "margin": {"r": 0, "t": 40, "l": 0, "b": 0},
+            })
+    else:
+        # Create a fallback map if we don't have income or race data with health index
+        if has_health_index:
+            # Create scatter map of health index
+            fig = px.scatter_mapbox(
+                df_sample,
+                lat="LAT",
+                lon="LON",
+                color="Health_Index",
+                color_continuous_scale=[
+                    [0, "#5A9BD5"],    # Very Low Risk - blue
+                    [0.3, "#52A373"],   # Low Risk - green
+                    [0.6, "#F0A860"],   # Moderate Risk - orange
+                    [1, "#E66C6C"],    # High Risk - red
+                ],
+                opacity=0.7,
+                title="Geographic Health Index Distribution (Limited demographic data)",
+                mapbox_style="carto-positron",
+                height=height,
+                zoom=zoom,
+                center=center,
+            )
+            
+            fig.update_layout(
+                coloraxis_colorbar=dict(
+                    title="Health Index",
+                    tickvals=[1, 3, 6, 9],
+                    ticktext=["Very Low", "Low", "Moderate", "High"],
+                ),
+                mapbox=dict(
+                    center=center,
+                    zoom=zoom
+                ),
+                margin={"r": 0, "t": 40, "l": 0, "b": 0},
+            )
+        else:
+            fig = go.Figure(layout={
+                "title": "Insufficient data for health disparities analysis",
+                "height": height,
+                "mapbox": {
+                    "style": "carto-positron",
+                    "center": center,
+                    "zoom": zoom
+                },
+                "margin": {"r": 0, "t": 40, "l": 0, "b": 0},
+            })
+            
+    # Add a note about health disparities
+    fig.add_annotation(
+        xref="paper", yref="paper",
+        x=0.01, y=0.01,
+        text="Health disparities are differences in health outcomes between different demographic groups.",
+        showarrow=False,
+        font=dict(size=10, color="black"),
+        align="left",
+        bgcolor="rgba(255, 255, 255, 0.7)",
+        bordercolor="black",
+        borderwidth=1,
+        borderpad=4
+    )
+    
+    logger.info("Successfully created enhanced geographic disparities map.")
+    return fig
 
 def create_health_inequality_chart(df, max_points=3000):
     if df is None or df.empty:
