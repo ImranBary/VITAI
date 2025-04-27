@@ -12,11 +12,10 @@ import subprocess
 import threading
 import queue
 import signal
-import re  # Add this import for regex operations
+import re
 from datetime import datetime
-from typing import Optional, Union  # Add this import for older Python compatibility
+from typing import Optional, Union
 
-# Add import for run_generate_and_predict from parent directory
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -40,10 +39,8 @@ import psutil
 from flask_caching import Cache
 import diskcache
 
-# For parallel processing in sampling routines
 from concurrent.futures import ThreadPoolExecutor
 
-# Add these imports for improved system resource detection
 import multiprocessing
 import platform
 
@@ -64,15 +61,33 @@ final_groups = [
     {"model": "combined_none_tabnet", "label": "General"},
 ]
 
-# ------------------------------------------------------------
-# SYSTEM RESOURCE DETECTION & OPTIMIZATION SETTINGS
-# ------------------------------------------------------------
+nhs_colors = {
+    "background": "#F7F7F7",
+    "text": "#333333",
+    "primary": "#005EB8",
+    "secondary": "#FFFFFF",
+    "accent": "#00843D",
+    "highlight": "#FFB81C",
+    "risk_high": "#E66C6C",
+    "risk_medium": "#F0A860",
+    "risk_low": "#52A373",
+    "risk_verylow": "#5A9BD5",
+}
+
+risk_colors = [
+    nhs_colors["risk_verylow"],
+    nhs_colors["risk_low"],
+    nhs_colors["risk_medium"],
+    nhs_colors["risk_high"],
+]
+
+intersectional_colors = ["#E66C6C", "#F0A860", "#52A373"]
+
 def get_system_resources():
     """Detect system resources and optimize settings accordingly"""
     cpu_count = multiprocessing.cpu_count()
     total_memory_gb = psutil.virtual_memory().total / (1024 * 1024 * 1024)
 
-    # Advanced hardware detection
     system_info = {
         "cpu_count": cpu_count,
         "memory_gb": total_memory_gb,
@@ -81,17 +96,16 @@ def get_system_resources():
         "is_high_end": cpu_count >= 8 and total_memory_gb >= 32,
     }
 
-    # Optimize settings based on detected hardware
-    is_high_end = system_info["is_high_end"]  # Explicitly extract the value
+    is_high_end = system_info["is_high_end"]
 
     optimization_settings = {
-        "max_threads": max(int(cpu_count * 0.8), 4),  # Use 80% of available cores
-        "memory_limit": int(total_memory_gb * 0.7),  # Use 70% of available memory (GB)
+        "max_threads": max(int(cpu_count * 0.8), 4),
+        "memory_limit": int(total_memory_gb * 0.7),
         "batch_size": 10000 if is_high_end else 5000,
         "sampling_threshold": 50000 if is_high_end else 10000,
         "use_advanced_clustering": is_high_end,
         "webgl_threshold": 5000 if is_high_end else 1000,
-        "is_high_end": is_high_end,  # Make sure to include this key explicitly
+        "is_high_end": is_high_end,
     }
 
     logger.info(f"System resources detected: {system_info}")
@@ -99,20 +113,12 @@ def get_system_resources():
 
     return optimization_settings
 
-
-# Get optimized settings for this system
 PERF_SETTINGS = get_system_resources()
 
-# ------------------------------------------------------------
-# DATA LOADING WITH MEMORY MAPPING & DTYPE OPTIMIZATIONS
-# ------------------------------------------------------------
 if os.path.exists(PICKLE_ALL):
-    # Use parallel reading for large pickle files on high-end systems
     if PERF_SETTINGS["is_high_end"]:
-        # Load pickle in a more memory efficient way
         df_all = pd.read_pickle(PICKLE_ALL)
 
-        # Use parallel optimization of datatypes
         def optimize_column_dtypes(col):
             if col[1].dtype == "float64":
                 return col[0], col[1].astype("float32")
@@ -120,7 +126,6 @@ if os.path.exists(PICKLE_ALL):
                 return col[0], col[1].astype("int32")
             return col[0], col[1]
 
-        # Process columns in parallel
         with ThreadPoolExecutor(max_workers=PERF_SETTINGS["max_threads"]) as executor:
             optimized_cols = list(
                 executor.map(
@@ -136,7 +141,6 @@ if os.path.exists(PICKLE_ALL):
             f"Loaded and optimized enriched data from {PICKLE_ALL} using parallel processing."
         )
     else:
-        # Original loading code for lower-end systems
         df_all = pd.read_pickle(PICKLE_ALL)
         for col in df_all.select_dtypes(include=["float64"]).columns:
             df_all[col] = df_all[col].astype("float32")
@@ -165,19 +169,16 @@ if os.path.exists(PICKLE_ALL):
     ]
     df_all = df_all[[col for col in essential_cols if col in df_all.columns]]
 else:
-    # For CSV loading, use chunksize and parallel processing on high-end systems
     logger.warning("Enriched pickle not found; falling back to optimized CSV loading.")
     if PERF_SETTINGS["is_high_end"]:
-        # Calculate optimal chunk size based on memory
         chunk_size = min(
             500000, int(PERF_SETTINGS["memory_limit"] * 1000000 / 50)
-        )  # Rough estimate: 50 bytes per row
+        )
 
         chunks = []
         for chunk in pd.read_csv(
             CSV_PATIENTS, memory_map=True, low_memory=True, chunksize=chunk_size
         ):
-            # Process each chunk
             chunk["BIRTHDATE"] = pd.to_datetime(chunk["BIRTHDATE"], errors="coerce")
             chunk["AGE"] = (
                 ((pd.Timestamp("today") - chunk["BIRTHDATE"]).dt.days / 365.25)
@@ -187,13 +188,10 @@ else:
             chunks.append(chunk)
 
         df_all = pd.concat(chunks)
-        del chunks  # Free memory
-        gc.collect()
+        del chunks
 
-        # Generate random fields in parallel
         np.random.seed(42)
         with ThreadPoolExecutor(max_workers=PERF_SETTINGS["max_threads"]) as executor:
-            # Generate random data in parallel
             n_rows = len(df_all)
             health_index = executor.submit(
                 lambda: np.random.uniform(1, 10, n_rows).round(2)
@@ -206,7 +204,6 @@ else:
             )
             cluster = executor.submit(lambda: np.random.choice([0, 1, 2], n_rows))
 
-            # Assign results
             df_all["Health_Index"] = health_index.result()
             df_all["CharlsonIndex"] = charlson_index.result()
             df_all["ElixhauserIndex"] = elixhauser_index.result()
@@ -217,7 +214,6 @@ else:
         ).round(2)
         df_all["Actual"] = df_all["Health_Index"]
     else:
-        # Original CSV loading code for lower-end systems
         df_all = pd.read_csv(CSV_PATIENTS, memory_map=True, low_memory=True)
         df_all["BIRTHDATE"] = pd.to_datetime(df_all["BIRTHDATE"], errors="coerce")
         df_all["AGE"] = (
@@ -266,605 +262,6 @@ df_all["Risk_Category"] = pd.cut(
     labels=["Very Low Risk", "Low Risk", "Moderate Risk", "High Risk"],
 )
 
-# ------------------------------------------------------------
-# HELPER FUNCTIONS
-# ------------------------------------------------------------
-def encode_image(image_file):
-    if os.path.exists(image_file):
-        with open(image_file, "rb") as f:
-            encoded = base64.b64encode(f.read()).decode("ascii")
-        return f"data:image/png;base64,{encoded}"
-    return None
-
-
-# Helper function to switch scatter traces to WebGL for large data - OPTIMIZED
-def use_webgl_rendering(fig, threshold=None):
-    if threshold is None:
-        threshold = PERF_SETTINGS["webgl_threshold"]
-
-    for trace in fig.data:
-        if trace.type == "scatter" and hasattr(trace, "x") and len(trace.x) > threshold:
-            trace.type = "scattergl"
-    return fig
-
-
-# Aggressive caching can be applied to expensive plot creation if the input data fingerprint is stable.
-# (For demonstration, we decorate one such function below.)
-def memoize_fig(func):
-    cache_key = f"{func.__name__}_cache"
-    cache_store = {}
-
-    def wrapper(*args, **kwargs):
-        key = (
-            args[0].shape[0] if (args and isinstance(args[0], pd.DataFrame)) else None,
-            tuple(kwargs.items()),
-        )
-        if key in cache_store:
-            return cache_store[key]
-        fig = func(*args, **kwargs)
-        cache_store[key] = fig
-        return fig
-
-    return wrapper
-
-
-def get_memory_usage():
-    process = psutil.Process()
-    memory_info = process.memory_info()
-    return memory_info.rss / 1024 / 1024
-
-
-def log_memory_usage(label):
-    logger.info(f"Memory usage at {label}: {get_memory_usage():.2f} MB")
-
-
-# ------------------------------------------------------------
-# PARALLEL SAMPLING FUNCTION - OPTIMIZED
-# ------------------------------------------------------------
-def smart_sample_dataframe(df, max_points=None, min_points=500, method="random"):
-    # Use system-specific sampling thresholds
-    if max_points is None:
-        max_points = PERF_SETTINGS["sampling_threshold"]
-
-    if df is None or df.empty:
-        return df
-    if len(df) <= max_points:
-        return df
-
-    sample_size = min(max_points, max(min_points, int(len(df) * 0.1)))
-
-    if method == "random":
-        return df.sample(sample_size, random_state=42)
-    elif method == "stratified" and "Risk_Category" in df.columns:
-        unique_categories = df["Risk_Category"].unique()
-
-        # Use more threads on high-end systems
-        with ThreadPoolExecutor(max_workers=PERF_SETTINGS["max_threads"]) as executor:
-
-            def sample_category(category):
-                category_df = df[df["Risk_Category"] == category]
-                category_size = max(1, int(sample_size * len(category_df) / len(df)))
-                return category_df.sample(
-                    min(category_size, len(category_df)), random_state=42
-                )
-
-            sampled = list(executor.map(sample_category, unique_categories))
-        return pd.concat(sampled)
-    elif method == "cluster" and df.select_dtypes(include=["number"]).shape[1] >= 2:
-        try:
-            # On high-end systems, use more sophisticated clustering
-            if PERF_SETTINGS["use_advanced_clustering"] and len(df) > 50000:
-                numeric_cols = df.select_dtypes(include=["number"]).columns
-                if (
-                    len(numeric_cols) > 10
-                ):  # Can handle more columns on high-end systems
-                    numeric_cols = numeric_cols[:10]
-                cluster_data = df[numeric_cols].fillna(df[numeric_cols].mean())
-
-                # Use more clusters on high-end systems
-                n_clusters = min(int(math.sqrt(sample_size) * 1.5), 100)
-
-                # Use MiniBatchKMeans with larger batch size for better performance
-                from sklearn.cluster import MiniBatchKMeans
-
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    kmeans = MiniBatchKMeans(
-                        n_clusters=n_clusters,
-                        batch_size=PERF_SETTINGS["batch_size"],
-                        random_state=42,
-                    )
-                    df_copy = df.copy()
-                    df_copy["cluster"] = kmeans.fit_predict(cluster_data)
-
-                # Use parallel processing with more threads
-                with ThreadPoolExecutor(
-                    max_workers=PERF_SETTINGS["max_threads"]
-                ) as executor:
-
-                    def sample_cluster(cluster):
-                        cluster_df = df_copy[df_copy["cluster"] == cluster]
-                        cluster_size = max(
-                            1, int(sample_size * len(cluster_df) / len(df))
-                        )
-                        return cluster_df.sample(
-                            min(cluster_size, len(cluster_df)), random_state=42
-                        )
-
-                    sampled = list(executor.map(sample_cluster, range(n_clusters)))
-                return pd.concat(sampled).drop(columns=["cluster"])
-            else:
-                # Fall back to existing implementation for smaller datasets
-                return df.sample(sample_size, random_state=42)
-        except Exception as e:
-            logger.warning(
-                f"Advanced cluster sampling failed, falling back to random: {e}"
-            )
-            return df.sample(sample_size, random_state=42)
-    return df.sample(sample_size, random_state=42)
-
-
-def release_memory():
-    gc.collect()
-
-
-# ------------------------------------------------------------
-# DASHBOARD PLOTTING FUNCTIONS (with WebGL enhancements)
-# ------------------------------------------------------------
-def apply_2decimal_format(fig):
-    fig.update_layout(xaxis=dict(tickformat=".2f"), yaxis=dict(tickformat=".2f"))
-    return fig
-
-
-@memoize_fig
-def create_demographic_charts(df):
-    gender_fig, age_fig, risk_fig = None, None, None
-    if "GENDER" in df.columns:
-        df_gender = df.dropna(subset=["GENDER"])
-        if len(df_gender) > 0:
-            gender_counts = df_gender["GENDER"].value_counts().reset_index()
-            gender_fig = px.pie(
-                gender_counts,
-                values="count",
-                names="GENDER",
-                title="Gender Distribution",
-                hole=0.4,
-                color_discrete_sequence=["#5A9BD5", "#52A373"],
-            )
-            gender_fig.update_layout(margin=dict(t=40, b=0, l=0, r=0))
-    if "Age_Group" in df.columns or "AGE" in df.columns:
-        age_column = "Age_Group" if "Age_Group" in df.columns else "AGE"
-        df_age = df.dropna(subset=[age_column])
-        if len(df_age) > 0:
-            age_fig = px.histogram(
-                df_age,
-                x=age_column,
-                title="Age Distribution",
-                color="Risk_Category" if "Risk_Category" in df.columns else None,
-                color_discrete_sequence=["#5A9BD5", "#52A373", "#F0A860", "#E66C6C"],
-                category_orders={
-                    "Age_Group": ["0-18", "19-35", "36-50", "51-65", "66-80", "80+"],
-                    "Risk_Category": [
-                        "Very Low Risk",
-                        "Low Risk",
-                        "Moderate Risk",
-                        "High Risk",
-                    ],
-                },
-                barmode="group",
-                opacity=0.85,
-            )
-            age_fig.update_layout(margin=dict(t=40, b=0, l=0, r=0))
-    if "Risk_Category" in df.columns:
-        df_risk = df.dropna(subset=["Risk_Category"])
-        if len(df_risk) > 0:
-            risk_fig = px.pie(
-                df_risk["Risk_Category"].value_counts().reset_index(),
-                values="count",
-                names="Risk_Category",
-                title="Risk Distribution",
-                hole=0.4,
-                color="Risk_Category",
-                color_discrete_map={
-                    "High Risk": "#E66C6C",
-                    "Moderate Risk": "#F0A860",
-                    "Low Risk": "#52A373",
-                    "Very Low Risk": "#5A9BD5",
-                },
-            )
-            risk_fig.update_layout(margin=dict(t=40, b=0, l=0, r=0))
-    return gender_fig, age_fig, risk_fig
-
-
-def create_race_demographics(df, max_points=3000):
-    """
-    Create visualizations for race demographics and related healthcare metrics
-    """
-    if "RACE" not in df.columns:
-        return None, None
-
-    df_race = df.dropna(subset=["RACE"])
-    if len(df_race) == 0:
-        return None, None
-
-    # Race distribution pie chart
-    race_counts = df_race["RACE"].value_counts().reset_index()
-    race_fig = px.pie(
-        race_counts,
-        values="count",
-        names="RACE",
-        title="Race Distribution",
-        hole=0.4,
-        color_discrete_sequence=px.colors.qualitative.Set3,
-    )
-    race_fig.update_layout(margin=dict(t=40, b=0, l=0, r=0))
-
-    # Healthcare expenses by race
-    expense_fig = None
-    if "HEALTHCARE_EXPENSES" in df_race.columns:
-        # Aggregate healthcare expenses by race
-        race_expenses = (
-            df_race.groupby("RACE")["HEALTHCARE_EXPENSES"]
-            .agg(["mean", "count"])
-            .reset_index()
-        )
-        race_expenses.columns = ["RACE", "Average_Expenses", "Count"]
-
-        # Use only races with significant sample size to avoid skew
-        min_samples = 10
-        race_expenses = race_expenses[race_expenses["Count"] >= min_samples]
-
-        if len(race_expenses) > 0:
-            expense_fig = px.bar(
-                race_expenses,
-                x="RACE",
-                y="Average_Expenses",
-                title="Average Healthcare Expenses by Race",
-                color="RACE",
-                text_auto=".2s",
-                color_discrete_sequence=px.colors.qualitative.Set3,
-                hover_data=["Count"],
-            )
-            expense_fig.update_layout(
-                xaxis_title="Race",
-                yaxis_title="Average Healthcare Expenses ($)",
-                margin=dict(t=40, b=0, l=0, r=0),
-            )
-
-    return race_fig, expense_fig
-
-
-def create_indices_comparison(df, max_points=3000):
-    """
-    Enhanced version using hexagonal binning and heatmap instead of sampling
-    """
-    if all(
-        col in df.columns
-        for col in ["Health_Index", "CharlsonIndex", "ElixhauserIndex"]
-    ):
-        df_filtered = df.dropna(
-            subset=["Health_Index", "CharlsonIndex", "ElixhauserIndex"]
-        )
-
-        # Use hexagonal binning for large datasets, faster and more informative than sampling
-        if len(df_filtered) > max_points:
-            # Create a density heatmap without attempting to add contours
-            fig = px.density_heatmap(
-                df_filtered,
-                x="Health_Index",
-                y="CharlsonIndex",
-                z="ElixhauserIndex",
-                histfunc="avg",
-                nbinsx=50,
-                nbinsy=50,
-                title="Health Indices Relationship (Density View)",
-                color_continuous_scale=["#5A9BD5", "#52A373", "#F0A860", "#E66C6C"],
-            )
-
-            # Add a more informative hover template without contours property
-            fig.update_traces(
-                hovertemplate=(
-                    "Health Index: %{x:.2f}<br>"
-                    + "Charlson Index: %{y:.2f}<br>"
-                    + "Avg Elixhauser: %{z:.2f}"
-                )
-            )
-        else:
-            # For smaller datasets, use scatter plot with color indicating Elixhauser Index
-            fig = px.scatter(
-                df_filtered,
-                x="Health_Index",
-                y="CharlsonIndex",
-                color="ElixhauserIndex",
-                color_continuous_scale=["#5A9BD5", "#52A373", "#F0A860", "#E66C6C"],
-                opacity=0.6,
-                title=f"Health Indices Relationship ({len(df_filtered)} patients)",
-            )
-
-        apply_2decimal_format(fig)
-        fig.update_layout(margin=dict(t=40, b=0, l=0, r=0))
-        release_memory()
-        return fig
-    return None
-
-
-def create_income_health_chart(df, max_points=3000):
-    """
-    Enhanced version using hexbin plot instead of sampling
-    """
-    if "INCOME" in df.columns and "Health_Index" in df.columns:
-        df_filtered = df.dropna(subset=["INCOME", "Health_Index"])
-        if len(df_filtered) == 0:
-            return go.Figure().update_layout(
-                title="No valid income-health data available"
-            )
-
-        if len(df_filtered) > max_points:
-            # Use hexagonal binning for better density visualization
-            fig = px.density_heatmap(
-                df_filtered,
-                x="INCOME",
-                y="Health_Index",
-                color_continuous_scale=["#5A9BD5", "#52A373", "#F0A860", "#E66C6C"],
-                nbinsx=40,
-                nbinsy=30,
-                title="Income and Health Index Relationship",
-            )
-
-            # Add a trendline to show the relationship
-            x = df_filtered["INCOME"]
-            y = df_filtered["Health_Index"]
-
-            # Calculate trendline
-            slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
-            x_range = np.linspace(x.min(), x.max(), 100)
-            y_pred = slope * x_range + intercept
-
-            # Add trendline to figure
-            fig.add_traces(
-                go.Scatter(
-                    x=x_range,
-                    y=y_pred,
-                    mode="lines",
-                    name=f"Trend (R²: {r_value**2:.3f})",
-                    line=dict(color="black", width=2),
-                )
-            )
-
-            # Add a more informative hover template
-            fig.update_traces(
-                hovertemplate=(
-                    "Income: %{x}<br>" + "Health Index: %{y}<br>" + "Count: %{z}"
-                )
-            )
-        else:
-            # For smaller datasets, use scatter with risk category coloring
-            fig = px.scatter(
-                df_filtered,
-                x="INCOME",
-                y="Health_Index",
-                color="Risk_Category"
-                if "Risk_Category" in df_filtered.columns
-                else None,
-                color_discrete_sequence=["#5A9BD5", "#52A373", "#F0A860", "#E66C6C"]
-                if "Risk_Category" in df_filtered.columns
-                else None,
-                category_orders={
-                    "Risk_Category": [
-                        "Very Low Risk",
-                        "Low Risk",
-                        "Moderate Risk",
-                        "High Risk",
-                    ]
-                },
-                opacity=0.7,
-                trendline="ols",
-                title=f"Income and Health Index Relationship ({len(df_filtered)} patients)",
-            )
-
-        apply_2decimal_format(fig)
-        fig.update_layout(margin=dict(t=40, b=0, l=0, r=0))
-        return fig
-    return None
-
-
-def create_compact_map(df, height=600, max_points=None):
-    """
-    Creates a heatmap showing the concentration of patients with higher weights for high-risk patients
-    """
-    if "LAT" not in df.columns or "LON" not in df.columns:
-        return None
-
-    df_map = df.dropna(subset=["LAT", "LON"])
-    if len(df_map) == 0:
-        return go.Figure().update_layout(
-            title="No valid location data available", height=height
-        )
-
-    # Create a density-enhanced visualization
-    # First create the heatmap base with reduced intensity
-    fig = px.density_mapbox(
-        df_map,
-        lat="LAT",
-        lon="LON",
-        z="Health_Index" if "Health_Index" in df_map.columns else None,
-        radius=15,
-        center=dict(lat=df_map["LAT"].mean(), lon=df_map["LON"].mean()),
-        zoom=7,
-        height=height,
-        opacity=0.65,
-        color_continuous_scale=[
-            [0, "#5A9BD5"],
-            [0.3, "#52A373"],
-            [0.6, "#F0A860"],
-            [1, "#E66C6C"],
-        ],
-        mapbox_style="carto-positron",
-        title=f"Patient Geographic Distribution (n={len(df_map)} patients)",
-    )
-
-    # Add contour overlay with reduced intensity
-    if "Health_Index" in df_map.columns and len(df_map) > 100:
-        # Create a subset for the highest risk patients (top 20%)
-        high_risk_threshold = df_map["Health_Index"].quantile(0.8)
-        high_risk_df = df_map[df_map["Health_Index"] >= high_risk_threshold]
-
-        if len(high_risk_df) > 20:
-            fig.add_trace(
-                go.Densitymapbox(
-                    lat=high_risk_df["LAT"],
-                    lon=high_risk_df["LON"],
-                    radius=20,
-                    opacity=0.4,
-                    colorscale=[
-                        [0, "rgba(0,0,0,0)"],
-                        [0.5, "rgba(255,185,28,0.2)"],
-                        [1, "rgba(230,108,108,0.4)"],
-                    ],
-                    showscale=False,
-                    hoverinfo="none",
-                    name="High Risk Areas",
-                )
-            )
-
-    fig.update_layout(
-        mapbox_style="carto-positron",
-        margin={"r": 0, "t": 40, "l": 0, "b": 0},
-        coloraxis_colorbar=dict(
-            title="Health Risk",
-            tickvals=[1, 3, 6, 9],
-            ticktext=["Very Low", "Low", "Moderate", "High"],
-        ),
-    )
-
-    return fig
-
-
-def create_correlation_matrix(df, max_cols=15):
-    numeric_df = df.select_dtypes(include=["number"])
-    if len(numeric_df.columns) > max_cols:
-        priority_cols = [
-            col
-            for col in [
-                "Health_Index",
-                "CharlsonIndex",
-                "ElixhauserIndex",
-                "AGE",
-                "INCOME",
-                "PredictedHI_final",
-            ]
-            if col in numeric_df.columns
-        ]
-        other_cols = [col for col in numeric_df.columns if col not in priority_cols]
-        selected_cols = priority_cols + other_cols[: max_cols - len(priority_cols)]
-        numeric_df = numeric_df[selected_cols]
-    if len(numeric_df.columns) >= 2:
-        corr = numeric_df.corr()
-        corr_fig = px.imshow(
-            corr,
-            text_auto=True,
-            aspect="auto",
-            title=f"Feature Correlations (Top {len(corr)} features)",
-            color_continuous_scale=[[0, "#5A9BD5"], [0.5, "#FFFFFF"], [1, "#E66C6C"]],
-            zmin=-1,
-            zmax=1,
-        )
-        apply_2decimal_format(corr_fig)
-        corr_fig.update_layout(margin=dict(t=40, b=0, l=0, r=0))
-        return corr_fig
-    return None
-
-
-def create_health_trend_chart(df, max_points=3000):
-    if "Age_Group" in df.columns and "Health_Index" in df.columns:
-        df_filtered = df.dropna(subset=["Age_Group", "Health_Index"])
-        if len(df_filtered) == 0:
-            return go.Figure().update_layout(
-                title="No valid data for health trend chart"
-            )
-        if len(df_filtered) > max_points:
-            health_by_age = (
-                df_filtered.groupby("Age_Group")["Health_Index"]
-                .agg(["mean", "count", "std"])
-                .reset_index()
-            )
-            health_by_age.rename(columns={"mean": "Health_Index"}, inplace=True)
-        else:
-            health_by_age = (
-                df_filtered.groupby("Age_Group")["Health_Index"].mean().reset_index()
-            )
-        fig = px.line(
-            health_by_age,
-            x="Age_Group",
-            y="Health_Index",
-            markers=True,
-            title="Average Health Index by Age Group",
-            category_orders={
-                "Age_Group": ["0-18", "19-35", "36-50", "51-65", "66-80", "80+"]
-            },
-            hover_data=["count", "std"] if "count" in health_by_age.columns else None,
-        )
-        apply_2decimal_format(fig)
-        fig.update_layout(margin=dict(t=40, b=0, l=0, r=0))
-        release_memory()
-        return fig
-    return None
-
-
-def sanitize_datatable_values(df):
-    # Check if input is a list (from JSON deserialization)
-    # and convert it back to DataFrame if needed
-    if isinstance(df, list):
-        df = pd.DataFrame(df)
-        if df.empty:
-            return df
-
-    df_copy = df.copy()
-    for col in df_copy.select_dtypes(
-        include=["int8", "int16", "int32", "int64"]
-    ).columns:
-        df_copy[col] = df_copy[col].astype("int").replace({pd.NA: None, np.nan: None})
-    for col in df_copy.select_dtypes(include=["float16", "float32", "float64"]).columns:
-        df_copy[col] = df_copy[col].astype("float").replace({pd.NA: None, np.nan: None})
-    for col in df_copy.select_dtypes(include=["datetime"]).columns:
-        df_copy[col] = df_copy[col].dt.strftime("%Y-%m-%d")
-    for col in df_copy.select_dtypes(include=["object"]).columns:
-        df_copy[col] = df_copy[col].fillna("").astype(str)
-    for col in df_copy.select_dtypes(include=["category"]).columns:
-        df_copy[col] = df_copy[col].astype(str).replace({"nan": "", "None": ""})
-    df_copy = df_copy.fillna("")
-    return df_copy
-
-
-# ------------------------------------------------------------
-# DASHBOARD COMPONENTS & LAYOUT HELPERS
-# ------------------------------------------------------------
-
-# Define color scheme first before any components use it
-nhs_colors = {
-    "background": "#F7F7F7",
-    "text": "#333333",
-    "primary": "#005EB8",
-    "secondary": "#FFFFFF",
-    "accent": "#00843D",
-    "highlight": "#FFB81C",
-    "risk_high": "#E66C6C",
-    "risk_medium": "#F0A860",
-    "risk_low": "#52A373",
-    "risk_verylow": "#5A9BD5",
-}
-
-risk_colors = [
-    nhs_colors["risk_verylow"],
-    nhs_colors["risk_low"],
-    nhs_colors["risk_medium"],
-    nhs_colors["risk_high"],
-]
-
-# Define model dropdown options
-model_dropdown_options = [{"label": group["label"], "value": group["label"]} for group in final_groups]
-
-# Create collapsible card component
 def collapsible_card(title, content, card_id, initially_open=False):
     return html.Div(
         [
@@ -896,193 +293,729 @@ def collapsible_card(title, content, card_id, initially_open=False):
         style={"backgroundColor": "white", "borderRadius": "5px", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"},
     )
 
-# Define KPI row component
-kpi_row = html.Div(
-    [
-        dbc.Row(
-            [
-                dbc.Col(
-                    html.Div(
-                        [
-                            html.H5("Total Patients", className="kpi-title"),
-                            html.H3(f"{len(df_all):,}", className="kpi-value"),
-                        ],
-                        className="kpi-card",
-                    ),
-                    width=12, lg=3,
-                ),
-                dbc.Col(
-                    html.Div(
-                        [
-                            html.H5("High Risk Patients", className="kpi-title"),
-                            html.H3(
-                                f"{len(df_all[df_all['Risk_Category'] == 'High Risk']) if 'Risk_Category' in df_all.columns else 0:,}", 
-                                className="kpi-value"
-                            ),
-                        ],
-                        className="kpi-card",
-                        style={"backgroundColor": "#FADBD8"},
-                    ),
-                    width=12, lg=3,
-                ),
-                dbc.Col(
-                    html.Div(
-                        [
-                            html.H5("Average Health Index", className="kpi-title"),
-                            html.H3(
-                                f"{df_all['Health_Index'].mean():.2f}" if 'Health_Index' in df_all.columns else "N/A", 
-                                className="kpi-value"
-                            ),
-                        ],
-                        className="kpi-card",
-                        style={"backgroundColor": "#D5F5E3"},
-                    ),
-                    width=12, lg=3,
-                ),
-                dbc.Col(
-                    html.Div(
-                        [
-                            html.H5("Avg. Charlson Index", className="kpi-title"),
-                            html.H3(
-                                f"{df_all['CharlsonIndex'].mean():.2f}" if 'CharlsonIndex' in df_all.columns else "N/A", 
-                                className="kpi-value"
-                            ),
-                        ],
-                        className="kpi-card",
-                        style={"backgroundColor": "#D6EAF8"},
-                    ),
-                    width=12, lg=3,
-                ),
-            ],
-            className="g-2",
-        ),
-    ],
-    style={"marginBottom": "15px"},
-)
+def encode_image(image_file):
+    if os.path.exists(image_file):
+        with open(image_file, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
+    return None
 
-# Define patient modal component
-patient_modal = dbc.Modal(
-    [
-        dbc.ModalHeader("Patient Details"),
-        dbc.ModalBody(id="patient-detail-body"),
-        dbc.ModalFooter(
-            dbc.Button("Close", id="close-modal", className="ml-auto", n_clicks=0)
-        ),
-    ],
-    id="patient-modal",
-    size="lg",
-)
+def use_webgl_rendering(fig, threshold=None):
+    if threshold is None:
+        threshold = PERF_SETTINGS["webgl_threshold"]
 
-# Initialize final_models_data and XAI dropdown
-final_models_data = {group["label"]: {"metrics": {"test_mse": "N/A", "test_r2": "N/A", "Silhouette": "N/A"}, 
-                                     "df": pd.DataFrame(), "tsne_img": None, "umap_img": None} 
-                     for group in final_groups}
+    for trace in fig.data:
+        if trace.type == "scatter" and hasattr(trace, "x") and len(trace.x) > threshold:
+            trace.type = "scattergl"
+    return fig
 
-xai_dropdown = dcc.Dropdown(
-    id="xai-model-dropdown",
-    options=[{"label": group["label"], "value": group["label"]} for group in final_groups],
-    value=final_groups[0]["label"] if final_groups else None,
-    clearable=False,
-)
+def memoize_fig(func):
+    cache_key = f"{func.__name__}_cache"
+    cache_store = {}
 
-# Define filter panel component (now all dependencies are defined)
-filter_panel = html.Div(
-    [
-        html.H5(
-            "Dashboard Filters",
-            style={"color": nhs_colors["primary"], "marginBottom": "15px"},
-        ),
-        html.Label("Model Group:"),
-        dcc.Dropdown(
-            id="global-model-dropdown",
-            options=[{"label": "All", "value": "All"}] + model_dropdown_options,
-            value="All",
-            clearable=False,
-        ),
-        html.Label("Risk Category:", style={"marginTop": "15px"}),
-        dcc.Dropdown(
-            id="global-risk-dropdown",
-            options=[
-                {"label": "All", "value": "All"},
-                {"label": "High Risk", "value": "High Risk"},
-                {"label": "Moderate Risk", "value": "Moderate Risk"},
-                {"label": "Low Risk", "value": "Low Risk"},
-                {"label": "Very Low Risk", "value": "Very Low Risk"},
-            ],
-            value="All",
-            clearable=False,
-        ),
-        html.Label("Age Range:", style={"marginTop": "15px"}),
-        dcc.RangeSlider(
-            id="age-range-slider",
-            min=df_all["AGE"].min() if "AGE" in df_all.columns else 0,
-            max=df_all["AGE"].max() if "AGE" in df_all.columns else 100,
-            step=1,
-            marks={i: str(i) for i in range(0, 101, 20)},
-            value=[
-                df_all["AGE"].min() if "AGE" in df_all.columns else 0,
-                df_all["AGE"].max() if "AGE" in df_all.columns else 100,
-            ],
-            tooltip={"placement": "bottom", "always_visible": True},
-        ),
-        html.Label("Income Range:", style={"marginTop": "15px"}),
-        dcc.RangeSlider(
-            id="income-range-slider",
-            min=df_all["INCOME"].min() if "INCOME" in df_all.columns else 0,
-            max=df_all["INCOME"].max() if "INCOME" in df_all.columns else 100000,
-            step=1000,
-            marks={i: f"£{i:,}" for i in range(0, 100001, 25000)},
-            value=[
-                df_all["INCOME"].min() if "INCOME" in df_all.columns else 0,
-                df_all["INCOME"].max() if "INCOME" in df_all.columns else 100000,
-            ],
-            tooltip={"placement": "bottom", "always_visible": True},
-        ),
-        html.Label("Health Index Range:", style={"marginTop": "15px"}),
-        dcc.RangeSlider(
-            id="health-index-slider",
-            min=df_all["Health_Index"].min(),
-            max=df_all["Health_Index"].max(),
-            step=0.1,
-            marks={i: str(i) for i in range(0, 11, 2)},
-            value=[df_all["Health_Index"].min(), df_all["Health_Index"].max()],
-            tooltip={"placement": "bottom", "always_visible": True},
-        ),
-        html.Div(
-            [
-                dbc.Button(
-                    "Apply Filters",
-                    id="apply-filters-btn",
-                    color="primary",
-                    className="mr-1",
-                    style={"marginRight": "5px"},
-                ),
-                dbc.Button(
-                    "Reset Filters",
-                    id="reset-filters-btn",
-                    color="secondary",
-                    className="mr-1",
-                    style={"marginRight": "5px"},
-                ),
-            ],
-            style={
-                "marginTop": "20px",
-                "display": "flex",
-                "justifyContent": "space-between",
+    def wrapper(*args, **kwargs):
+        key = (
+            args[0].shape[0] if (args and isinstance(args[0], pd.DataFrame)) else None,
+            tuple(kwargs.items()),
+        )
+        if key in cache_store:
+            return cache_store[key]
+        fig = func(*args, **kwargs)
+        cache_store[key] = fig
+        return fig
+
+    return wrapper
+
+def get_memory_usage():
+    process = psutil.Process()
+    memory_info = process.memory_info()
+    return memory_info.rss / 1024 / 1024
+
+def log_memory_usage(label):
+    logger.info(f"Memory usage at {label}: {get_memory_usage():.2f} MB")
+
+def smart_sample_dataframe(df, max_points=None, min_points=500, method="random"):
+    if max_points is None:
+        max_points = PERF_SETTINGS["sampling_threshold"]
+
+    if df is None or df.empty:
+        return df
+    if len(df) <= max_points:
+        return df
+
+    sample_size = min(max_points, max(min_points, int(len(df) * 0.1)))
+
+    if method == "random":
+        return df.sample(sample_size, random_state=42)
+    elif method == "stratified" and "Risk_Category" in df.columns:
+        unique_categories = df["Risk_Category"].unique()
+
+        with ThreadPoolExecutor(max_workers=PERF_SETTINGS["max_threads"]) as executor:
+
+            def sample_category(category):
+                category_df = df[df["Risk_Category"] == category]
+                category_size = max(1, int(sample_size * len(category_df) / len(df)))
+                return category_df.sample(
+                    min(category_size, len(category_df)), random_state=42
+                )
+
+            sampled = list(executor.map(sample_category, unique_categories))
+        return pd.concat(sampled)
+    elif method == "cluster" and df.select_dtypes(include=["number"]).shape[1] >= 2:
+        try:
+            if PERF_SETTINGS["use_advanced_clustering"] and len(df) > 50000:
+                numeric_cols = df.select_dtypes(include=["number"]).columns
+                if len(numeric_cols) > 10:
+                    numeric_cols = numeric_cols[:10]
+                cluster_data = df[numeric_cols].fillna(df[numeric_cols].mean())
+
+                n_clusters = min(int(math.sqrt(sample_size) * 1.5), 100)
+
+                from sklearn.cluster import MiniBatchKMeans
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    kmeans = MiniBatchKMeans(
+                        n_clusters=n_clusters,
+                        batch_size=PERF_SETTINGS["batch_size"],
+                        random_state=42,
+                    )
+                    df_copy = df.copy()
+                    df_copy["cluster"] = kmeans.fit_predict(cluster_data)
+
+                with ThreadPoolExecutor(
+                    max_workers=PERF_SETTINGS["max_threads"]
+                ) as executor:
+
+                    def sample_cluster(cluster):
+                        cluster_df = df_copy[df_copy["cluster"] == cluster]
+                        cluster_size = max(
+                            1, int(sample_size * len(cluster_df) / len(df))
+                        )
+                        return cluster_df.sample(
+                            min(cluster_size, len(cluster_df)), random_state=42
+                        )
+
+                    sampled = list(executor.map(sample_cluster, range(n_clusters)))
+                return pd.concat(sampled).drop(columns=["cluster"])
+            else:
+                return df.sample(sample_size, random_state=42)
+        except Exception as e:
+            logger.warning(
+                f"Advanced cluster sampling failed, falling back to random: {e}"
+            )
+            return df.sample(sample_size, random_state=42)
+    return df.sample(sample_size, random_state=42)
+
+def release_memory():
+    pass
+
+def create_compact_map(df, height=600, health_index_range=None, center=None, zoom=7):
+    logger.info(f"Creating compact map. Input df shape: {df.shape if df is not None else 'None'}")
+    if df is None or df.empty:
+         logger.warning("Input dataframe for map is None or empty.")
+         return go.Figure().update_layout(
+             title="No data provided for map", height=height,
+             xaxis={"visible": False}, yaxis={"visible": False},
+             annotations=[{"text": "No data available", "xref": "paper", "yref": "paper", "showarrow": False, "font": {"size": 16}}]
+         )
+
+    if "LAT" not in df.columns or "LON" not in df.columns:
+        logger.warning("LAT or LON columns missing from dataframe.")
+        return go.Figure().update_layout(
+            title="Geographic data columns (LAT, LON) not found", height=height,
+            xaxis={"visible": False}, yaxis={"visible": False},
+            annotations=[{"text": "LAT/LON columns missing", "xref": "paper", "yref": "paper", "showarrow": False, "font": {"size": 16}}]
+        )
+
+    df_map = df.dropna(subset=["LAT", "LON"])
+    if health_index_range and "Health_Index" in df_map.columns:
+        df_map = df_map[(df_map["Health_Index"] >= health_index_range[0]) & (df_map["Health_Index"] <= health_index_range[1])]
+
+    logger.info(f"Dataframe shape after dropping NaN LAT/LON: {df_map.shape}")
+
+    if len(df_map) == 0:
+        logger.warning("No valid location data (non-NaN LAT/LON) available after filtering/dropping NaNs.")
+        return go.Figure(layout={
+            "title": "No Valid Geographic Data Points",
+            "height": height,
+            "mapbox": {
+                "style": "carto-positron",
+                "center": center if center else {"lat": 39.8283, "lon": -98.5795},
+                "zoom": 3
             },
-        ),
-    ],
-    style={
-        "backgroundColor": nhs_colors["secondary"],
-        "padding": "15px",
-        "borderRadius": "5px",
-        "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
-    },
-)
+            "annotations": [{
+                "text": "No patients with valid location data found in the current selection.",
+                "xref": "paper",
+                "yref": "paper",
+                "showarrow": False,
+                "font": {"size": 14, "color": "grey"}
+            }]
+        })
 
-# ------------------------------------------------------------
-# DASH APP INITIALIZATION & LAYOUT
-# ------------------------------------------------------------
+    if not center and not df_map.empty:
+        center = dict(lat=df_map["LAT"].mean(), lon=df_map["LON"].mean())
+    elif not center:
+        center = dict(lat=39.8283, lon=-98.5795)
+
+    try:
+        fig = px.density_mapbox(
+            df_map,
+            lat="LAT",
+            lon="LON",
+            z="Health_Index" if "Health_Index" in df_map.columns else None,
+            radius=15,
+            center=center,
+            zoom=zoom,
+            height=height,
+            opacity=0.65,
+            color_continuous_scale=[
+                [0, "#5A9BD5"],
+                [0.3, "#52A373"],
+                [0.6, "#F0A860"],
+                [1, "#E66C6C"],
+            ],
+            mapbox_style="carto-positron",
+            title=f"Patient Geographic Distribution (n={len(df_map)} patients)",
+        )
+
+        if "Health_Index" in df_map.columns and len(df_map) > 100:
+            high_risk_threshold = df_map["Health_Index"].quantile(0.8)
+            high_risk_df = df_map[df_map["Health_Index"] >= high_risk_threshold]
+
+            if len(high_risk_df) > 20:
+                fig.add_trace(
+                    go.Densitymapbox(
+                        lat=high_risk_df["LAT"],
+                        lon=high_risk_df["LON"],
+                        radius=20,
+                        opacity=0.4,
+                        colorscale=[
+                            [0, "rgba(0,0,0,0)"],
+                            [0.5, "rgba(255,185,28,0.2)"],
+                            [1, "rgba(230,108,108,0.4)"],
+                        ],
+                        showscale=False,
+                        hoverinfo="none",
+                        name="High Risk Areas",
+                    )
+                )
+
+        fig.update_layout(
+            mapbox_style="carto-positron",
+            mapbox_center=center,
+            mapbox_zoom=zoom,
+            margin={"r": 0, "t": 40, "l": 0, "b": 0},
+            coloraxis_colorbar=dict(
+                title="Health Risk",
+                tickvals=[1, 3, 6, 9],
+                ticktext=["Very Low", "Low", "Moderate", "High"],
+            ),
+        )
+        logger.info("Successfully created geographic map.")
+        return fig
+    except Exception as e:
+        logger.error(f"Error creating geographic map: {e}", exc_info=True)
+        return go.Figure(layout={
+            "title": "Error Generating Map",
+            "height": height,
+            "annotations": [{
+                "text": f"An error occurred: {e}",
+                "xref": "paper", "yref": "paper",
+                "showarrow": False,
+                "font": {"size": 14, "color": "red"}
+            }]
+        })
+
+def create_enhanced_geo_disparities_map(df, height=600, health_index_range=None, center=None, zoom=7):
+    logger.warning("create_enhanced_geo_disparities_map is not fully implemented. Returning placeholder.")
+    return go.Figure(layout={"title": "Geographic Health Disparities (Placeholder)", "height": height})
+
+def create_health_inequality_chart(df, max_points=3000):
+    if df is None or df.empty:
+        return None
+        
+    required_cols = ["Health_Index", "INCOME", "RACE", "AGE"]
+    if not all(col in df.columns for col in required_cols):
+        fig = go.Figure()
+        fig.add_annotation(
+            text="Missing required data for health inequality analysis",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=14)
+        )
+        fig.update_layout(height=400, title="Health Inequality Analysis - Missing Data")
+        return fig
+        
+    if len(df) > max_points:
+        df_sample = df.sample(max_points, random_state=42)
+    else:
+        df_sample = df.copy()
+        
+    df_sample['Income_Quartile'] = pd.qcut(
+        df_sample['INCOME'], 
+        q=4, 
+        labels=['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']
+    )
+    
+    income_health = df_sample.groupby('Income_Quartile')['Health_Index'].agg(['mean', 'count']).reset_index()
+    income_health.columns = ['Income_Quartile', 'Avg_Health_Index', 'Count']
+    
+    total_count = income_health['Count'].sum()
+    income_health['Percentage'] = (income_health['Count'] / total_count * 100).round(1)
+    
+    if len(income_health) >= 4:
+        highest_health = income_health.iloc[-1]['Avg_Health_Index']
+        lowest_health = income_health.iloc[0]['Avg_Health_Index']
+        inequality_ratio = highest_health / lowest_health if lowest_health > 0 else float('nan')
+    else:
+        inequality_ratio = float('nan')
+    
+    fig = px.bar(
+        income_health,
+        x='Income_Quartile',
+        y='Avg_Health_Index',
+        color='Income_Quartile',
+        color_discrete_sequence=['#5A9BD5', '#52A373', '#F0A860', '#E66C6C'],
+        text='Percentage',
+        labels={
+            'Income_Quartile': 'Income Quartile',
+            'Avg_Health_Index': 'Average Health Index'
+        },
+        title='Health Inequality Across Income Groups'
+    )
+    
+    fig.update_traces(texttemplate='%{text}%', textposition='outside')
+    
+    if not pd.isna(inequality_ratio):
+        fig.add_annotation(
+            text=f"Health Inequality Ratio: {inequality_ratio:.2f}",
+            xref="paper", yref="paper",
+            x=0.5, y=1.05,
+            showarrow=False,
+            font=dict(size=12, color="red" if inequality_ratio > 1.5 else "black"),
+            bgcolor="rgba(255, 255, 255, 0.8)",
+            bordercolor="black",
+            borderwidth=1,
+            borderpad=4
+        )
+    
+    fig.update_layout(
+        xaxis_title="Income Quartile",
+        yaxis_title="Average Health Index",
+        xaxis={'categoryorder': 'array', 'categoryarray': ['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']},
+        height=400
+    )
+    
+    return fig
+
+def sanitize_datatable_values(df):
+    """Sanitize values for display in DataTable"""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    
+    df_copy = df.copy()
+    
+    # Convert numeric values to formatted strings
+    for col in df_copy.select_dtypes(include=['float']).columns:
+        df_copy[col] = df_copy[col].round(2).astype(str)
+    
+    # Convert date columns to formatted strings
+    date_cols = [col for col in df_copy.columns if 'date' in col.lower() or 'time' in col.lower()]
+    for col in date_cols:
+        if col in df_copy.columns and pd.api.types.is_datetime64_any_dtype(df_copy[col]):
+            df_copy[col] = df_copy[col].dt.strftime('%Y-%m-%d')
+    
+    # Replace NaN values with empty strings
+    df_copy = df_copy.fillna('')
+    
+    return df_copy
+
+def create_demographic_charts(df):
+    """Create charts for demographic data"""
+    if df is None or df.empty:
+        return None, None, None
+    
+    # Gender distribution
+    if "GENDER" in df.columns:
+        gender_counts = df["GENDER"].value_counts().reset_index()
+        gender_counts.columns = ["Gender", "Count"]
+        gender_fig = px.pie(
+            gender_counts,
+            values="Count",
+            names="Gender",
+            title="Gender Distribution",
+            color_discrete_sequence=["#5A9BD5", "#F0A860", "#52A373"],
+        )
+        gender_fig.update_layout(height=300)
+    else:
+        gender_fig = None
+    
+    # Age distribution
+    if "Age_Group" in df.columns:
+        age_counts = df["Age_Group"].value_counts().reset_index()
+        age_counts.columns = ["Age Group", "Count"]
+        age_fig = px.bar(
+            age_counts,
+            x="Age Group",
+            y="Count",
+            title="Age Distribution",
+            color_discrete_sequence=["#5A9BD5"],
+        )
+        age_fig.update_layout(height=300)
+    else:
+        age_fig = None
+    
+    # Risk distribution
+    if "Risk_Category" in df.columns:
+        risk_counts = df["Risk_Category"].value_counts().reset_index()
+        risk_counts.columns = ["Risk Category", "Count"]
+        risk_fig = px.bar(
+            risk_counts,
+            x="Risk Category",
+            y="Count",
+            title="Risk Distribution",
+            color="Risk Category",
+            color_discrete_map={
+                "Very Low Risk": nhs_colors["risk_verylow"],
+                "Low Risk": nhs_colors["risk_low"],
+                "Moderate Risk": nhs_colors["risk_medium"],
+                "High Risk": nhs_colors["risk_high"],
+            },
+        )
+        risk_fig.update_layout(height=300)
+    else:
+        risk_fig = None
+    
+    return gender_fig, age_fig, risk_fig
+
+def create_race_demographics(df):
+    """Create race distribution and healthcare expense charts"""
+    if df is None or df.empty:
+        return None, None
+    
+    # Race distribution
+    if "RACE" in df.columns:
+        race_counts = df["RACE"].value_counts().reset_index()
+        race_counts.columns = ["Race", "Count"]
+        race_fig = px.pie(
+            race_counts,
+            values="Count",
+            names="Race",
+            title="Race Distribution",
+            hole=0.4,
+        )
+        race_fig.update_layout(height=400)
+    else:
+        race_fig = None
+    
+    # Healthcare expenses
+    if "HEALTHCARE_EXPENSES" in df.columns and "Risk_Category" in df.columns:
+        expenses_by_risk = df.groupby("Risk_Category")["HEALTHCARE_EXPENSES"].mean().reset_index()
+        expense_fig = px.bar(
+            expenses_by_risk,
+            x="Risk_Category",
+            y="HEALTHCARE_EXPENSES",
+            title="Average Healthcare Expenses by Risk Category",
+            color="Risk_Category",
+            color_discrete_map={
+                "Very Low Risk": nhs_colors["risk_verylow"],
+                "Low Risk": nhs_colors["risk_low"],
+                "Moderate Risk": nhs_colors["risk_medium"],
+                "High Risk": nhs_colors["risk_high"],
+            },
+        )
+        expense_fig.update_layout(height=400)
+        expense_fig.update_yaxes(title="Average Expenses ($)")
+    else:
+        expense_fig = None
+    
+    return race_fig, expense_fig
+
+def create_income_health_chart(df):
+    """Create a chart showing the relationship between income and health index"""
+    if df is None or df.empty or "INCOME" not in df.columns or "Health_Index" not in df.columns:
+        return None
+    
+    # Sample data if it's too large
+    if len(df) > 5000:
+        df_sample = df.sample(5000, random_state=42)
+    else:
+        df_sample = df
+    
+    # Create scatter plot
+    fig = px.scatter(
+        df_sample,
+        x="INCOME",
+        y="Health_Index",
+        color="Risk_Category" if "Risk_Category" in df_sample.columns else None,
+        color_discrete_map={
+            "Very Low Risk": nhs_colors["risk_verylow"],
+            "Low Risk": nhs_colors["risk_low"],
+            "Moderate Risk": nhs_colors["risk_medium"],
+            "High Risk": nhs_colors["risk_high"],
+        },
+        title="Income vs. Health Index",
+        opacity=0.7,
+    )
+    
+    # Add trend line
+    if len(df_sample) > 10:
+        try:
+            from scipy import stats
+            slope, intercept, r_value, p_value, std_err = stats.linregress(
+                df_sample["INCOME"], df_sample["Health_Index"]
+            )
+            x_range = [df_sample["INCOME"].min(), df_sample["INCOME"].max()]
+            y_range = [slope * x + intercept for x in x_range]
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=x_range,
+                    y=y_range,
+                    mode="lines",
+                    line=dict(color="black", width=2),
+                    name=f"Trend Line (r={r_value:.2f})",
+                )
+            )
+        except Exception as e:
+            logger.warning(f"Could not add trend line: {e}")
+    
+    fig.update_layout(height=500)
+    return fig
+
+def create_intersectional_analysis(df):
+    """Create charts for intersectional analysis"""
+    if df is None or df.empty:
+        return None
+    
+    charts = []
+    
+    # Gender and Race analysis
+    if "GENDER" in df.columns and "RACE" in df.columns and "Health_Index" in df.columns:
+        # Filter to include only the most frequent racial categories for clarity
+        top_races = df["RACE"].value_counts().nlargest(5).index.tolist()
+        filtered_df = df[df["RACE"].isin(top_races)].copy()
+        
+        if not filtered_df.empty:
+            # Calculate mean health index by gender and race
+            grouped = filtered_df.groupby(["GENDER", "RACE"])["Health_Index"].mean().reset_index()
+            
+            # Create grouped bar chart
+            fig1 = px.bar(
+                grouped,
+                x="RACE",
+                y="Health_Index",
+                color="GENDER",
+                title="Health Index by Race and Gender",
+                barmode="group",
+                color_discrete_sequence=["#5A9BD5", "#F0A860"],
+            )
+            fig1.update_layout(height=400)
+            charts.append(fig1)
+    
+    # Income and Race analysis
+    if "RACE" in df.columns and "INCOME" in df.columns:
+        # Filter to include only the most frequent racial categories
+        top_races = df["RACE"].value_counts().nlargest(5).index.tolist()
+        filtered_df = df[df["RACE"].isin(top_races)].copy()
+        
+        if not filtered_df.empty:
+            # Calculate mean income by race
+            grouped = filtered_df.groupby("RACE")["INCOME"].mean().reset_index()
+            
+            # Create bar chart
+            fig2 = px.bar(
+                grouped,
+                x="RACE",
+                y="INCOME",
+                title="Average Income by Race",
+                color="RACE",
+                color_discrete_sequence=px.colors.qualitative.Pastel,
+            )
+            fig2.update_layout(height=400, showlegend=False)
+            charts.append(fig2)
+    
+    return charts if charts else None
+
+def create_indices_comparison(df):
+    """Create a comparison chart for health indices"""
+    if df is None or df.empty:
+        return None
+    
+    required_cols = ["Health_Index", "CharlsonIndex", "ElixhauserIndex"]
+    if not all(col in df.columns for col in required_cols):
+        return None
+    
+    # Sample data if too large
+    if len(df) > 3000:
+        df_sample = df.sample(3000, random_state=42)
+    else:
+        df_sample = df
+    
+    # Create figure with secondary y-axis
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # Add traces
+    fig.add_trace(
+        go.Scatter(
+            x=df_sample["CharlsonIndex"],
+            y=df_sample["Health_Index"],
+            mode="markers",
+            name="Charlson vs Health",
+            marker=dict(color="#5A9BD5", opacity=0.6),
+        ),
+        secondary_y=False,
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=df_sample["ElixhauserIndex"],
+            y=df_sample["Health_Index"],
+            mode="markers",
+            name="Elixhauser vs Health",
+            marker=dict(color="#F0A860", opacity=0.6),
+        ),
+        secondary_y=False,
+    )
+    
+    # Add figure title, axis labels
+    fig.update_layout(
+        title_text="Health Indices Comparison",
+        height=500,
+    )
+    
+    # Set axis titles
+    fig.update_xaxes(title_text="Index Value")
+    fig.update_yaxes(title_text="Health Index", secondary_y=False)
+    
+    return fig
+
+def create_health_trend_chart(df):
+    """Create a chart showing health trends by age group"""
+    if df is None or df.empty or "Age_Group" not in df.columns:
+        return None
+    
+    health_metrics = [col for col in ["Health_Index", "CharlsonIndex", "ElixhauserIndex"] if col in df.columns]
+    
+    if not health_metrics:
+        return None
+    
+    # Aggregate data by age group
+    agg_dict = {metric: "mean" for metric in health_metrics}
+    grouped = df.groupby("Age_Group").agg(agg_dict).reset_index()
+    
+    # Ensure age groups are in correct order
+    age_order = ["0-18", "19-35", "36-50", "51-65", "66-80", "80+"]
+    grouped["Age_Group"] = pd.Categorical(grouped["Age_Group"], categories=age_order, ordered=True)
+    grouped = grouped.sort_values("Age_Group")
+    
+    # Create line chart
+    fig = go.Figure()
+    
+    for metric in health_metrics:
+        fig.add_trace(
+            go.Scatter(
+                x=grouped["Age_Group"],
+                y=grouped[metric],
+                mode="lines+markers",
+                name=metric,
+            )
+        )
+    
+    fig.update_layout(
+        title="Health Metrics by Age Group",
+        xaxis_title="Age Group",
+        yaxis_title="Index Value",
+        height=500,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+        ),
+    )
+    
+    return fig
+
+def create_correlation_matrix(df):
+    """Create a correlation matrix for numeric health data"""
+    if df is None or df.empty:
+        return None
+    
+    # Select relevant numerical columns
+    numeric_cols = [
+        col for col in ["Health_Index", "CharlsonIndex", "ElixhauserIndex", 
+                       "AGE", "INCOME", "HEALTHCARE_EXPENSES"] 
+        if col in df.columns
+    ]
+    
+    if len(numeric_cols) < 2:
+        return None
+    
+    # Calculate correlation matrix
+    corr_matrix = df[numeric_cols].corr()
+    
+    # Create heatmap
+    fig = px.imshow(
+        corr_matrix,
+        text_auto=True,
+        color_continuous_scale="RdBu_r",
+        title="Correlation Matrix of Health Metrics",
+        height=500,
+    )
+    
+    fig.update_layout(
+        xaxis_title="",
+        yaxis_title="",
+    )
+    
+    return fig
+
+def create_clinical_risk_clusters(df, model_name="Unknown"):
+    """Create visualization of clinical risk clusters"""
+    if df is None or df.empty:
+        return None
+    
+    required_cols = ["Health_Index", "CharlsonIndex", "ElixhauserIndex"]
+    if not all(col in df.columns for col in required_cols):
+        return None
+    
+    # Sample data if too large
+    if len(df) > 3000:
+        df_sample = df.sample(3000, random_state=42)
+    else:
+        df_sample = df
+    
+    # Add cluster if available, otherwise use Risk_Category
+    color_col = "Cluster" if "Cluster" in df_sample.columns else "Risk_Category"
+    
+    # Create 3D scatter plot
+    fig = px.scatter_3d(
+        df_sample,
+        x="Health_Index",
+        y="CharlsonIndex",
+        z="ElixhauserIndex",
+        color=color_col if color_col in df_sample.columns else None,
+        title=f"Clinical Risk Clustering for {model_name} Model",
+        opacity=0.7,
+        color_discrete_sequence=risk_colors if "Cluster" in df_sample.columns else None,
+    )
+    
+    # Update layout
+    fig.update_layout(
+        scene=dict(
+            xaxis_title="Health Index",
+            yaxis_title="Charlson Index",
+            zaxis_title="Elixhauser Index",
+        ),
+        height=700,
+    )
+    
+    return fig
+
 external_stylesheets = [dbc.themes.FLATLY]
 
 progress_stage_icons = {
@@ -1096,11 +1029,6 @@ progress_stage_icons = {
 }
 
 def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
-    """
-    Create a progress bar with stage markers that map directly to the stages 
-    reported by GenerateAndPredict.cpp
-    """
-    # Updated to match exactly the stages from GenerateAndPredict.cpp
     stages = [
         "Initializing",
         "GeneratingData",
@@ -1111,7 +1039,6 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
         "Completed"
     ]
     
-    # The stage percentages defined in GenerateAndPredict.cpp
     stage_percentages = {
         "Initializing": 5.0,
         "GeneratingData": 15.0,
@@ -1129,13 +1056,11 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
         if stage == "Completed" and current_stage != "Completed":
             continue
 
-        # Calculate position based on the cumulative percentage from C++
         if i == 0:
             position_percent = 0
         elif stage == "Completed":
             position_percent = 100
         else:
-            # Calculate position based on cumulative percentage of previous stages
             position_percent = sum([stage_percentages[s] for s in stages[:i]])
 
         is_active = stage == current_stage
@@ -1144,26 +1069,25 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
         if overall_progress > position_percent:
             is_completed = True
 
-        # Make the marker container vertically taller for better visibility
         stage_marker = html.Div(
             className=f"stage-marker {'active' if is_active else ''} {'completed' if is_completed else ''}",
             style={
                 "left": f"{position_percent}%",
                 "transform": "translateX(-50%)",
                 "position": "absolute",
-                "bottom": "-30px",  # Increased from -25px
+                "bottom": "-30px",
                 "display": "flex",
                 "flexDirection": "column",
                 "alignItems": "center",
-                "width": "65px",  # Increased from 60px
+                "width": "65px",
                 "transition": "all 0.3s ease",
             },
             children=[
                 html.Div(
                     className=f"stage-icon-container {'active' if is_active else ''} {'completed' if is_completed else ''}",
                     style={
-                        "width": "35px",  # Increased from 30px 
-                        "height": "35px",  # Increased from 30px
+                        "width": "35px",
+                        "height": "35px",
                         "borderRadius": "50%",
                         "backgroundColor": nhs_colors["primary"]
                         if is_active
@@ -1172,20 +1096,21 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
                         "justifyContent": "center",
                         "alignItems": "center",
                         "color": "white",
-                        "marginBottom": "8px",  # Increased from 5px
-                        "boxShadow": "0 2px 6px rgba(0,0,0,0.3)"  # Enhanced shadow
+                        "marginBottom": "8px",
+                        "boxShadow": "0 2px 6px rgba(0,0,0,0.3)"
                         if is_active
                         else "none",
-                        "transform": "scale(1.3)" if is_active else "scale(1)",  # Increased from 1.2
+                        "transform": "scale(1.3)" if is_active else "scale(1)",
                         "transition": "all 0.3s ease",
-                        "zIndex": "10" if is_active else "1",  # Make active stage appear above others
+                        "zIndex": "10" if is_active else "1",
+                        "animation": "pulse 2s infinite" if is_active else "none",
                     },
                     children=[html.I(className=progress_stage_icons[stage])],
                 ),
                 html.Span(
                     stage,
                     style={
-                        "fontSize": "11px",  # Increased from 10px
+                        "fontSize": "11px",
                         "textAlign": "center",
                         "fontWeight": "bold" if is_active else "normal",
                         "color": nhs_colors["primary"] if is_active else "#666",
@@ -1196,7 +1121,6 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
                         "whiteSpace": "nowrap",
                     },
                 ),
-                # Add percentage from stage_percentages as a small tag
                 html.Span(
                     f"{stage_percentages[stage]}%",
                     style={
@@ -1209,61 +1133,57 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
         )
         stage_markers.append(stage_marker)
 
-    # The rest of the function remains similar but with enhanced styling for the timer display
-    eta_display = None
-    if current_stage != "Completed" and eta != "calculating...":
-        eta_display = html.Div(
-            [
-                html.Div(
-                    [
-                        html.I(className="fa fa-clock", style={"marginRight": "5px"}),
-                        html.Span("Estimated Time Remaining:"),
-                    ],
-                    style={"fontWeight": "bold", "marginBottom": "5px"},
-                ),
-                html.Div(
-                    eta, 
-                    style={
-                        "fontSize": "18px",  # Increased from 16px
-                        "color": nhs_colors["primary"],
-                        "fontWeight": "bold",
-                    }
-                ),
-            ],
-            style={
-                "position": "absolute",
-                "right": "0",
-                "top": "-50px",  # Increased from -45px
-                "backgroundColor": "white",
-                "padding": "10px 15px",  # Increased padding
-                "borderRadius": "6px",  # Increased from 4px
-                "boxShadow": "0 2px 8px rgba(0,0,0,0.15)",  # Enhanced shadow
-                "border": f"1px solid {nhs_colors['primary']}",
-                "zIndex": "5",  # Ensure it's above other elements
-            },
-        )
+    eta_display = html.Div(
+        [
+            html.Div(
+                [
+                    html.I(className="fa fa-clock", style={"marginRight": "5px"}),
+                    html.Span("Estimated Time Remaining:"),
+                ],
+                style={"fontWeight": "bold", "marginBottom": "5px"},
+            ),
+            html.Div(
+                eta, 
+                style={
+                    "fontSize": "18px",
+                    "color": nhs_colors["primary"],
+                    "fontWeight": "bold",
+                }
+            ),
+        ],
+        style={
+            "position": "absolute",
+            "right": "0",
+            "top": "-50px",
+            "backgroundColor": "white",
+            "padding": "10px 15px",
+            "borderRadius": "6px",
+            "boxShadow": "0 2px 8px rgba(0,0,0,0.15)",
+            "border": f"1px solid {nhs_colors['primary']}",
+            "zIndex": "5",
+        },
+    ) if current_stage != "Completed" else None
 
-    # Main component return with improved layout for progress tracking
     return html.Div(
         [
             eta_display,
             html.Div(
                 style={
                     "width": "100%",
-                    "height": "50px",  # Increased from 40px
+                    "height": "50px",
                     "position": "relative",
-                    "marginBottom": "50px",  # Increased from 40px for the larger markers
+                    "marginBottom": "50px",
                 },
                 children=[
                     dbc.Progress(
                         value=overall_progress,
-                        striped=False,
+                        striped=True,
                         animated=True,
                         style={
-                            "height": "12px",  # Increased from 10px
-                            "borderRadius": "6px",  # Increased from 5px
+                            "height": "12px",
+                            "borderRadius": "6px",
                             "backgroundColor": "#e0e0e0",
-                            "marginTop": "10px",  # Add some margin at top
+                            "marginTop": "10px",
                         },
                         className="mb-0",
                         color="primary" if current_stage != "Completed" else "success",
@@ -1304,31 +1224,21 @@ app.server.config.update(
 )
 cache = Cache(app.server)
 
-# ------------------------------------------------------------
-# LONG CALLBACK SETUP - ENHANCED
-# ------------------------------------------------------------
 cache_dir = os.path.join(BASE_DIR, "Dashboard", "cache")
 if not os.path.exists(cache_dir):
     os.makedirs(cache_dir)
 
-# Scale cache size based on available memory
 cache_size_limit = (
     PERF_SETTINGS["memory_limit"] * 1024 * 1024 * 1024 / 2
-)  # Half of allocated memory in bytes
+)
 long_callback_cache = diskcache.Cache(cache_dir, size_limit=cache_size_limit)
 long_callback_manager = DiskcacheLongCallbackManager(long_callback_cache)
 
-# Add these globals after other config globals
 progress_queue: queue.Queue[str] = queue.Queue(maxsize=10_000)
-process_handle: Optional[subprocess.Popen] = None  # Fixed type annotation
-process_lock = threading.Lock()        # guards process_handle
+process_handle: Optional[subprocess.Popen] = None
+process_lock = threading.Lock()
 
-# Helper function to run the executable in a background thread
 def _launch_generate_and_predict(cmd: list[str]) -> None:
-    """
-    Spawn GenerateAndPredict and funnel its stdout into progress_queue.
-    Runs as a daemon thread so Dash's main event loop remains free.
-    """
     global process_handle
 
     with subprocess.Popen(
@@ -1336,25 +1246,30 @@ def _launch_generate_and_predict(cmd: list[str]) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1,                       # line‑buffered
+        bufsize=1,
         universal_newlines=True,
         creationflags=(
             subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         ),
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},  # make child Python unbuffered
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
     ) as proc:
         with process_lock:
             process_handle = proc
 
-        for raw in iter(proc.stdout.readline, ""):
+        while True:
+            raw = proc.stdout.readline()
+            if not raw:
+                break
             progress_queue.put_nowait(raw.rstrip("\n"))
+            
+            if "[PROGRESS]" in raw:
+                sys.stdout.flush()
 
         progress_queue.put_nowait(f"[EXITCODE] {proc.returncode}")
 
     with process_lock:
         process_handle = None
 
-# CLI command builder
 from pathlib import Path
 def _build_command(population, perf_opts, mem_util, cpu_util, threads):
     exe_root = Path(__file__).resolve().parents[1]
@@ -1384,7 +1299,6 @@ def _build_command(population, perf_opts, mem_util, cpu_util, threads):
     ]
     return [exe_path, *flags]
 
-# Start/Cancel controller callback
 @app.callback(
     Output("progress-interval",    "disabled"),
     Output("run-model-btn",        "disabled"),
@@ -1404,7 +1318,6 @@ def start_or_cancel(run_clicks, cancel_clicks,
 
     trig = dash.callback_context.triggered[0]["prop_id"].split(".")[0]
 
-    # ---- Cancel pressed ----------------------------------------------------
     if trig == "cancel-model-btn":
         with process_lock:
             if process_handle and process_handle.poll() is None:
@@ -1413,9 +1326,8 @@ def start_or_cancel(run_clicks, cancel_clicks,
                     process_handle.wait(timeout=5)
                 except Exception:
                     process_handle.kill()
-        return True, False, {"display": "none"}   # stop polling, enable Run
+        return True, False, {"display": "none"}
 
-    # ---- Run pressed -------------------------------------------------------
     if not run_clicks:
         raise PreventUpdate
 
@@ -1424,10 +1336,8 @@ def start_or_cancel(run_clicks, cancel_clicks,
         target=_launch_generate_and_predict, args=(cmd,), daemon=True
     ).start()
 
-    return False, True, {"display": "block"}      # start polling, disable Run
+    return False, True, {"display": "block"}
 
-
-# Interval poller callback
 @app.callback(
     Output("execution-state-store", "data"),
     Input("progress-interval", "n_intervals"),
@@ -1435,7 +1345,6 @@ def start_or_cancel(run_clicks, cancel_clicks,
     prevent_initial_call=True,
 )
 def stream_progress(_tick, state):
-    """Move any new stdout lines into the JSON store expected by the UI."""
     if state is None:
         state = {
             "status":   "running",
@@ -1444,47 +1353,42 @@ def stream_progress(_tick, state):
             "output":   [],
             "error":    None,
             "remaining":"calculating...",
+            "last_update": time.time(),
         }
 
     changed = False
     while not progress_queue.empty():
         line = progress_queue.get_nowait()
         changed = True
+        state["last_update"] = time.time()
 
-        # --- normal log / progress line ------------------------------------
         state["output"].append(line)
         if len(state["output"]) > 500:
             state["output"] = state["output"][-500:]
 
-        # --- Check for successful completion message -----------------------
         if "[INFO] GenerateAndPredict completed successfully" in line:
             state["status"] = "completed"
             state["stage"] = "Completed"
             state["progress"] = 100
             continue
 
-        # --- process finished? ---------------------------------------------
         if line.startswith("[EXITCODE]"):
             try:
                 rc = int(line.split()[1])
-                # Only set status if not already set by success message
                 if state["status"] != "completed":
                     state["status"] = "completed" if rc == 0 else "error"
                     if rc != 0:
                         state["error"] = f"Process returned {rc}"
             except (ValueError, IndexError):
-                # Handle unknown exit code - don't override success status
                 if state["status"] != "completed":
                     state["status"] = "error"
                     state["error"] = "Process terminated with unknown exit code"
             
-            # Set completed stage if not already set
             if state["stage"] != "Completed":
                 state["stage"] = "Completed"
                 state["progress"] = 100
             continue
 
-        # --- progress line parsing ----------------------------------------
         m = re.search(
             r'\[PROGRESS\] stage="([^"]+)" percent=([\d.]+) remaining="([^"]+)"',
             line,
@@ -1494,13 +1398,15 @@ def stream_progress(_tick, state):
             state["progress"]  = float(m.group(2))
             state["remaining"] = m.group(3)
 
+    if state["status"] == "running" and time.time() - state["last_update"] > 10:
+        if state["remaining"] == "calculating...":
+            state["remaining"] = "calculating... (awaiting updates)"
+        elif "awaiting updates" not in state["remaining"]:
+            state["remaining"] += " (awaiting updates)"
+
     if not changed:
         raise PreventUpdate
     return state
-
-# ------------------------------------------------------------
-# DASHBOARD LAYOUT & COMPONENTS FOR MODEL EXECUTION
-# ------------------------------------------------------------
 
 model_execution_form = html.Div(
     [
@@ -1659,6 +1565,182 @@ progress_visualization = html.Div(
     style={"display": "none"},
 )
 
+# Define default ranges for sliders, handle case where df_all might be empty initially
+default_age_min = df_all["AGE"].min() if "AGE" in df_all.columns and not df_all.empty else 0
+default_age_max = df_all["AGE"].max() if "AGE" in df_all.columns and not df_all.empty else 100
+default_income_min = df_all["INCOME"].min() if "INCOME" in df_all.columns and not df_all.empty else 0
+default_income_max = df_all["INCOME"].max() if "INCOME" in df_all.columns and not df_all.empty else 100000
+default_health_min = df_all["Health_Index"].min() if "Health_Index" in df_all.columns and not df_all.empty else 0
+default_health_max = df_all["Health_Index"].max() if "Health_Index" in df_all.columns and not df_all.empty else 10
+
+# Define filter panel component
+filter_panel = html.Div(
+    [
+        html.H5(
+            "Dashboard Filters",
+            style={"color": nhs_colors["primary"], "marginBottom": "15px"},
+        ),
+        html.Label("Model Group:"),
+        dcc.Dropdown(
+            id="global-model-dropdown",
+            options=[{"label": "All", "value": "All"}] + [
+                {"label": group["label"], "value": group["label"]} for group in final_groups
+            ],
+            value="All",
+            clearable=False,
+        ),
+        html.Label("Risk Category:", style={"marginTop": "15px"}),
+        dcc.Dropdown(
+            id="global-risk-dropdown",
+            options=[
+                {"label": "All", "value": "All"},
+                {"label": "High Risk", "value": "High Risk"},
+                {"label": "Moderate Risk", "value": "Moderate Risk"},
+                {"label": "Low Risk", "value": "Low Risk"},
+                {"label": "Very Low Risk", "value": "Very Low Risk"},
+            ],
+            value="All",
+            clearable=False,
+        ),
+        html.Label("Age Range:", style={"marginTop": "15px"}),
+        dcc.RangeSlider(
+            id="age-range-slider",
+            min=default_age_min,
+            max=default_age_max,
+            step=1,
+            marks={i: str(i) for i in range(int(default_age_min), int(default_age_max)+1, 20)},
+            value=[default_age_min, default_age_max],
+            tooltip={"placement": "bottom", "always_visible": True},
+        ),
+        html.Label("Income Range:", style={"marginTop": "15px"}),
+        dcc.RangeSlider(
+            id="income-range-slider",
+            min=default_income_min,
+            max=default_income_max,
+            step=1000,
+            marks={i: f"£{i:,}" for i in range(int(default_income_min), int(default_income_max)+1, 25000)},
+            value=[default_income_min, default_income_max],
+            tooltip={"placement": "bottom", "always_visible": True},
+        ),
+        html.Label("Health Index Range:", style={"marginTop": "15px"}),
+        dcc.RangeSlider(
+            id="health-index-slider",
+            min=default_health_min,
+            max=default_health_max,
+            step=0.1,
+            marks={i: str(i) for i in range(0, 11, 2)},
+            value=[default_health_min, default_health_max],
+            tooltip={"placement": "bottom", "always_visible": True},
+        ),
+        html.Div(
+            [
+                dbc.Button(
+                    "Apply Filters",
+                    id="apply-filters-btn",
+                    color="primary",
+                    className="mr-1",
+                    style={"marginRight": "5px"},
+                ),
+                dbc.Button(
+                    "Reset Filters",
+                    id="reset-filters-btn",
+                    color="secondary",
+                    className="mr-1",
+                    style={"marginRight": "5px"},
+                ),
+            ],
+            style={
+                "marginTop": "20px",
+                "display": "flex",
+                "justifyContent": "space-between",
+            },
+        ),
+    ],
+    style={
+        "backgroundColor": nhs_colors["secondary"],
+        "padding": "15px",
+        "borderRadius": "5px",
+        "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
+    },
+)
+
+# Define patient modal component
+patient_modal = dbc.Modal(
+    [
+        dbc.ModalHeader("Patient Details"),
+        dbc.ModalBody(id="patient-detail-body"),
+        dbc.ModalFooter(
+            dbc.Button("Close", id="close-modal", className="ml-auto", n_clicks=0)
+        ),
+    ],
+    id="patient-modal",
+    size="lg",
+)
+
+# Define KPI row component - moved before app.layout
+kpi_row = html.Div(
+    [
+        dbc.Row(
+            [
+                dbc.Col(
+                    html.Div(
+                        [
+                            html.H5("Total Patients", className="kpi-title"),
+                            html.H3(f"{len(df_all):,}", className="kpi-value"),
+                        ],
+                        className="kpi-card",
+                    ),
+                    width=12, lg=3,
+                ),
+                dbc.Col(
+                    html.Div(
+                        [
+                            html.H5("High Risk Patients", className="kpi-title"),
+                            html.H3(
+                                f"{len(df_all[df_all['Risk_Category'] == 'High Risk']) if 'Risk_Category' in df_all.columns else 0:,}", 
+                                className="kpi-value"
+                            ),
+                        ],
+                        className="kpi-card",
+                        style={"backgroundColor": "#FADBD8"},
+                    ),
+                    width=12, lg=3,
+                ),
+                dbc.Col(
+                    html.Div(
+                        [
+                            html.H5("Average Health Index", className="kpi-title"),
+                            html.H3(
+                                f"{df_all['Health_Index'].mean():.2f}" if 'Health_Index' in df_all.columns else "N/A", 
+                                className="kpi-value"
+                            ),
+                        ],
+                        className="kpi-card",
+                        style={"backgroundColor": "#D5F5E3"},
+                    ),
+                    width=12, lg=3,
+                ),
+                dbc.Col(
+                    html.Div(
+                        [
+                            html.H5("Avg. Charlson Index", className="kpi-title"),
+                            html.H3(
+                                f"{df_all['CharlsonIndex'].mean():.2f}" if 'CharlsonIndex' in df_all.columns else "N/A", 
+                                className="kpi-value"
+                            ),
+                        ],
+                        className="kpi-card",
+                        style={"backgroundColor": "#D6EAF8"},
+                    ),
+                    width=12, lg=3,
+                ),
+            ],
+            className="g-2",
+        ),
+    ],
+    style={"marginBottom": "15px"},
+)
+
 tabs_component = dcc.Tabs(
     [
         dcc.Tab(
@@ -1807,7 +1889,6 @@ tabs_component = dcc.Tabs(
     style={"borderBottom": "1px solid #d6d6d6"},
 )
 
-# For high-end systems, also create a custom CSS to improve UI responsiveness
 if PERF_SETTINGS["is_high_end"]:
     performance_css = """
         .dash-graph {
@@ -1880,7 +1961,7 @@ app.layout = html.Div(
         dcc.Store(id="selected-model-store", storage_type="memory"),
         dcc.Store(id="execution-state-store", storage_type="memory"),
         dcc.Interval(
-            id="progress-interval", interval=300, disabled=True  # in milliseconds
+            id="progress-interval", interval=100, disabled=True
         ),
         dcc.Interval(id="initial-load-trigger", interval=100, max_intervals=1),
         html.Div(id="memory-management", style={"display": "none"}),
@@ -1888,7 +1969,6 @@ app.layout = html.Div(
     ],
     style={"backgroundColor": nhs_colors["background"], "padding": "15px"},
 )
-
 
 @app.callback(
     Output("filtered-data-store", "data"),
@@ -1943,6 +2023,210 @@ def filter_data(
     )
     return filtered_df.to_dict("records")
 
+@app.callback(
+    Output("geo-tab-content", "children"), 
+    [Input("filtered-data-store", "data")],
+)
+def load_geo_content(filtered_data):
+    if filtered_data is None:
+        df_to_use = df_all
+        logger.info("Geo tab: Using initial full data for layout.")
+    else:
+        df_to_use = pd.DataFrame(filtered_data)
+        logger.info(f"Geo tab: Using filtered data for layout. Shape: {df_to_use.shape}")
+    
+    if df_to_use.empty:
+        return html.Div(
+            "No data available after filtering",
+            style={"padding": "20px", "textAlign": "center"},
+        )
+    
+    min_hi = df_to_use["Health_Index"].min() if "Health_Index" in df_to_use.columns and not df_to_use.empty else 0
+    max_hi = df_to_use["Health_Index"].max() if "Health_Index" in df_to_use.columns and not df_to_use.empty else 10
+    
+    geo_filter_panel = html.Div(
+        [
+            html.H5("Geographic Filters", style={"marginBottom": "15px"}),
+            html.Label("Health Index Range:"),
+            dcc.RangeSlider(
+                id="geo-health-index-slider",
+                min=min_hi,
+                max=max_hi,
+                step=0.1,
+                marks={
+                    round(min_hi): str(round(min_hi)),
+                    round((min_hi + max_hi) / 2): str(round((min_hi + max_hi) / 2)),
+                    round(max_hi): str(round(max_hi))},
+                value=[min_hi, max_hi],
+                tooltip={"placement": "bottom", "always_visible": True},
+            ),
+            html.Div(
+                [
+                    dbc.Button(
+                        "Apply Geo Filters",
+                        id="apply-geo-filters-btn",
+                        color="primary",
+                        className="mt-2",
+                        style={"width": "100%"}
+                    ),
+                    dbc.Button(
+                        "Reset Geo Filters",
+                        id="reset-geo-filters-btn",
+                        color="secondary",
+                        className="mt-2",
+                        style={"width": "100%"}
+                    ),
+                ],
+                style={"marginTop": "15px"}
+            ),
+        ],
+        style={
+            "backgroundColor": nhs_colors["secondary"],
+            "padding": "15px",
+            "borderRadius": "5px",
+            "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
+            "marginBottom": "15px",
+        }
+    )
+    
+    map_fig = dcc.Loading(id="geo-map-loading", children=[html.Div(id="geo-map-container")])
+    enhanced_geo_disparities_fig = dcc.Loading(id="geo-disparities-map-loading", children=[html.Div(id="geo-disparities-map-container")])
+    
+    return html.Div(
+        [
+            geo_filter_panel,
+            dcc.Store(id="geo-health-filter-store", data={"range": [min_hi, max_hi]}),
+            dcc.Store(id="map-view-store", data={"center": None, "zoom": 7}),
+            collapsible_card(
+                "Geographic Distribution of Patients",
+                map_fig,
+                "geo-map",
+                initially_open=True,
+            ),
+            collapsible_card(
+                "Geographic Health Disparities",
+                enhanced_geo_disparities_fig,
+                "geo-disparities-map",
+                initially_open=True,
+            ),
+            html.Div(
+                [
+                    html.H5(
+                        "Geographic Health Risk Concentration",
+                        style={"marginBottom": "15px"},
+                    ),
+                    html.P(
+                        "This heatmap displays the concentration of patients by location, with higher intensity (red) indicating areas with higher concentration of high-risk patients. Areas in yellow to orange indicate moderate risk concentration, while areas in blue to green indicate lower risk concentration."
+                    ),
+                ],
+                style={
+                    "padding": "15px",
+                    "backgroundColor": "white",
+                    "borderRadius": "5px",
+                    "marginTop": "15px",
+                },
+            ),
+        ]
+    )
+
+@app.callback(
+    Output("geo-health-filter-store", "data"),
+    [
+        Input("apply-geo-filters-btn", "n_clicks"),
+        Input("reset-geo-filters-btn", "n_clicks")
+    ],
+    [
+        State("geo-health-index-slider", "value"),
+        State("filtered-data-store", "data"),
+        State("geo-health-filter-store", "data")
+    ]
+)
+def update_geo_filter(apply_clicks, reset_clicks, health_range, filtered_data, current_filter):
+    ctx = callback_context
+    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    
+    if trigger_id == "reset-geo-filters-btn":
+        if filtered_data:
+            df = pd.DataFrame(filtered_data)
+            min_hi = df["Health_Index"].min() if "Health_Index" in df.columns else 0
+            max_hi = df["Health_Index"].max() if "Health_Index" in df.columns else 10
+            return {"range": [min_hi, max_hi]}
+    
+    elif trigger_id == "apply-geo-filters-btn":
+        return {"range": health_range}
+    
+    return current_filter
+
+@app.callback(
+    [
+        Output("geo-map-container", "children"),
+        Output("map-view-store", "data")
+    ],
+    [
+        Input("filtered-data-store", "data"),
+        Input("geo-health-filter-store", "data"),
+        Input("map-view-store", "data")
+    ]
+)
+def update_patient_map(filtered_data, health_filter, map_view):
+    if filtered_data is None:
+        return html.Div("No data available"), map_view
+    
+    df_to_use = pd.DataFrame(filtered_data)
+    if df_to_use.empty:
+        return html.Div("No data available after filtering"), map_view
+    
+    center = map_view.get("center") if map_view else None
+    zoom = map_view.get("zoom") if map_view else 7
+    
+    map_fig = create_compact_map(
+        df_to_use,
+        height=600,
+        health_index_range=health_filter.get("range") if health_filter else None,
+        center=center,
+        zoom=zoom
+    )
+    
+    if map_fig is None:
+        return html.Div("No geographic data available"), map_view
+    
+    new_center = map_fig.layout.mapbox.center if map_fig.layout.mapbox else center
+    new_zoom = map_fig.layout.mapbox.zoom if map_fig.layout.mapbox else zoom
+    updated_view = {"center": new_center, "zoom": new_zoom}
+    
+    return dcc.Graph(figure=map_fig, id="patient-geo-map"), updated_view
+
+@app.callback(
+    Output("geo-disparities-map-container", "children"),
+    [
+        Input("filtered-data-store", "data"),
+        Input("geo-health-filter-store", "data"),
+        Input("map-view-store", "data")
+    ]
+)
+def update_disparities_map(filtered_data, health_filter, map_view):
+    if filtered_data is None:
+        return html.Div("No data available")
+    
+    df_to_use = pd.DataFrame(filtered_data)
+    if df_to_use.empty:
+        return html.Div("No data available after filtering")
+    
+    center = map_view.get("center") if map_view else None
+    zoom = map_view.get("zoom") if map_view else 7
+    
+    enhanced_geo_disparities_fig = create_enhanced_geo_disparities_map(
+        df_to_use,
+        height=600,
+        health_index_range=health_filter.get("range") if health_filter else None,
+        center=center,
+        zoom=zoom
+    )
+    
+    if enhanced_geo_disparities_fig is None:
+        return html.Div("No geographic disparities data available")
+    
+    return dcc.Graph(figure=enhanced_geo_disparities_fig, id="disparities-geo-map")
 
 @app.callback(
     Output("demographics-container", "children"), [Input("filtered-data-store", "data")]
@@ -1959,10 +2243,11 @@ def update_demographics_content(filtered_data):
             style={"padding": "20px", "textAlign": "center"},
         )
 
-    # Generate all required visualizations
     gender_chart, age_chart, risk_chart = create_demographic_charts(df_to_use)
     race_chart, healthcare_expense_chart = create_race_demographics(df_to_use)
     income_health_fig = create_income_health_chart(df_to_use)
+    inequality_chart = create_health_inequality_chart(df_to_use)
+    intersectional_charts = create_intersectional_analysis(df_to_use)
 
     return html.Div(
         [
@@ -2013,6 +2298,46 @@ def update_demographics_content(filtered_data):
             dbc.Row(
                 [
                     dbc.Col(
+                        dcc.Graph(figure=inequality_chart)
+                        if inequality_chart
+                        else "No health inequality data available",
+                        width=12,
+                    ),
+                ],
+                style={"marginTop": "15px"},
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        html.H5("Intersectional Analysis of Health Disparities", className="mt-4 mb-2"),
+                        width=12,
+                    ),
+                ],
+                style={"marginTop": "15px"},
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dcc.Graph(figure=intersectional_charts[0])
+                        if isinstance(intersectional_charts, list) and len(intersectional_charts) > 0
+                        else (dcc.Graph(figure=intersectional_charts) if intersectional_charts is not None
+                              else "No intersectional data available"),
+                        width=12,
+                        lg=6,
+                    ),
+                    dbc.Col(
+                        dcc.Graph(figure=intersectional_charts[1]) 
+                        if isinstance(intersectional_charts, list) and len(intersectional_charts) > 1
+                        else "",
+                        width=12,
+                        lg=6,
+                    ),
+                ],
+                style={"marginTop": "5px"},
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(
                         dcc.Graph(figure=income_health_fig)
                         if income_health_fig
                         else "No income-health data available",
@@ -2023,7 +2348,6 @@ def update_demographics_content(filtered_data):
             ),
         ]
     )
-
 
 @app.callback(
     Output("health-indices-tab-content", "children"),
@@ -2042,111 +2366,74 @@ def load_health_indices_content(filtered_data):
     indices_fig = create_indices_comparison(df_to_use)
     health_trend = create_health_trend_chart(df_to_use)
     corr_matrix = create_correlation_matrix(df_to_use)
+    
     return html.Div(
         [
-            collapsible_card(
-                "Health Indices Comparison",
-                dcc.Graph(figure=indices_fig)
-                if indices_fig
-                else "No health indices data available",
-                "health-indices",
-                initially_open=True,
-            ),
-            collapsible_card(
-                "Health Trends by Age Group",
-                dcc.Graph(figure=health_trend)
-                if health_trend
-                else "No health trend data available",
-                "health-trends",
-                initially_open=True,
-            ),
-            collapsible_card(
-                "Feature Correlation Matrix",
-                dcc.Graph(figure=corr_matrix)
-                if corr_matrix
-                else "No correlation data available",
-                "correlation-matrix",
-                initially_open=True,
-            ),
-        ]
-    )
-
-
-@app.callback(
-    Output("geo-tab-content", "children"), [Input("filtered-data-store", "data")]
-)
-def load_geo_content(filtered_data):
-    if filtered_data is None:
-        df_to_use = df_all
-    else:
-        df_to_use = pd.DataFrame(filtered_data)
-    if df_to_use.empty:
-        return html.Div(
-            "No data available after filtering",
-            style={"padding": "20px", "textAlign": "center"},
-        )
-    map_fig = create_compact_map(df_to_use, height=600)
-    return html.Div(
-        [
-            collapsible_card(
-                "Geographic Distribution of Patients",
-                dcc.Graph(figure=map_fig)
-                if map_fig
-                else "No geographic data available",
-                "geo-map",
-                initially_open=True,
+            html.Div(
+                [
+                    html.H5("Health Indices Comparison"),
+                    dcc.Graph(figure=indices_fig) if indices_fig else 
+                    html.Div("No health indices data available")
+                ],
+                style={
+                    "backgroundColor": "white", 
+                    "borderRadius": "5px", 
+                    "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
+                    "marginBottom": "15px",
+                    "padding": "15px"
+                }
             ),
             html.Div(
                 [
-                    html.H5(
-                        "Geographic Health Risk Concentration",
-                        style={"marginBottom": "15px"},
-                    ),
-                    html.P(
-                        "This heatmap displays the concentration of patients by location, with higher intensity (red) indicating areas with higher concentration of high-risk patients. Areas in yellow to orange indicate moderate risk concentration, while areas in blue to green indicate lower risk concentration."
-                    ),
+                    html.H5("Health Trends by Age Group"),
+                    dcc.Graph(figure=health_trend) if health_trend else 
+                    html.Div("No health trend data available")
                 ],
                 style={
-                    "padding": "15px",
-                    "backgroundColor": "white",
-                    "borderRadius": "5px",
-                    "marginTop": "15px",
-                },
+                    "backgroundColor": "white", 
+                    "borderRadius": "5px", 
+                    "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
+                    "marginBottom": "15px",
+                    "padding": "15px"
+                }
             ),
+            html.Div(
+                [
+                    html.H5("Feature Correlation Matrix"),
+                    dcc.Graph(figure=corr_matrix) if corr_matrix else 
+                    html.Div("No correlation data available")
+                ],
+                style={
+                    "backgroundColor": "white", 
+                    "borderRadius": "5px", 
+                    "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
+                    "marginBottom": "15px",
+                    "padding": "15px"
+                }
+            )
         ]
     )
-
 
 @app.callback(
     Output("model-tab-content", "children"), [Input("filtered-data-store", "data")]
 )
 def load_model_performance_content(filtered_data):
-    """
-    Load and display comprehensive model performance data from the finals directory
-    using data generated by final_three_tabnet.py
-    """
-    # Initialize storage for model results
     model_cards = []
     
-    # Load data for each model
     for group in final_groups:
         model_id = group["model"]
         model_label = group["label"]
         
-        # Path to model directory
         model_dir = os.path.join(FINALS_DIR, model_id)
         
-        # Skip if model directory doesn't exist
         if not os.path.exists(model_dir):
             continue
             
-        # Initialize storage for this model
         metrics = {}
         visualization_images = {"tsne": None, "umap": None}
         cluster_info = {}
         model_df = pd.DataFrame()
         
-        # Load metrics
         metrics_path = os.path.join(model_dir, f"{model_id}_metrics.json")
         if os.path.exists(metrics_path):
             try:
@@ -2156,7 +2443,6 @@ def load_model_performance_content(filtered_data):
             except Exception as e:
                 logger.error(f"Error loading metrics for {model_id}: {e}")
         
-        # Load cluster metrics
         cluster_metrics_path = os.path.join(model_dir, f"{model_id}_clusters.json")
         if os.path.exists(cluster_metrics_path):
             try:
@@ -2166,34 +2452,45 @@ def load_model_performance_content(filtered_data):
             except Exception as e:
                 logger.error(f"Error loading cluster metrics for {model_id}: {e}")
         
-        # Load prediction data
         pred_path = os.path.join(model_dir, f"{model_id}_predictions.csv")
         cluster_path = os.path.join(model_dir, f"{model_id}_clusters.csv")
         
         if os.path.exists(pred_path):
             try:
                 pred_df = pd.read_csv(pred_path)
-                # If we have cluster data, merge it
                 if os.path.exists(cluster_path):
                     cluster_df = pd.read_csv(cluster_path)
                     model_df = pd.merge(pred_df, cluster_df, on="Id", how="left", suffixes=('', '_cluster'))
                 else:
                     model_df = pred_df
                 
-                # If we have the original data, merge actual values
                 if filtered_data is not None:
                     df_filtered = pd.DataFrame(filtered_data)
                     if "Id" in df_filtered.columns and not df_filtered.empty:
-                        # Only keep common columns to avoid duplicates
-                        cols_to_merge = ["Id", "Health_Index"]
-                        cols_to_merge = [col for col in cols_to_merge if col in df_filtered.columns]
-                        model_df = pd.merge(model_df, df_filtered[cols_to_merge], on="Id", how="inner")
+                        required_cols = ["Id", "Health_Index", "AGE", "CharlsonIndex", 
+                                         "ElixhauserIndex", "HEALTHCARE_EXPENSES"]
+                        cols_to_merge = [col for col in required_cols if col in df_filtered.columns]
+                        
+                        missing_cols = [col for col in required_cols if col not in df_filtered.columns]
+                        if missing_cols and 'Id' in df_all.columns:
+                            logger.info(f"Attempting to get missing columns {missing_cols} from df_all")
+                            additional_cols = ["Id"] + [col for col in missing_cols if col in df_all.columns]
+                            if len(additional_cols) > 1:
+                                supplement_df = df_all[additional_cols]
+                                if not df_filtered.empty:
+                                    df_filtered = pd.merge(df_filtered, supplement_df, on="Id", how="left",
+                                                         suffixes=('', '_orig'))
+                                    cols_to_merge = list(set(cols_to_merge) | set(additional_cols))
+                        
+                        if cols_to_merge:
+                            model_df = pd.merge(model_df, df_filtered[cols_to_merge], 
+                                              on="Id", how="inner", suffixes=('', '_patient'))
                 
                 logger.info(f"Loaded prediction data for {model_id}: {len(model_df)} rows")
+                logger.info(f"Available columns in model_df: {model_df.columns.tolist()}")
             except Exception as e:
                 logger.error(f"Error loading prediction data for {model_id}: {e}")
         
-        # Load visualization images
         tsne_path = os.path.join(model_dir, f"{model_id}_tsne.png")
         umap_path = os.path.join(model_dir, f"{model_id}_umap.png")
         
@@ -2202,12 +2499,11 @@ def load_model_performance_content(filtered_data):
         if os.path.exists(umap_path):
             visualization_images["umap"] = encode_image(umap_path)
         
-        # Create metrics display
         metrics_rows = []
         
-        # Basic metrics (MSE, R2)
         if metrics:
             for metric_name, metric_value in metrics.items():
+                formatted_value = "N/A"
                 if isinstance(metric_value, (int, float)):
                     formatted_value = f"{metric_value:.4f}"
                 else:
@@ -2223,12 +2519,10 @@ def load_model_performance_content(filtered_data):
                     )
                 )
         
-        # Cluster metrics
         if cluster_info:
             metrics_rows.append(html.Hr(style={"marginTop": "15px", "marginBottom": "15px"}))
             metrics_rows.append(html.H6("Clustering Information"))
             
-            # Format k value
             if "chosen_k" in cluster_info:
                 metrics_rows.append(
                     html.Div(
@@ -2240,71 +2534,46 @@ def load_model_performance_content(filtered_data):
                     )
                 )
             
-            # Format silhouette score with alert color based on value
             if "silhouette" in cluster_info:
                 silhouette = cluster_info["silhouette"]
+                silhouette_color = "black"
+                silhouette_alert = ""
                 if isinstance(silhouette, (int, float)):
-                    silhouette_color = "#52A373" if silhouette > 0.5 else "#F0A860" if silhouette > 0.3 else "#E66C6C"
-                    metrics_rows.append(
-                        html.Div(
-                            [
-                                html.Strong("Silhouette Score: "),
-                                html.Span(
-                                    f"{silhouette:.4f}",
-                                    style={"color": silhouette_color, "fontWeight": "bold"}
-                                ),
-                                html.Span(
-                                    " (higher is better, >0.5 good, >0.3 fair, <0.3 poor)",
-                                    style={"fontSize": "smaller", "color": "#666"}
-                                )
-                            ],
-                            style={"marginBottom": "8px"}
-                        )
-                    )
+                    formatted_silhouette = f"{silhouette:.4f}"
+                    if silhouette < 0.25:
+                        silhouette_color = nhs_colors["risk_high"]
+                        silhouette_alert = " (Poor)"
+                    elif silhouette < 0.5:
+                        silhouette_color = nhs_colors["risk_medium"]
+                        silhouette_alert = " (Fair)"
+                    else:
+                        silhouette_color = nhs_colors["risk_low"]
+                        silhouette_alert = " (Good)"
+                else:
+                    formatted_silhouette = "N/A"
             
-            # Other clustering metrics
             for metric_name, metric_value in cluster_info.items():
                 if metric_name not in ["chosen_k", "silhouette"] and isinstance(metric_value, (int, float)):
-                    metrics_rows.append(
-                        html.Div(
-                            [
-                                html.Strong(f"{metric_name.replace('_', ' ').title()}: "),
-                                html.Span(f"{metric_value:.4f}")
-                            ],
-                            style={"marginBottom": "8px"}
-                        )
-                    )
+                    formatted_value = f"{metric_value:.4f}" if isinstance(metric_value, float) else str(metric_value)
         
-        # Create model performance scatterplot if we have data
         if not model_df.empty and "Health_Index" in model_df.columns and "Predicted_Health_Index" in model_df.columns:
-            # Sample the dataframe if it's too large
             plot_df = smart_sample_dataframe(model_df, max_points=3000, method="stratified")
             
-            # Create scatterplot with cluster coloring if available
             if "Cluster" in plot_df.columns:
                 perf_fig = px.scatter(
-                    plot_df,
-                    x="Health_Index",
-                    y="Predicted_Health_Index",
+                    plot_df, x="Health_Index", y="Predicted_Health_Index",
                     color="Cluster",
-                    color_continuous_scale=["#5A9BD5", "#52A373", "#F0A860", "#E66C6C"],
-                    opacity=0.7,
-                    title=f"Health Index and Prediction ({model_label}) - {len(plot_df)} patients",
+                    color_discrete_sequence=risk_colors,
                     hover_data=["Id"],
-                    labels={"Health_Index": "Actual Health Index", "Predicted_Health_Index": "Predicted Health Index"}
+                    title=f"{model_label}: Actual vs. Predicted Health Index"
                 )
             else:
                 perf_fig = px.scatter(
-                    plot_df,
-                    x="Health_Index",
-                    y="Predicted_Health_Index",
-                    opacity=0.7,
-                    title=f"Health Index and Prediction ({model_label}) - {len(plot_df)} patients",
+                    plot_df, x="Health_Index", y="Predicted_Health_Index",
                     hover_data=["Id"],
-                    labels={"Health_Index": "Actual Health Index", "Predicted_Health_Index": "Predicted Health Index"}
+                    title=f"{model_label}: Actual vs. Predicted Health Index"
                 )
 
-            # Add perfect prediction line
             x_range = [plot_df["Health_Index"].min(), plot_df["Health_Index"].max()]
             perf_fig.add_trace(
                 go.Scatter(
@@ -2316,27 +2585,6 @@ def load_model_performance_content(filtered_data):
                 )
             )
 
-            # Add regression line
-            # Try to calculate regression line coefficients
-            try:
-                slope, intercept, r_value, p_value, std_err = stats.linregress(
-                    plot_df["Health_Index"].values, 
-                    plot_df["Predicted_Health_Index"].values
-                )
-                
-                perf_fig.add_trace(
-                    go.Scatter(
-                        x=x_range,
-                        y=[slope * x_range[0] + intercept, slope * x_range[1] + intercept],
-                        mode="lines",
-                        line=dict(color="red", width=2),
-                        name=f"Regression Line (R²={r_value**2:.3f})"
-                    )
-                )
-            except Exception as e:
-                logger.warning(f"Could not add regression line: {e}")
-                
-            # Enhance layout
             perf_fig.update_layout(
                 xaxis_title="Actual Health Index",
                 yaxis_title="Predicted Health Index",
@@ -2348,7 +2596,6 @@ def load_model_performance_content(filtered_data):
         else:
             model_plot = html.Div("No prediction data available", style={"padding": "20px", "textAlign": "center"})
         
-        # Create visualization row
         visualizations = []
         if visualization_images["tsne"]:
             visualizations.append(
@@ -2378,7 +2625,13 @@ def load_model_performance_content(filtered_data):
                 )
             )
         
-        # Create model card with all information
+        risk_cluster_fig = None
+        try:
+            if all(col in model_df.columns for col in ["Health_Index", "CharlsonIndex", "ElixhauserIndex"]):
+                risk_cluster_fig = create_clinical_risk_clusters(model_df, model_name=model_label)
+        except Exception as e:
+            logger.warning(f"Could not create risk cluster plot for {model_label}: {e}")
+        
         model_card = collapsible_card(
             f"{model_label} Model Performance",
             html.Div(
@@ -2419,7 +2672,6 @@ def load_model_performance_content(filtered_data):
                         ],
                         style={"marginTop": "20px", "backgroundColor": "#f9f9f9", "padding": "15px", "borderRadius": "5px"}
                     ) if cluster_info else None,
-                    # Distribution of clusters if we have them
                     html.Div(
                         [
                             html.H6("Cluster Distribution", style={"marginBottom": "10px", "marginTop": "20px"}),
@@ -2435,6 +2687,12 @@ def load_model_performance_content(filtered_data):
                             )
                         ]
                     ) if "Cluster" in model_df.columns and not model_df.empty else None,
+                    html.Div(
+                        [
+                            html.H6("Clinical Risk Stratification", style={"marginBottom": "10px", "marginTop": "20px"}),
+                            dcc.Graph(figure=risk_cluster_fig)
+                        ]
+                    ) if risk_cluster_fig else None,
                 ]
             ),
             f"model-{model_label.lower().replace(' ', '-')}",
@@ -2443,7 +2701,6 @@ def load_model_performance_content(filtered_data):
         
         model_cards.append(model_card)
     
-    # Display a message if no models were loaded
     if not model_cards:
         return html.Div(
             [
@@ -2469,7 +2726,6 @@ def load_model_performance_content(filtered_data):
         style={"padding": "15px"}
     )
 
-
 @app.callback(
     Output("xai-tab-content", "children"), [Input("filtered-data-store", "data")]
 )
@@ -2480,7 +2736,12 @@ def load_xai_content(filtered_data):
             html.Div(
                 [
                     html.Label("Select Model:"),
-                    xai_dropdown,
+                    dcc.Dropdown(
+                        id="xai-model-dropdown",
+                        options=[{"label": group["label"], "value": group["label"]} for group in final_groups],
+                        value=final_groups[0]["label"] if final_groups else None,
+                        clearable=False,
+                    ),
                 ],
                 style={"marginBottom": "20px"},
             ),
@@ -2501,92 +2762,57 @@ def load_xai_content(filtered_data):
         style={"padding": "15px", "backgroundColor": "white", "borderRadius": "5px"},
     )
 
-
 @app.callback(
     Output("xai-content-display", "children"), [Input("xai-model-dropdown", "value")]
 )
 def update_xai_insights(selected_model):
     if not selected_model:
-        return html.Div(
-            "Please select a model to view XAI insights",
-            style={
-                "padding": "20px",
-                "textAlign": "center",
-                "color": nhs_colors["text"],
-            },
-        )
+        return html.Div("Please select a model.", style={"padding": "20px", "textAlign": "center"})
+    
     model_data = None
+    model_name = None
+    model_dir = None
     for grp in final_groups:
         if grp["label"] == selected_model:
             model_name = grp["model"]
-            model_dir = os.path.join(EXPLAIN_XAI_DIR, model_name)
+            model_dir = os.path.join(FINALS_DIR, model_name)
             break
-    shap_summary_png = (
-        os.path.join(model_dir, f"{model_name}_shap_summary.png")
-        if "model_dir" in locals()
-        else None
-    )
-    feat_imp_png = (
-        os.path.join(model_dir, f"{model_name}_feature_importance.png")
-        if "model_dir" in locals()
-        else None
-    )
-    shap_img = (
-        encode_image(shap_summary_png)
-        if shap_summary_png and os.path.exists(shap_summary_png)
-        else None
-    )
-    feat_img = (
-        encode_image(feat_imp_png)
-        if feat_imp_png and os.path.exists(feat_imp_png)
-        else None
-    )
+    
+    if not model_dir or not os.path.exists(model_dir):
+        return html.Div(f"Data directory not found for model: {selected_model}", style={"padding": "20px", "textAlign": "center", "color": "red"})
+    
+    shap_summary_png = os.path.join(model_dir, f"{model_name}_shap_summary.png")
+    feat_imp_png = os.path.join(model_dir, f"{model_name}_feature_importance.png")
+    
+    shap_img = encode_image(shap_summary_png) if os.path.exists(shap_summary_png) else None
+    feat_img = encode_image(feat_imp_png) if os.path.exists(feat_imp_png) else None
+    
     content = []
+    content.append(html.H5(f"XAI Insights for {selected_model} Model"))
+    
     if shap_img:
-        content.append(
-            html.Div(
-                [
-                    html.H5("SHAP Summary Plot", style={"marginBottom": "10px"}),
-                    html.Img(src=shap_img, style={"width": "100%"}),
-                ],
-                style={"marginBottom": "20px"},
-            )
-        )
+        content.append(html.Div([
+            html.H6("SHAP Summary Plot"),
+            html.Img(src=shap_img, style={"maxWidth": "100%", "height": "auto", "marginBottom": "15px"})
+        ]))
     if feat_img:
-        content.append(
-            html.Div(
-                [
-                    html.H5("Feature Importance", style={"marginBottom": "10px"}),
-                    html.Img(src=feat_img, style={"width": "100%"}),
-                ],
-                style={"marginBottom": "20px"},
-            )
-        )
+        content.append(html.Div([
+            html.H6("Feature Importance Plot"),
+            html.Img(src=feat_img, style={"maxWidth": "100%", "height": "auto", "marginBottom": "15px"})
+        ]))
+    
     try:
-        explanation = format_explanation(selected_model)
-        if explanation:
-            content.append(
-                html.Div(
-                    [
-                        html.H5("Model Explanation", style={"marginBottom": "10px"}),
-                        html.Div(explanation),
-                    ]
-                )
-            )
+        explanation_html = format_explanation(model_name)
+        if explanation_html:
+            content.append(html.Div(dcc.Markdown(explanation_html), style={"marginTop": "15px"}))
     except Exception as e:
-        logger.error(f"Error formatting explanation: {e}")
+        logger.error(f"Error formatting explanation for {selected_model}: {e}")
+        content.append(html.P(f"Could not load formatted explanation: {e}", style={"color": "orange"}))
+    
     if not content:
-        content.append(
-            html.Div(
-                "No XAI insights available for this model",
-                style={"padding": "20px", "textAlign": "center"},
-            )
-        )
-    return html.Div(
-        content,
-        style={"padding": "15px", "backgroundColor": "white", "borderRadius": "5px"},
-    )
-
+        content.append(html.Div("No XAI insights available for this model", style={"padding": "20px", "textAlign": "center"}))
+    
+    return html.Div(content, style={"padding": "15px", "backgroundColor": "white", "borderRadius": "5px"})
 
 @app.callback(
     Output("patient-tab-content", "children"), [Input("filtered-data-store", "data")]
@@ -2594,85 +2820,35 @@ def update_xai_insights(selected_model):
 def load_patient_data_content(filtered_data):
     if filtered_data is None:
         df_to_use = df_all
+        logger.info("Patient data tab: Using initial full data.")
     else:
         df_to_use = pd.DataFrame(filtered_data)
+        logger.info(f"Patient data tab: Using filtered data. Shape: {df_to_use.shape}")
+    
     if df_to_use.empty:
-        return html.Div(
-            "No data available after filtering",
-            style={"padding": "20px", "textAlign": "center"},
+        return html.Div("No patient data available after filtering.", style={"padding": "20px", "textAlign": "center"})
+    
+    display_cols = [col for col in ["Id", "AGE", "GENDER", "RACE", "INCOME", "Health_Index", "Risk_Category", "Cluster"] if col in df_to_use.columns]
+    df_display = sanitize_datatable_values(df_to_use[display_cols])
+    
+    return html.Div([
+        html.H4("Patient Data Table", style={"marginBottom": "15px"}),
+        dbc.Button("Export to CSV", id="export-csv-btn", color="secondary", className="mb-3"),
+        dcc.Download(id="download-dataframe-csv"),
+        dash_table.DataTable(
+            id='patient-data-table',
+            columns=[{"name": i, "id": i} for i in df_display.columns],
+            data=df_display.to_dict('records'),
+            page_size=15,
+            style_table={'overflowX': 'auto'},
+            style_cell={'textAlign': 'left', 'padding': '5px'},
+            style_header={'fontWeight': 'bold'},
+            filter_action="native",
+            sort_action="native",
+            sort_mode="multi",
+            row_selectable="single",
         )
-    display_df = df_to_use.head(1000)
-    display_cols = [
-        col
-        for col in display_df.columns
-        if col
-        in [
-            "Id",
-            "AGE",
-            "GENDER",
-            "INCOME",
-            "Health_Index",
-            "CharlsonIndex",
-            "ElixhauserIndex",
-            "Risk_Category",
-            "Group",
-            "PredictedHI_final",
-            "Cluster_final",
-        ]
-    ]
-    if not display_cols:
-        display_cols = display_df.columns[:8]
-    sanitized_data = sanitize_datatable_values(display_df[display_cols])
-    return html.Div(
-        [
-            html.H4(
-                f"Patient Data ({len(display_df)} of {len(df_to_use)} patients shown)",
-                style={"marginBottom": "15px"},
-            ),
-            html.Div(
-                [
-                    dbc.Button(
-                        "Export CSV",
-                        id="export-csv-btn",
-                        color="primary",
-                        className="me-1",
-                        style={"marginRight": "10px", "marginBottom": "15px"},
-                    ),
-                    dcc.Download(id="download-dataframe-csv"),
-                ]
-            ),
-            dash_table.DataTable(
-                id="patient-data-table",
-                columns=[{"name": i, "id": i} for i in display_cols],
-                data=sanitized_data.to_dict("records"),
-                page_size=15,
-                filter_action="native",
-                sort_action="native",
-                sort_mode="multi",
-                style_table={"overflowX": "auto"},
-                style_cell={
-                    "minWidth": "100px",
-                    "maxWidth": "300px",
-                    "whiteSpace": "normal",
-                    "textAlign": "left",
-                },
-                style_header={
-                    "backgroundColor": nhs_colors["primary"],
-                    "color": nhs_colors["secondary"],
-                    "fontWeight": "bold",
-                },
-                style_data_conditional=[
-                    {
-                        "if": {"row_index": "odd"},
-                        "backgroundColor": "rgb(245, 245, 250)",
-                    }
-                ],
-            ),
-            html.Div(id="click-patient-info", style={"marginTop": "20px"}),
-        ],
-        style={"padding": "15px", "backgroundColor": "white", "borderRadius": "5px"},
-    )
-
+    ], style={"padding": "15px", "backgroundColor": "white", "borderRadius": "5px"})
 
 @app.callback(
     Output("download-dataframe-csv", "data"),
@@ -2680,11 +2856,12 @@ def load_patient_data_content(filtered_data):
     [State("filtered-data-store", "data")],
 )
 def export_csv(n_clicks, filtered_data):
-    if n_clicks is None or not n_clicks or filtered_data is None:
+    if n_clicks is None or filtered_data is None:
         raise PreventUpdate
-    df_to_export = pd.DataFrame(filtered_data)
-    return dcc.send_data_frame(df_to_export.to_csv, "vitai_patient_data.csv")
-
+    
+    df_export = pd.DataFrame(filtered_data)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return dcc.send_data_frame(df_export.to_csv, f"patient_data_{timestamp}.csv", index=False)
 
 @app.callback(
     [Output("patient-modal", "is_open"), Output("patient-detail-body", "children")],
@@ -2692,35 +2869,24 @@ def export_csv(n_clicks, filtered_data):
     [State("patient-data-table", "data"), State("patient-modal", "is_open")],
 )
 def display_patient_details(active_cell, table_data, is_open):
-    if active_cell is None:
+    if not active_cell or not table_data:
         return is_open, no_update
-    row_id = active_cell["row"]
-    patient_data = table_data[row_id]
+    
+    row_index = active_cell['row']
+    patient_data = table_data[row_index]
+    
     details = []
-    patient_id = patient_data.get("Id", "Unknown")
     for key, value in patient_data.items():
-        if key != "Id":
-            details.append(
-                html.Div(
-                    [html.Strong(f"{key}: "), html.Span(f"{value}")],
-                    style={"marginBottom": "8px"},
-                )
-            )
-    content = html.Div(
-        [
-            html.H4(f"Patient ID: {patient_id}", style={"marginBottom": "20px"}),
-            html.Div(details),
-        ]
-    )
-    return True, content
-
+        details.append(html.Div([
+            html.Strong(f"{key.replace('_', ' ').title()}: "),
+            html.Span(str(value))
+        ]))
+    
+    return True, html.Div(details)
 
 @app.callback(Output("close-modal", "n_clicks"), [Input("close-modal", "n_clicks")])
 def close_modal(n_clicks):
-    if n_clicks:
-        return None
-    return n_clicks
-
+    return 0
 
 @app.callback(
     [
@@ -2736,55 +2902,28 @@ def close_modal(n_clicks):
     prevent_initial_call=True,
 )
 def update_progress_ui(state):
-    """Update all UI elements related to execution progress."""
-    if not state:
-        raise PreventUpdate
+    if state is None:
+        return "Initializing", [], "", {"display": "none"}, "", {"display": "none"}, "Not Started"
     
-    # Current stage display
-    current_stage = state.get("stage", "Initializing")
+    stage = state.get("stage", "Unknown")
+    progress = state.get("progress", 0)
+    output_log = "\n".join(state.get("output", []))
+    error = state.get("error")
+    status = state.get("status", "idle")
+    remaining = state.get("remaining", "N/A")
     
-    # Progress bar with stage markers
-    progress_value = state.get("progress", 0)
-    eta_remaining = state.get("remaining", "calculating...")
-    progress_bar = create_stage_markers(current_stage, progress_value, eta_remaining)
+    error_style = {"display": "block", "color": "red", "marginBottom": "15px"} if error else {"display": "none"}
+    progress_container_style = {"display": "block"} if status in ["running", "completed", "error"] else {"display": "none"}
     
-    # Log display 
-    log_lines = state.get("output", [])
-    log_content = html.Div([
-        html.Div(line, style={
-            "padding": "2px 5px",
-            "borderBottom": "1px solid #f0f0f0",
-            "color": "#333" if not line.startswith("[ERROR]") else "red"
-        }) for line in log_lines[-100:]  # Show last 100 lines
-    ])
+    status_message = f"Status: {status.capitalize()}"
+    if status == "error":
+        status_message += f" - {error}"
+    elif status == "completed":
+        status_message = "Status: Completed Successfully"
     
-    # Error display
-    error_msg = state.get("error", None)
-    error_style = {"color": "red", "marginBottom": "15px", "display": "block"} if error_msg else {"display": "none"}
+    progress_bar_component = create_stage_markers(stage, progress, remaining)
     
-    # Container visibility
-    container_style = {"display": "block"}
-    
-    # Status summary
-    status = state.get("status", "running")
-    if status == "completed":
-        status_element = html.Div([
-            html.I(className="fas fa-check-circle", style={"color": "green", "marginRight": "8px"}),
-            "Execution completed successfully"
-        ], style={"color": "green", "fontWeight": "bold"})
-    elif status == "error":
-        status_element = html.Div([
-            html.I(className="fas fa-exclamation-circle", style={"color": "red", "marginRight": "8px"}),
-            "Execution failed with errors"
-        ], style={"color": "red", "fontWeight": "bold"})
-    else:
-        status_element = html.Div([
-            html.I(className="fas fa-spinner fa-spin", style={"marginRight": "8px"}),
-            f"Running: {current_stage} ({progress_value:.1f}%)"
-        ])
-    
-    return current_stage, progress_bar, log_content, error_style, error_msg, container_style, status_element
-
+    return stage, progress_bar_component, output_log, error_style, error or "", progress_container_style, status_message
 
 @app.callback(
     [
@@ -2794,51 +2933,60 @@ def update_progress_ui(state):
     [Input("execution-state-store", "data")],
     prevent_initial_call=True
 )
-def show_results_when_complete(state):
-    """Show results section when execution completes successfully."""
-    if not state or state.get("status") != "completed":
-        return None, {"display": "none"}
+def update_results_display(state):
+    if state is None or state.get("status") != "completed" or state.get("error"):
+        return "", {"display": "none"}
     
-    # Gather results from Data/new_predictions directory
-    results_elements = []
-    try:
-        # Look for prediction files created by the process
-        new_pred_dir = os.path.join(BASE_DIR, "Data", "new_predictions")
-        if os.path.exists(new_pred_dir):
-            files = [f for f in os.listdir(new_pred_dir) if f.endswith(".csv") and "_predictions_" in f]
-            
-            if files:
-                results_elements.append(html.H4("Generated Predictions"))
-                for file in files[:5]:  # Show first 5 files
-                    model_name = file.split("_predictions_")[0]
-                    results_elements.append(html.Div([
-                        html.Strong(f"{model_name}: "),
-                        html.Span(file),
-                        html.A(" (View)", href=f"/download/{file}", target="_blank", 
-                               style={"marginLeft": "10px", "color": nhs_colors["primary"]})
-                    ], style={"marginBottom": "8px"}))
-        
-        # Check for XAI results if enabled
-        xai_dir = os.path.join(BASE_DIR, "Data", "explain_xai")
-        if os.path.exists(xai_dir):
-            xai_files = []
-            for root, dirs, files in os.walk(xai_dir):
-                for file in files:
-                    if file.endswith(".png") and ("shap" in file or "feature_importance" in file):
-                        xai_files.append(os.path.join(root, file))
-            
-            if xai_files:
-                results_elements.append(html.H4("Generated XAI Visualizations", style={"marginTop": "20px"}))
-                results_elements.append(html.P("XAI visualizations are available in the XAI Insights tab."))
+    results_content = html.Div([
+        html.H5("Execution Completed Successfully", style={"color": "green"}),
+        html.P("Model execution finished. Results may be available in the 'Data/finals' or 'Data/explain_xai' directories."),
+    ], style={"padding": "15px", "backgroundColor": "#e9f7ef", "borderRadius": "5px", "border": "1px solid green"})
     
-    except Exception as e:
-        results_elements.append(html.Div(f"Error checking results: {str(e)}", style={"color": "red"}))
-    
-    if not results_elements:
-        results_elements = [html.Div("No results found. The process may not have generated any output files.")]
-    
-    return html.Div(results_elements, style={"marginTop": "20px"}), {"display": "block"}
+    return results_content, {"display": "block", "marginTop": "15px"}
 
+collapsible_card_ids = ["demographics"]
+
+@app.callback(
+    [Output(f"{card_id}-content", "style") for card_id in collapsible_card_ids] +
+    [Output(f"{card_id}-toggle-icon", "className") for card_id in collapsible_card_ids],
+    [Input(f"{card_id}-header", "n_clicks") for card_id in collapsible_card_ids],
+    [State(f"{card_id}-content", "style") for card_id in collapsible_card_ids],
+    prevent_initial_call=True
+)
+def toggle_collapsible_cards(*args):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+    
+    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0].replace("-header", "")
+    num_cards = len(collapsible_card_ids)
+    n_clicks_list = args[:num_cards]
+    style_list = args[num_cards:]
+    
+    outputs = []
+    icon_outputs = []
+    
+    for i, card_id in enumerate(collapsible_card_ids):
+        current_style = style_list[i] or {"display": "none"}
+        is_open = current_style.get("display") == "block"
+        new_style = {"display": "none"}
+        icon_class = "fas fa-chevron-right ml-2"
+        
+        if card_id == trigger_id:
+            if is_open:
+                new_style = {"display": "none"}
+                icon_class = "fas fa-chevron-right ml-2"
+            else:
+                new_style = {"display": "block", "padding": "15px"}
+                icon_class = "fas fa-chevron-down ml-2"
+        else:
+            new_style = current_style
+            icon_class = "fas fa-chevron-down ml-2" if is_open else "fas fa-chevron-right ml-2"
+        
+        outputs.append(new_style)
+        icon_outputs.append(icon_class)
+    
+    return outputs + icon_outputs
 
 if __name__ == "__main__":
     app.run_server(debug=True)
