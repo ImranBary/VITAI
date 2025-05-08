@@ -94,8 +94,8 @@ def load_data(data_dir):
 def aggregate_codes(data_dir):
     # (This function remains unchanged, assuming CSV names are constant)
     # It can use similar globbing if needed, but for brevity we leave it as is.
-    # …
-    # (Existing code)
+    # Load all relevant CSV files and aggregate them into a single DataFrame
+    # with a new column 'TYPE' indicating the source.
     import pandas as pd, os
     conditions = pd.read_csv(os.path.join(data_dir, 'conditions.csv'), usecols=['PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION'])
     medications = pd.read_csv(os.path.join(data_dir, 'medications.csv'), usecols=['PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION'])

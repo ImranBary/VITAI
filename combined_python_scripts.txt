@@ -1,0 +1,1274 @@
+# ========================================
+# File: data_preprocessing.py
+# ========================================
+# data_preprocessing.py
+# Author: Imran Feisal 
+# Date: 31/10/2024
+# Description:
+# This script loads Synthea data from CSV files, 
+# enhances feature extraction from patient demographics,
+# handles missing data more robustly,
+# aggregates codes from conditions, medications, procedures, and observations, 
+# builds sequences of visits for each patient, and saves the processed data for modeling.
+
+import glob
+import re
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import os
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def _load_and_tag_csv(pattern, base_name):
+    """
+    Load all CSV files matching the given pattern.
+    For files whose name contains '_diff_', add columns:
+      - DifferentialTimestamp (parsed from the filename)
+      - NewData = True
+    For others, NewData = False.
+    """
+    files = glob.glob(pattern)
+    df_list = []
+    diff_regex = re.compile(rf"{base_name}_diff_(\d{{8}}_\d{{6}})")
+    for file in files:
+        try:
+            df = pd.read_csv(file)
+            # Check if file is a differential file (has _diff_ in its name)
+            m = diff_regex.search(os.path.basename(file))
+            if m:
+                timestamp = datetime.strptime(m.group(1), "%Y%m%d_%H%M%S")
+                df["DifferentialTimestamp"] = timestamp
+                df["NewData"] = True
+            else:
+                df["DifferentialTimestamp"] = pd.NaT
+                df["NewData"] = False
+            df_list.append(df)
+            logger.info(f"Loaded {file} with shape {df.shape}")
+        except Exception as e:
+            logger.error(f"Error loading {file}: {e}")
+    if df_list:
+        combined = pd.concat(df_list, ignore_index=True)
+        combined.drop_duplicates(subset=["Id"], inplace=True)
+        return combined
+    else:
+        logger.error(f"No files found for pattern {pattern}")
+        return pd.DataFrame()
+
+def load_data(data_dir):
+    """
+    Load Synthea data from CSV files (both original and differential) and preprocess patient demographics.
+    Looks for files matching:
+      - patients*.csv, encounters*.csv, etc.
+    """
+    # For patients, load all CSV files whose names start with "patients"
+    patients_pattern = os.path.join(data_dir, "patients*.csv")
+    patients = _load_and_tag_csv(patients_pattern, "patients")
+    
+    # Ensure "NewData" is preserved. If not present, default to False.
+    if "NewData" not in patients.columns:
+        patients["NewData"] = False
+
+    usecols = ['Id', 'BIRTHDATE', 'DEATHDATE', 'GENDER', 'RACE', 'ETHNICITY',
+               'HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME', 'MARITAL', 'NewData']
+    patients = patients[usecols].copy()
+    
+    # Convert dates and perform demographic processing (as before)
+    patients['BIRTHDATE'] = pd.to_datetime(patients['BIRTHDATE'], errors='coerce')
+    patients['DEATHDATE'] = pd.to_datetime(patients['DEATHDATE'], errors='coerce')
+    patients = patients[patients['BIRTHDATE'] <= patients['BIRTHDATE'].max()]
+    patients = patients[(patients['DEATHDATE'].isnull()) | (patients['DEATHDATE'] >= patients['BIRTHDATE'])]
+    
+    # Load encounters similarly (we assume no special tagging is needed here)
+    encounters_pattern = os.path.join(data_dir, "encounters*.csv")
+    encounters = _load_and_tag_csv(encounters_pattern, "encounters")
+    usecols_enc = ['Id', 'PATIENT', 'ENCOUNTERCLASS', 'START', 'STOP', 'REASONCODE', 'REASONDESCRIPTION']
+    encounters = encounters[usecols_enc].copy()
+    encounters['START'] = pd.to_datetime(encounters['START']).dt.tz_localize(None)
+    encounters['STOP'] = pd.to_datetime(encounters['STOP']).dt.tz_localize(None)
+    encounters.sort_values(by=['PATIENT', 'START'], inplace=True)
+    
+    logger.info("Data loaded and preprocessed successfully.")
+    return patients, encounters
+
+def aggregate_codes(data_dir):
+    # (This function remains unchanged, assuming CSV names are constant)
+    # It can use similar globbing if needed, but for brevity we leave it as is.
+    # …
+    # (Existing code)
+    import pandas as pd, os
+    conditions = pd.read_csv(os.path.join(data_dir, 'conditions.csv'), usecols=['PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION'])
+    medications = pd.read_csv(os.path.join(data_dir, 'medications.csv'), usecols=['PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION'])
+    procedures = pd.read_csv(os.path.join(data_dir, 'procedures.csv'), usecols=['PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION'],engine='python')# Perhaps use engine='python' if C engine faiis please fix problem
+    observations = pd.read_csv(os.path.join(data_dir, 'observations.csv'), usecols=['PATIENT', 'ENCOUNTER', 'CODE', 'DESCRIPTION', 'VALUE', 'UNITS'])
+    conditions['TYPE'] = 'condition'
+    medications['TYPE'] = 'medication'
+    procedures['TYPE'] = 'procedure'
+    observations['TYPE'] = 'observation'
+    codes = pd.concat([conditions, medications, procedures, observations], ignore_index=True)
+    codes['CODE'] = codes['CODE'].fillna('UNKNOWN')
+    codes['UNIQUE_CODE'] = codes['TYPE'] + '_' + codes['CODE'].astype(str)
+    unique_codes = codes['UNIQUE_CODE'].unique()
+    code_to_id = {code: idx for idx, code in enumerate(unique_codes)}
+    id_to_code = {idx: code for code, idx in code_to_id.items()}
+    codes['CODE_ID'] = codes['UNIQUE_CODE'].map(code_to_id)
+    logger.info("Codes aggregated successfully.")
+    return codes, code_to_id, id_to_code
+
+def build_patient_sequences(encounters, codes):
+    """
+    Build sequences of visits for each patient.
+
+    Args:
+        encounters (pd.DataFrame): Encounters data.
+        codes (pd.DataFrame): Aggregated codes.
+
+    Returns:
+        patient_sequences (dict): Mapping of patient IDs to sequences of visits.
+    """
+    # Create a mapping from ENCOUNTER to CODE_IDs
+    encounter_code_map = codes.groupby('ENCOUNTER')['CODE_ID'].apply(list)
+
+    # Merge encounters with codes
+    encounters_with_codes = encounters[['Id', 'PATIENT']].merge(encounter_code_map, left_on='Id', right_on='ENCOUNTER', how='left')
+
+    # Group by patient and collect sequences
+    patient_sequences = encounters_with_codes.groupby('PATIENT')['CODE_ID'].apply(list).to_dict()
+
+    logger.info("Patient sequences built successfully.")
+
+    return patient_sequences
+
+# ------------------------------
+# 4. Save Processed Data
+# ------------------------------
+
+def save_processed_data(patients, patient_sequences, code_to_id, output_dir):
+    patient_sequence_df = pd.DataFrame([
+        {'PATIENT': patient_id, 'SEQUENCE': visits}
+        for patient_id, visits in patient_sequences.items()
+    ])
+    patient_data = patients.merge(patient_sequence_df, how='inner', left_on='Id', right_on='PATIENT')
+    patient_data.drop(columns=['PATIENT'], inplace=True)
+    code_mappings = pd.DataFrame(list(code_to_id.items()), columns=['UNIQUE_CODE', 'CODE_ID'])
+    code_mappings.to_csv(os.path.join(output_dir, 'code_mappings.csv'), index=False)
+    # IMPORTANT: Preserve any existing processed data by appending new rows.
+    pkl_path = os.path.join(output_dir, 'patient_data_sequences.pkl')
+    if os.path.exists(pkl_path):
+        existing = pd.read_pickle(pkl_path)
+        # Append only new patients (based on Id not already present)
+        new_rows = patient_data[~patient_data["Id"].isin(existing["Id"])]
+        if not new_rows.empty:
+            updated = pd.concat([existing, new_rows], ignore_index=True)
+            updated.to_pickle(pkl_path)
+            logger.info(f"Appended {len(new_rows)} new patients to {pkl_path}.")
+        else:
+            logger.info("No new patients to append.")
+    else:
+        patient_data.to_pickle(pkl_path)
+        logger.info(f"Saved processed data to {pkl_path}.")
+
+def main():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, 'Data')
+    output_dir = data_dir
+    os.makedirs(output_dir, exist_ok=True)
+    patients, encounters = load_data(data_dir)
+    codes, code_to_id, id_to_code = aggregate_codes(data_dir)
+    patient_sequences = build_patient_sequences(encounters, codes)
+    save_processed_data(patients, patient_sequences, code_to_id, output_dir)
+
+if __name__ == '__main__':
+    main()
+
+# ========================================
+# File: health_index.py
+# ========================================
+# health_index.py
+# Author: Imran Feisal
+# Date: 31/10/2024
+# Description:
+# Calculate the composite health index for each patient by grouping SNOMED CT codes
+# into clinically meaningful categories, assigning weights, and calculating a health index.
+
+import pandas as pd
+import numpy as np
+import os
+import logging
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import RobustScaler
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ------------------------------
+# 1. Load Processed Data
+# ------------------------------
+
+def load_processed_data(output_dir):
+    """
+    Load the processed patient data and code mappings.
+
+    Args:
+        output_dir (str): Directory where processed data is stored.
+
+    Returns:
+        patient_data (pd.DataFrame): Patient data with sequences.
+        code_mappings (pd.DataFrame): Code mappings.
+    """
+    patient_data = pd.read_pickle(os.path.join(output_dir, 'patient_data_sequences.pkl'))
+    code_mappings = pd.read_csv(os.path.join(output_dir, 'code_mappings.csv'))
+    logger.info("Processed data loaded successfully.")
+    return patient_data, code_mappings
+
+# ------------------------------
+# 2. Calculate Health Indicators
+# ------------------------------
+
+def calculate_health_indicators(patient_data, data_dir):
+    """
+    Calculate health indicators for each patient.
+
+    Args:
+        patient_data (pd.DataFrame): Patient data with sequences.
+        data_dir (str): Directory where raw data is stored.
+
+    Returns:
+        patient_data (pd.DataFrame): Patient data with health indicators.
+    """
+    conditions = pd.read_csv(os.path.join(data_dir, 'conditions.csv'), usecols=[
+        'PATIENT', 'CODE', 'DESCRIPTION'
+    ])
+    encounters = pd.read_csv(os.path.join(data_dir, 'encounters.csv'), usecols=[
+        'Id', 'PATIENT', 'ENCOUNTERCLASS'
+    ])
+    medications = pd.read_csv(os.path.join(data_dir, 'medications.csv'), usecols=[
+        'PATIENT', 'CODE', 'DESCRIPTION'
+    ])
+    observations = pd.read_csv(os.path.join(data_dir, 'observations.csv'), usecols=[
+        'PATIENT', 'DESCRIPTION', 'VALUE', 'UNITS'
+    ])
+
+    # -----------------------------------------
+    # 2.1 Calculate Comorbidity Score using SNOMED CT groups
+    # -----------------------------------------
+    snomed_groups = {
+        'Cardiovascular Diseases': ['53741008', '445118002', '59621000', '22298006', '56265001'],
+        'Respiratory Diseases': ['19829001', '233604007', '118940003', '409622000', '13645005'],
+        'Diabetes': ['44054006', '73211009', '46635009', '190330002'],
+        'Cancer': ['363346000', '254637007', '363406005', '254632001'],
+        'Chronic Kidney Disease': ['709044004', '90708001', '46177005'],
+        'Neurological Disorders': ['230690007', '26929004', '193003'],
+    }
+
+    group_weights = {
+        'Cardiovascular Diseases': 3,
+        'Respiratory Diseases': 2,
+        'Diabetes': 2,
+        'Cancer': 3,
+        'Chronic Kidney Disease': 2,
+        'Neurological Disorders': 1.5,
+        'Other': 1
+    }
+
+    def find_group(code, snomed_groups):
+        for group, codes in snomed_groups.items():
+            if str(code) in codes:
+                return group
+        return 'Other'
+
+    conditions['Group'] = conditions['CODE'].apply(lambda x: find_group(x, snomed_groups))
+    conditions['Group_Weight'] = conditions['Group'].map(group_weights)
+    conditions['Group_Weight'] = conditions['Group_Weight'].fillna(1)
+    comorbidity_scores = conditions.groupby('PATIENT')['Group_Weight'].sum().reset_index()
+    comorbidity_scores.rename(columns={'Group_Weight': 'Comorbidity_Score'}, inplace=True)
+
+    # -----------------------------------------
+    # 2.2 Calculate Hospitalizations Count
+    # -----------------------------------------
+    hospitalizations = encounters[encounters['ENCOUNTERCLASS'] == 'inpatient']
+    hospitalizations_count = hospitalizations.groupby('PATIENT').size().reset_index(name='Hospitalizations_Count')
+
+    # -----------------------------------------
+    # 2.3 Calculate Medications Count
+    # -----------------------------------------
+    medications_count = medications.groupby('PATIENT')['CODE'].nunique().reset_index(name='Medications_Count')
+
+    # -----------------------------------------
+    # 2.4 Calculate Abnormal Observations Count
+    # -----------------------------------------
+    observation_thresholds = {
+        'Systolic Blood Pressure': {'min': 90, 'max': 120},
+        'Diastolic Blood Pressure': {'min': 60, 'max': 80},
+        'Body Mass Index': {'min': 18.5, 'max': 24.9},
+        'Blood Glucose Level': {'min': 70, 'max': 99},
+        'Heart Rate': {'min': 60, 'max': 100},
+    }
+    observation_mappings = {
+        'Systolic Blood Pressure': ['Systolic Blood Pressure'],
+        'Diastolic Blood Pressure': ['Diastolic Blood Pressure'],
+        'Body Mass Index': ['Body mass index (BMI) [Ratio]'],
+        'Blood Glucose Level': ['Glucose [Mass/volume] in Blood'],
+        'Heart Rate': ['Heart rate'],
+    }
+    observations['DESCRIPTION'] = observations['DESCRIPTION'].str.strip()
+    observations['VALUE'] = pd.to_numeric(observations['VALUE'], errors='coerce')
+    observations['IS_ABNORMAL'] = 0
+    for standard_desc, desc_list in observation_mappings.items():
+        thresholds = observation_thresholds.get(standard_desc, {})
+        min_val = thresholds.get('min', -np.inf)
+        max_val = thresholds.get('max', np.inf)
+        mask = observations['DESCRIPTION'].isin(desc_list)
+        observations.loc[
+            mask & observations['VALUE'].notna() & ((observations['VALUE'] < min_val) | (observations['VALUE'] > max_val)),
+            'IS_ABNORMAL'
+        ] = 1
+    abnormal_observations_count = observations.groupby('PATIENT')['IS_ABNORMAL'].sum().reset_index()
+    abnormal_observations_count.rename(columns={'IS_ABNORMAL': 'Abnormal_Observations_Count'}, inplace=True)
+
+    # -----------------------------------------
+    # 2.5 Merge Counts into patient_data
+    # -----------------------------------------
+    patient_data.set_index('Id', inplace=True)
+    patient_data = patient_data.merge(comorbidity_scores.set_index('PATIENT'), left_index=True, right_index=True, how='left')
+    patient_data = patient_data.merge(hospitalizations_count.set_index('PATIENT'), left_index=True, right_index=True, how='left')
+    patient_data = patient_data.merge(medications_count.set_index('PATIENT'), left_index=True, right_index=True, how='left')
+    patient_data = patient_data.merge(abnormal_observations_count.set_index('PATIENT'), left_index=True, right_index=True, how='left')
+    patient_data.reset_index(inplace=True)
+    indicators = ['Comorbidity_Score', 'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count']
+    patient_data[indicators] = patient_data[indicators].fillna(0)
+    logger.info("Health indicators calculated successfully.")
+    return patient_data
+
+# ------------------------------
+# 3. Calculate Composite Health Index
+# ------------------------------
+
+def calculate_health_index(patient_data):
+    """
+    Calculate the composite health index using PCA for weights.
+
+    Args:
+        patient_data (pd.DataFrame): Patient data with health indicators.
+
+    Returns:
+        patient_data (pd.DataFrame): Patient data with health index.
+    """
+    indicators = ['AGE', 'Comorbidity_Score', 'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count']
+    scaler = RobustScaler()
+    # Fill NaN values with 0 before PCA to avoid errors
+    scaled_indicators = scaler.fit_transform(patient_data[indicators].fillna(0))
+    pca = PCA(n_components=1)
+    principal_components = pca.fit_transform(scaled_indicators)
+    weights = pca.components_[0]
+    weights = weights / np.sum(np.abs(weights))
+    explained_variance = pca.explained_variance_ratio_[0]
+    logger.info(f"PCA explained variance ratio: {explained_variance:.4f}")
+    patient_data['Health_Index'] = np.dot(scaled_indicators, weights)
+    min_hi = patient_data['Health_Index'].min()
+    max_hi = patient_data['Health_Index'].max()
+    patient_data['Health_Index'] = 1 + 9 * (patient_data['Health_Index'] - min_hi) / (max_hi - min_hi + 1e-8)
+    logger.info("Composite health index calculated successfully.")
+    return patient_data
+
+# ------------------------------
+# 4. Save Health Index
+# ------------------------------
+
+def save_health_index(patient_data, output_dir):
+    """
+    Save the patient data with health index.
+
+    Args:
+        patient_data (pd.DataFrame): Patient data with health index.
+        output_dir (str): Directory to save the data.
+    """
+    patient_data.to_pickle(os.path.join(output_dir, 'patient_data_with_health_index.pkl'))
+    logger.info("Health index calculated and saved.")
+
+# ------------------------------
+# Main Execution
+# ------------------------------
+
+def main():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, 'Data')
+    output_dir = data_dir
+    os.makedirs(output_dir, exist_ok=True)
+    patient_data, code_mappings = load_processed_data(output_dir)
+    patient_data = calculate_health_indicators(patient_data, data_dir)
+    patient_data = calculate_health_index(patient_data)
+    save_health_index(patient_data, output_dir)
+
+if __name__ == '__main__':
+    main()
+
+
+# ========================================
+# File: charlson_comorbidity.py
+# ========================================
+# charlson_comorbidity.py
+# Author: Imran Feisal  
+# Date: 22/15/2024
+# Description:
+# This script computes the Charlson Comorbidity Index (CCI) from SNOMED codes.
+# It expects a CSV mapping file with columns:
+# code, coding_system, description, entity, list_name, upload_date, medcode, snomedctdescriptionid, CharlsonCategory
+# It also expects a conditions dataframe with SNOMED-CT codes.
+#
+# The output is a DataFrame with patient IDs and their computed CCI scores.
+
+import pandas as pd
+import os
+
+def load_cci_mapping(data_dir):
+    """
+    Load the Charlson mapping file.
+    Expects a CSV with columns: ['code', 'CharlsonCategory', ...].
+    If no CSV or the file is missing, this function might raise FileNotFoundError
+    or produce an empty DataFrame (depending on your needs).
+    """
+    cci_filepath = os.path.join(data_dir, 'res195-comorbidity-cci-snomed.csv')
+    cci_df = pd.read_csv(cci_filepath)
+    # Basic cleanup or renaming if needed
+    # e.g. rename columns to something standard
+    # cci_df.rename(columns={'code': 'SNOMED', 'CharlsonCategory': 'CharlsonCategory'}, inplace=True)
+    return cci_df
+
+def assign_cci_weights(CharlsonCategory):
+    """
+    Assign Charlson weights based on category.
+    As per the original Charlson Comorbidity Index:
+      - Myocardial infarction, Congestive heart failure, Peripheral vascular disease,
+        Cerebrovascular disease, Dementia, Chronic pulmonary disease, Connective tissue disease,
+        Ulcer disease, Mild liver disease, Diabetes without end-organ damage => weight 1
+      - Hemiplegia, Moderate/severe kidney disease, Diabetes with end-organ damage,
+        Any tumour (solid tumor), leukemia, lymphoma => weight 2
+      - Moderate or severe liver disease => weight 3
+      - Metastatic solid tumour, AIDS => weight 6
+    """
+    category_to_weight = {
+        'Myocardial infarction': 1,
+        'Congestive heart failure': 1,
+        'Peripheral vascular disease': 1,
+        'Cerebrovascular disease': 1,
+        'Dementia': 1,
+        'Chronic pulmonary disease': 1,
+        'Connective tissue disease': 1,
+        'Ulcer disease': 1,
+        'Mild liver disease': 1,
+        'Diabetes without end-organ damage': 1,
+        'Hemiplegia': 2,
+        'Moderate or severe kidney disease': 2,
+        'Diabetes with end-organ damage': 2,
+        'Any tumour, leukaemia, lymphoma': 2,
+        'Moderate or severe liver disease': 3,
+        'Metastatic solid tumour': 6,
+        'AIDS/HIV': 6
+    }
+    return category_to_weight.get(CharlsonCategory, 0)
+
+def compute_cci(conditions, cci_mapping):
+    """
+    Compute the Charlson Comorbidity Index for each patient from a DataFrame of SNOMED-CT codes.
+    
+    Args:
+        conditions (pd.DataFrame): Must include ['PATIENT', 'CODE'] columns where
+                                   CODE is a SNOMED code (int or str).
+        cci_mapping (pd.DataFrame): A CSV-based lookup with at least:
+                                   ['code', 'CharlsonCategory']
+                                   (Loaded from load_cci_mapping).
+                                   Some codes may be missing from the CSV.
+    
+    Returns:
+        pd.DataFrame: A DataFrame with columns ['PATIENT', 'CharlsonIndex'].
+                      If a patient has no mapped comorbidities, CharlsonIndex = 0.
+    """
+
+    # 1. Define a fallback dictionary for SNOMED -> CharlsonCategory
+    SNOMED_TO_CHARLSON = {
+        #
+        # MYOCARDIAL INFARCTION (weight 1)
+        #
+        22298006: "Myocardial infarction",      # "Myocardial infarction (disorder)"
+        401303003: "Myocardial infarction",     # "Acute ST segment elevation myocardial infarction"
+        401314000: "Myocardial infarction",     # "Acute non-ST segment elevation myocardial infarction"
+        129574000: "Myocardial infarction",     # "Postoperative myocardial infarction (disorder)"
+        #
+        # CONGESTIVE HEART FAILURE (weight 1)
+        #
+        88805009: "Congestive heart failure",   # "Chronic congestive heart failure (disorder)"
+        84114007: "Congestive heart failure",   # "Heart failure (disorder)"
+        #
+        # PERIPHERAL VASCULAR DISEASE (weight 1)
+        #
+        # -- None in list match typical “peripheral vascular disease” codes --
+        #
+        # CEREBROVASCULAR DISEASE (weight 1)
+        #
+        230690007: "Cerebrovascular disease",   # "Cerebrovascular accident (disorder)"
+        #
+        # DEMENTIA (weight 1)
+        #
+        26929004: "Dementia",                   # "Alzheimer's disease (disorder)"
+        230265002: "Dementia",                  # "Familial Alzheimer's disease of early onset (disorder)"
+        #
+        # CHRONIC PULMONARY DISEASE (weight 1)
+        #
+        185086009: "Chronic pulmonary disease", # "Chronic obstructive bronchitis (disorder)"
+        87433001:  "Chronic pulmonary disease", # "Pulmonary emphysema (disorder)"
+        195967001: "Chronic pulmonary disease", # "Asthma (disorder)" – (Some include chronic asthma under COPD)
+        233678006: "Chronic pulmonary disease", # "Childhood asthma (disorder)"
+        #
+        # CONNECTIVE TISSUE DISEASE (weight 1)
+        #
+        69896004: "Connective tissue disease",  # "Rheumatoid arthritis (disorder)"
+        200936003: "Connective tissue disease", # "Lupus erythematosus (disorder)"
+        #
+        # ULCER DISEASE (weight 1)
+        #
+        # -- None in list specifically match “peptic ulcer disease” --
+        #
+        # MILD LIVER DISEASE (weight 1)
+        #
+        128302006: "Mild liver disease",        # "Chronic hepatitis C (disorder)" 
+        61977001:  "Mild liver disease",        # "Chronic type B viral hepatitis (disorder)"
+        #
+        # DIABETES WITHOUT END-ORGAN DAMAGE (weight 1)
+        #
+        44054006: "Diabetes without end-organ damage",  # "Diabetes mellitus type 2 (disorder)"
+        #
+        # DIABETES WITH END-ORGAN DAMAGE (weight 2)
+        #
+        368581000119106: "Diabetes with end-organ damage",  # "Neuropathy due to type 2 diabetes mellitus"
+        422034002:        "Diabetes with end-organ damage",  # "Retinopathy due to type 2 diabetes mellitus"
+        127013003:        "Diabetes with end-organ damage",  # "Disorder of kidney due to diabetes mellitus"
+        90781000119102:   "Diabetes with end-organ damage",  # "Microalbuminuria due to type 2 diabetes mellitus"
+        157141000119108:  "Diabetes with end-organ damage",  # "Proteinuria due to type 2 diabetes mellitus"
+        60951000119105:   "Diabetes with end-organ damage",  # "Blindness due to type 2 diabetes mellitus"
+        97331000119101:   "Diabetes with end-organ damage",  # "Macular edema & retinopathy due to T2DM"
+        1501000119109:    "Diabetes with end-organ damage",  # "Proliferative retinopathy due to T2DM"
+        1551000119108:    "Diabetes with end-organ damage",  # "Nonproliferative retinopathy due to T2DM"
+        #
+        # HEMIPLEGIA or PARAPLEGIA (weight 2)
+        #
+        # -- None in list appear to indicate hemiplegia or paraplegia, 
+        #    e.g. “cerebral palsy” is not typically counted as hemiplegia. 
+        #
+        # MODERATE OR SEVERE KIDNEY DISEASE (weight 2)
+        #
+        # Some references only count CKD stage 3 or worse. 
+        # The user had stage 1 & 2 included, so we’ll keep that approach consistent:
+        431855005: "Moderate or severe kidney disease",  # "CKD stage 1 (disorder)"
+        431856006: "Moderate or severe kidney disease",  # "CKD stage 2 (disorder)"
+        433144002: "Moderate or severe kidney disease",  # "CKD stage 3 (disorder)"
+        431857002: "Moderate or severe kidney disease",  # "CKD stage 4 (disorder)"
+        46177005:  "Moderate or severe kidney disease",  # "End-stage renal disease (disorder)"
+        129721000119106: "Moderate or severe kidney disease",  # "Acute renal failure on dialysis (disorder)"
+        #
+        # ANY TUMOUR (solid tumor), LEUKEMIA, LYMPHOMA (weight 2)
+        #
+        254637007: "Any tumour, leukaemia, lymphoma",  # "Non-small cell lung cancer (disorder)"
+        254632001: "Any tumour, leukaemia, lymphoma",  # "Small cell carcinoma of lung (disorder)"
+        93761005:  "Any tumour, leukaemia, lymphoma",  # "Primary malignant neoplasm of colon"
+        363406005: "Any tumour, leukaemia, lymphoma",  # "Malignant neoplasm of colon"
+        109838007: "Any tumour, leukaemia, lymphoma",  # "Overlapping malignant neoplasm of colon"
+        126906006: "Any tumour, leukaemia, lymphoma",  # "Neoplasm of prostate (disorder)"
+        92691004:  "Any tumour, leukaemia, lymphoma",  # "Carcinoma in situ of prostate"
+        254837009: "Any tumour, leukaemia, lymphoma",  # "Malignant neoplasm of breast"
+        109989006: "Any tumour, leukaemia, lymphoma",  # "Multiple myeloma (disorder)"
+        93143009:  "Any tumour, leukaemia, lymphoma",  # "Leukemia disease (disorder)"
+        91861009:  "Any tumour, leukaemia, lymphoma",  # "Acute myeloid leukemia (disorder)"
+        #
+        # MODERATE OR SEVERE LIVER DISEASE (weight 3)
+        #
+        # -- None in list mention cirrhosis or advanced hepatic failure 
+        #    that we'd classify as 'moderate/severe liver disease'.
+        #
+        # METASTATIC SOLID TUMOUR (weight 6)
+        #
+        94503003: "Metastatic solid tumour",    # "Metastatic malignant neoplasm to prostate"
+        94260004: "Metastatic solid tumour",    # "Metastatic malignant neoplasm to colon"
+        #
+        # AIDS/HIV (weight 6)
+        #
+        62479008: "AIDS/HIV",   # "Acquired immune deficiency syndrome (disorder)"
+        86406008: "AIDS/HIV",   # "Human immunodeficiency virus infection (disorder)"
+    }
+
+
+    # 2. Merge conditions with cci_mapping on SNOMED code (left_on='CODE', right_on='code')
+    #    This way if a code is present in the CSV, it overrides or supplies CharlsonCategory
+    merged = conditions.merge(
+        cci_mapping[['code', 'CharlsonCategory']],
+        how='left',
+        left_on='CODE',
+        right_on='code'
+    )
+
+    # 3. Fallback: For rows where the CSV didn't provide a CharlsonCategory, try the SNOMED_TO_CHARLSON dict
+    #    If neither the CSV nor the dict have it, it remains None/NaN
+    def fallback_category(row):
+        if pd.notna(row['CharlsonCategory']):
+            return row['CharlsonCategory']
+        else:
+            # Attempt dictionary lookup
+            return SNOMED_TO_CHARLSON.get(row['CODE'], None)
+
+    merged['CharlsonCategory'] = merged.apply(fallback_category, axis=1)
+
+    # 4. Compute the Charlson weight for each row
+    merged['CCI_Weight'] = merged['CharlsonCategory'].apply(assign_cci_weights)
+
+    # 5. For each patient, sum the unique categories.
+    #    i.e. if a patient has multiple codes in the same category, only count once.
+    #    We do this by grouping on (PATIENT, CharlsonCategory) and taking the max weight
+    #    Then summing across categories for each patient
+    patient_cci = (
+        merged
+        .groupby(['PATIENT', 'CharlsonCategory'])['CCI_Weight']
+        .max()
+        .reset_index()
+    )
+
+    patient_cci_sum = (
+        patient_cci
+        .groupby('PATIENT')['CCI_Weight']
+        .sum()
+        .reset_index()
+    )
+
+    # Rename column to match the expected return type
+    patient_cci_sum.rename(columns={'CCI_Weight': 'CharlsonIndex'}, inplace=True)
+
+    return patient_cci_sum
+
+
+
+
+# ========================================
+# File: elixhauser_comorbidity.py
+# ========================================
+# elixhauser_comorbidity.py
+# Author: Imran Feisal
+# Date: 21/01/2025
+# Description:
+# This script computes the Elixhauser Comorbidity Index (ECI) from SNOMED codes.
+# It expects a conditions dataframe with SNOMED-CT codes and patient IDs.
+# The output is a DataFrame with patient IDs and their computed ECI scores.
+
+import pandas as pd
+
+def assign_eci_weights(ElixhauserCategory):
+    """
+    Assign weights for the Elixhauser Comorbidity Index based on the Van Walraven method.
+    """
+    category_to_weight = {
+        'Congestive heart failure': 7,
+        'Cardiac arrhythmias': 5,
+        'Valvular disease': 4,
+        'Pulmonary circulation disorders': 6,
+        'Peripheral vascular disorders': 2,
+        'Hypertension, uncomplicated': -1,
+        'Hypertension, complicated': 0,
+        'Paralysis': 7,
+        'Other neurological disorders': 6,
+        'Chronic pulmonary disease': 3,
+        'Diabetes, uncomplicated': 0,
+        'Diabetes, complicated': 7,
+        'Hypothyroidism': 0,
+        'Renal failure': 5,
+        'Liver disease': 11,
+        'Peptic ulcer disease': 0,
+        'AIDS/HIV': 0,
+        'Lymphoma': 9,
+        'Metastatic cancer': 14,
+        'Solid tumour without metastasis': 8,
+        'Rheumatoid arthritis/collagen vascular diseases': 4,
+        'Coagulopathy': 11,
+        'Obesity': 0,
+        'Weight loss': 6,
+        'Fluid and electrolyte disorders': 5,
+        'Blood loss anaemia': 3,
+        'Deficiency anaemias': 0,
+        'Alcohol abuse': 0,
+        'Drug abuse': 0,
+        'Psychoses': 0,
+        'Depression': -3
+    }
+    return category_to_weight.get(ElixhauserCategory, 0)
+
+def compute_eci(conditions):
+    """
+    Compute the Elixhauser Comorbidity Index for each patient from a DataFrame of SNOMED-CT codes.
+    
+    Args:
+        conditions (pd.DataFrame): Must include ['PATIENT', 'CODE'] columns where
+                                   CODE is a SNOMED code (int or str).
+    
+    Returns:
+        pd.DataFrame: A DataFrame with columns ['PATIENT', 'ElixhauserIndex'].
+                      If a patient has no mapped comorbidities, ElixhauserIndex = 0.
+    """
+
+    # Define the SNOMED to Elixhauser category mapping dictionary
+    SNOMED_TO_ELIXHAUSER = {
+        # Congestive Heart Failure
+        88805009: "Congestive heart failure",
+        84114007: "Congestive heart failure",
+
+        # Cardiac Arrhythmias
+        49436004: "Cardiac arrhythmias",
+
+        # Valvular Disease
+        48724000: "Valvular disease",
+        91434003: "Pulmonic valve regurgitation",
+        79619009: "Mitral valve stenosis",
+        111287006: "Tricuspid valve regurgitation",
+        49915006: "Tricuspid valve stenosis",
+        60573004: "Aortic valve stenosis",
+        60234000: "Aortic valve regurgitation",
+        
+        # Pulmonary Circulation Disorders
+        65710008: "Pulmonary circulation disorders",
+        706870000: "Acute pulmonary embolism",
+        67782005: "Acute respiratory distress syndrome",
+
+        # Peripheral Vascular Disorders
+        698754002: "Peripheral vascular disorders",
+
+        # Hypertension
+        59621000: "Hypertension, uncomplicated",
+
+        # Paralysis
+        698754002: "Paralysis",
+        128188000: "Paralysis",
+
+        # Other Neurological Disorders
+        69896004: "Other neurological disorders",
+        128613002: "Seizure disorder",
+
+        # Chronic Pulmonary Disease
+        195967001: "Chronic pulmonary disease",
+        233678006: "Chronic pulmonary disease",
+
+        # Diabetes, Complicated
+        368581000119106: "Diabetes, complicated",
+        422034002: "Diabetes, complicated",
+        90781000119102: "Diabetes, complicated",
+
+        # Diabetes, Uncomplicated
+        44054006: "Diabetes, uncomplicated",
+
+        # Renal Failure
+        129721000119106: "Renal failure",
+        433144002: "Renal failure",
+
+        # Liver Disease
+        128302006: "Liver disease",
+        61977001: "Liver disease",
+
+        # Peptic Ulcer Disease
+        # (Not identified in the dataset)
+
+        # AIDS/HIV
+        62479008: "AIDS/HIV",
+        86406008: "AIDS/HIV",
+
+        # Lymphoma
+        93143009: "Lymphoma",
+
+        # Metastatic Cancer
+        94503003: "Metastatic cancer",
+        94260004: "Metastatic cancer",
+
+        # Solid Tumour Without Metastasis
+        126906006: "Solid tumour without metastasis",
+        254637007: "Solid tumour without metastasis",
+
+        # Rheumatoid Arthritis / Collagen Vascular Diseases
+        69896004: "Rheumatoid arthritis/collagen vascular diseases",
+        200936003: "Rheumatoid arthritis/collagen vascular diseases",
+
+        # Coagulopathy
+        234466008: "Coagulopathy",
+
+        # Obesity
+        408512008: "Obesity",
+        162864005: "Obesity",
+
+        # Weight Loss
+        278860009: "Weight loss",
+
+        # Fluid and Electrolyte Disorders
+        389087006: "Fluid and electrolyte disorders",
+
+        # Blood Loss Anaemia
+        # (Not identified in the dataset)
+
+        # Deficiency Anaemias
+        271737000: "Deficiency anaemias",
+
+        # Alcohol Abuse
+        7200002: "Alcohol abuse",
+
+        # Drug Abuse
+        6525002: "Drug abuse",
+
+        # Psychoses
+        47505003: "Psychoses",
+
+        # Depression
+        370143000: "Depression",
+        36923009: "Depression",
+    }
+
+
+    # Map SNOMED codes to Elixhauser categories
+    conditions['ElixhauserCategory'] = conditions['CODE'].map(SNOMED_TO_ELIXHAUSER)
+
+    # Assign weights based on categories
+    conditions['ECI_Weight'] = conditions['ElixhauserCategory'].apply(assign_eci_weights)
+
+    # For each patient, sum the unique weights for each category
+    patient_eci = (
+        conditions
+        .groupby(['PATIENT', 'ElixhauserCategory'])['ECI_Weight']
+        .max()
+        .reset_index()
+    )
+
+    patient_eci_sum = (
+        patient_eci
+        .groupby('PATIENT')['ECI_Weight']
+        .sum()
+        .reset_index()
+    )
+
+    # Rename the result column for clarity
+    patient_eci_sum.rename(columns={'ECI_Weight': 'ElixhauserIndex'}, inplace=True)
+
+    return patient_eci_sum
+
+
+# ========================================
+# File: tabnet_model.py
+# ========================================
+# tabnet_model.py
+# Author: Imran Feisal
+# Date: 31/10/2024
+# Description:
+# This script builds and trains a TabNet model using hyperparameter tuning,
+# includes cross-validation, extracts feature importances, and saves the
+# trained model and results. 
+# Now accepts an output_prefix param to avoid overwriting artifacts,
+# and target_col param to decide which column to predict (Health_Index or CharlsonIndex).
+
+import numpy as np
+import pandas as pd
+import joblib
+import os
+import torch
+from pytorch_tabnet.tab_model import TabNetRegressor
+from sklearn.model_selection import train_test_split, KFold
+from sklearn.metrics import mean_squared_error, r2_score
+import logging
+import json
+import optuna
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def load_data(output_dir, input_file):
+    data_path = os.path.join(output_dir, input_file)
+    if not os.path.exists(data_path):
+        logger.error(f"Data file not found at {data_path}")
+        raise FileNotFoundError(f"Data file not found at {data_path}")
+    patient_data = pd.read_pickle(data_path)
+    logger.info("Patient data loaded.")
+    return patient_data
+
+def prepare_data(patient_data, target_col='Health_Index'):
+    """
+    Prepare the dataset for TabNet:
+      - features: columns that define the model inputs
+      - target: the column we want to predict (Health_Index or CharlsonIndex)
+    """
+    # Feature columns
+    features = patient_data[[
+        'AGE','DECEASED','GENDER','RACE','ETHNICITY','MARITAL',
+        'HEALTHCARE_EXPENSES','HEALTHCARE_COVERAGE','INCOME',
+        'Hospitalizations_Count','Medications_Count','Abnormal_Observations_Count'
+    ]].copy()
+
+    # Target column is chosen based on `target_col`
+    if target_col not in patient_data.columns:
+        raise KeyError(f"Column '{target_col}' not found in patient_data!")
+    target = patient_data[target_col]
+
+    # Setup categorical columns
+    categorical_columns = ['DECEASED','GENDER','RACE','ETHNICITY','MARITAL']
+    cat_idxs = [i for i,col in enumerate(features.columns) if col in categorical_columns]
+    cat_dims = []
+
+    for col in categorical_columns:
+        le = LabelEncoder()
+        features[col] = le.fit_transform(features[col].astype(str))
+        cat_dims.append(features[col].nunique())
+
+    # Scale continuous columns
+    continuous_columns = [col for col in features.columns if col not in categorical_columns]
+    scaler = StandardScaler()
+    features[continuous_columns] = scaler.fit_transform(features[continuous_columns])
+    joblib.dump(scaler, 'tabnet_scaler.joblib')
+
+    # Handle missing
+    features.fillna(0, inplace=True)
+
+    X = features.values
+    y = target.values.reshape(-1, 1)
+    logger.info(f"Data prepared for TabNet (target_col='{target_col}').")
+
+    return X, y, cat_idxs, cat_dims, features.columns.tolist()
+
+def objective(trial, X, y, cat_idxs, cat_dims):
+    params = {
+        'n_d': trial.suggest_int('n_d', 8, 64),
+        'n_a': trial.suggest_int('n_a', 8, 64),
+        'n_steps': trial.suggest_int('n_steps', 3, 10),
+        'gamma': trial.suggest_float('gamma', 1.0, 2.0),
+        'lambda_sparse': trial.suggest_float('lambda_sparse', 1e-6, 1e-3, log=True),
+        'optimizer_fn': torch.optim.Adam,
+        'optimizer_params': dict(lr=trial.suggest_float('lr',1e-4,1e-2,log=True)),
+        'cat_emb_dim': trial.suggest_int('cat_emb_dim',1,5),
+        'n_shared': trial.suggest_int('n_shared',1,5),
+        'n_independent': trial.suggest_int('n_independent',1,5),
+        'device_name': 'cuda',
+        'verbose': 0,
+    }
+    kf = KFold(n_splits=3, shuffle=True, random_state=42)
+    mse_list = []
+
+    for train_idx, valid_idx in kf.split(X):
+        X_train_fold, X_valid_fold = X[train_idx], X[valid_idx]
+        y_train_fold, y_valid_fold = y[train_idx], y[valid_idx]
+
+        model = TabNetRegressor(cat_idxs=cat_idxs, cat_dims=cat_dims, **params)
+        model.fit(
+            X_train=X_train_fold, y_train=y_train_fold,
+            eval_set=[(X_valid_fold, y_valid_fold)],
+            eval_metric=['rmse'],
+            max_epochs=50,
+            patience=10,
+            batch_size=4096,
+            virtual_batch_size=512
+        )
+        preds = model.predict(X_valid_fold)
+        mse = mean_squared_error(y_valid_fold, preds)
+        mse_list.append(mse)
+    return np.mean(mse_list)
+
+def hyperparameter_tuning(X, y, cat_idxs, cat_dims):
+    study = optuna.create_study(direction='minimize')
+    study.optimize(lambda trial: objective(trial, X, y, cat_idxs, cat_dims), n_trials=7)
+    logger.info(f"Best trial: {study.best_trial.params}")
+    return study.best_trial.params
+
+def train_tabnet(X_train, y_train, X_valid, y_valid, cat_idxs, cat_dims, best_params, output_prefix='tabnet'):
+    optimizer_fn = torch.optim.Adam
+    optimizer_params = {'lr': best_params.pop('lr')}
+    best_params.update({
+        'optimizer_fn': optimizer_fn,
+        'optimizer_params': optimizer_params,
+        'device_name': 'cuda',
+        'verbose': 1
+    })
+    regressor = TabNetRegressor(cat_idxs=cat_idxs, cat_dims=cat_dims, **best_params)
+    regressor.fit(
+        X_train=X_train,
+        y_train=y_train,
+        eval_set=[(X_valid, y_valid)],
+        eval_metric=['rmse'],
+        max_epochs=200,
+        patience=20,
+        batch_size=8192,
+        virtual_batch_size=1024
+    )
+    regressor.save_model(f'{output_prefix}_model')
+    logger.info(f"TabNet model trained and saved -> {output_prefix}_model.zip (among others).")
+    return regressor
+
+def main(input_file='patient_data_with_health_index.pkl',
+         output_prefix='tabnet',
+         target_col='Health_Index'):
+    """
+    Args:
+        input_file (str): Pickle file containing patient data
+        output_prefix (str): Unique prefix to avoid overwriting model artifacts
+        target_col (str): Which column to predict ('Health_Index' or 'CharlsonIndex')
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(script_dir, 'Data')
+    patient_data = load_data(output_dir, input_file)
+
+    # Prepare data for the specified target column
+    X, y, cat_idxs, cat_dims, feature_columns = prepare_data(patient_data, target_col=target_col)
+
+    # Train/valid/test splits
+    X_train_full, X_test, y_train_full, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
+    X_train, X_valid, y_train, y_valid = train_test_split(X_train_full, y_train_full, test_size=0.2, random_state=42)
+
+    # Hyperparameter tuning
+    best_params = hyperparameter_tuning(X_train, y_train, cat_idxs, cat_dims)
+    regressor = train_tabnet(X_train, y_train, X_valid, y_valid, cat_idxs, cat_dims, best_params, output_prefix=output_prefix)
+
+    # Evaluate on test set
+    test_preds = regressor.predict(X_test)
+    test_mse = mean_squared_error(y_test, test_preds)
+    test_r2 = r2_score(y_test, test_preds)
+    logger.info(f"Test MSE: {test_mse:.4f}")
+    logger.info(f"Test R2: {test_r2:.4f}")
+
+    # Save predictions
+    # If 'Id' is present in the DF, we can map it; otherwise we do a simple index-based approach
+    num_test = len(X_test)
+    pred_col_name = ("Predicted_Health_Index" if target_col == "Health_Index" 
+                     else "Predicted_CharlsonIndex")
+
+    if 'Id' in patient_data.columns:
+        # Take the last 'num_test' rows as test IDs
+        test_ids = patient_data.iloc[-num_test:]['Id'].values
+    else:
+        # Fallback if not present
+        test_ids = np.arange(num_test)
+
+    predictions_df = pd.DataFrame({
+        'Id': test_ids,
+        pred_col_name: test_preds.flatten()
+    })
+    pred_csv = f'{output_prefix}_predictions.csv'
+    predictions_df.to_csv(pred_csv, index=False)
+    logger.info(f"TabNet predictions saved -> {pred_csv}")
+
+    # Save metrics
+    metrics = {
+        "test_mse": test_mse,
+        "test_r2": test_r2
+    }
+    metrics_file = f"{output_prefix}_metrics.json"
+    with open(metrics_file, "w") as f:
+        json.dump(metrics, f)
+    logger.info(f"TabNet metrics saved -> {metrics_file}")
+
+if __name__ == '__main__':
+    main()
+
+
+# ========================================
+# File: vae_model.py
+# ========================================
+# vae_model.py
+# Author: Imran Feisal
+# Date: 31/10/2024
+# Description:
+# Updated script to address variable duplication warnings in TensorFlow.
+# This script trains a VAE model, now accepts an input_file and output_prefix parameters
+# so as to avoid overwriting model artifacts. 
+# 
+# UPDATe 19/01/2025 this script now saves a JSON file with final
+# training and validation losses, named <output_prefix>_vae_metrics.json.
+
+import numpy as np
+import pandas as pd
+import joblib
+import os
+import json
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+import logging
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+
+# Set random seeds for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def load_data(output_dir, input_file):
+    patient_data = pd.read_pickle(os.path.join(output_dir, input_file))
+    return patient_data
+
+def prepare_data(patient_data):
+    features = patient_data[[
+        'AGE', 'GENDER', 'RACE', 'ETHNICITY', 'MARITAL',
+        'HEALTHCARE_EXPENSES', 'HEALTHCARE_COVERAGE', 'INCOME',
+        'Hospitalizations_Count', 'Medications_Count', 'Abnormal_Observations_Count'
+    ]].copy()
+
+    patient_ids = patient_data['Id'].values
+    categorical_features = ['GENDER', 'RACE', 'ETHNICITY', 'MARITAL']
+    continuous_features = [col for col in features.columns if col not in categorical_features]
+
+    embedding_info = {}
+    input_data = {}
+
+    for col in categorical_features:
+        le = LabelEncoder()
+        features[col] = le.fit_transform(features[col].astype(str))
+        joblib.dump(le, f'label_encoder_{col}.joblib')
+        vocab_size = features[col].nunique()
+        embedding_dim = min(50, (vocab_size + 1)//2)
+        embedding_info[col] = {'vocab_size': vocab_size, 'embedding_dim': embedding_dim}
+        input_data[col] = features[col].values
+
+    scaler = StandardScaler()
+    scaled_continuous = scaler.fit_transform(features[continuous_features])
+    joblib.dump(scaler, 'scaler_vae.joblib')
+    input_data['continuous'] = scaled_continuous
+
+    logger.info("Data prepared for VAE.")
+    return input_data, embedding_info, patient_ids, continuous_features, categorical_features
+
+def build_vae(input_dim, embedding_info, continuous_dim, latent_dim=20):
+    inputs = {}
+    encoded_features = []
+
+    # Embeddings for categorical
+    for col, info in embedding_info.items():
+        input_cat = keras.Input(shape=(1,), name=f'input_{col}')
+        embedding_layer = layers.Embedding(
+            input_dim=info['vocab_size'], 
+            output_dim=info['embedding_dim'], 
+            name=f'embedding_{col}'
+        )(input_cat)
+        flat_embedding = layers.Flatten()(embedding_layer)
+        inputs[f'input_{col}'] = input_cat
+        encoded_features.append(flat_embedding)
+
+    # Continuous input
+    input_cont = keras.Input(shape=(continuous_dim,), name='input_continuous')
+    inputs['input_continuous'] = input_cont
+    encoded_features.append(input_cont)
+
+    concatenated_features = layers.concatenate(encoded_features)
+    h = layers.Dense(256, activation='relu')(concatenated_features)
+    h = layers.Dense(128, activation='relu')(h)
+    z_mean = layers.Dense(latent_dim, name='z_mean')(h)
+    z_log_var = layers.Dense(latent_dim, name='z_log_var')(h)
+
+    def sampling(args):
+        z_mean, z_log_var = args
+        epsilon = tf.keras.backend.random_normal(shape=(tf.shape(z_mean)[0], latent_dim))
+        return z_mean + tf.exp(0.5*z_log_var)*epsilon
+
+    z = layers.Lambda(sampling, name='z')([z_mean, z_log_var])
+
+    # Decoder
+    decoder_inputs = keras.Input(shape=(latent_dim,), name='z_sampling')
+    h_decoder = layers.Dense(128, activation='relu')(decoder_inputs)
+    h_decoder = layers.Dense(256, activation='relu')(h_decoder)
+    reconstructed = layers.Dense(input_dim, activation='linear')(h_decoder)
+
+    encoder = keras.Model(inputs=inputs, outputs=[z_mean, z_log_var, z], name='encoder')
+    decoder = keras.Model(inputs=decoder_inputs, outputs=reconstructed, name='decoder')
+
+    outputs = decoder(encoder(inputs)[2])
+    vae = keras.Model(inputs=inputs, outputs=outputs, name='vae')
+
+    reconstruction_loss = tf.reduce_mean(tf.square(concatenated_features - outputs))
+    kl_loss = -0.5 * tf.reduce_mean(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
+    vae_loss = reconstruction_loss + kl_loss
+    vae.add_loss(vae_loss)
+    vae.compile(optimizer='adam')
+
+    logger.info("VAE model built.")
+    return vae, encoder, decoder
+
+def train_vae(vae, input_data, output_prefix='vae'):
+    x_train = {
+        f'input_{key}': value for key, value in input_data.items() 
+        if key != 'continuous'
+    }
+    x_train['input_continuous'] = input_data['continuous']
+
+    early_stopping = keras.callbacks.EarlyStopping(
+        monitor='val_loss', patience=10, restore_best_weights=True
+    )
+    checkpoint = keras.callbacks.ModelCheckpoint(
+        f'{output_prefix}_best_model.h5', 
+        monitor='val_loss', 
+        save_best_only=True
+    )
+
+    # Fit returns a History object with training & validation losses
+    history = vae.fit(
+        x_train, 
+        epochs=100, 
+        batch_size=512, 
+        validation_split=0.2, 
+        callbacks=[early_stopping, checkpoint],
+        verbose=1
+    )
+    vae.save(f'{output_prefix}_model', save_format='tf')
+    logger.info(f"VAE trained and saved with prefix={output_prefix}.")
+
+    # Extract final losses from history
+    # Because of early stopping, 'val_loss' might not correspond to the final epoch
+    # We take the minimal val_loss across epochs as a reference
+    final_train_loss = float(history.history['loss'][-1])  # last epoch's training loss
+    final_val_loss = float(min(history.history['val_loss']))  # best validation loss
+
+    # Save them to a JSON for easier retrieval
+    metrics_json = {
+        "final_train_loss": final_train_loss,
+        "best_val_loss": final_val_loss
+    }
+    with open(f"{output_prefix}_vae_metrics.json", "w") as f:
+        json.dump(metrics_json, f, indent=2)
+    logger.info(f"[METRICS] VAE training/validation losses saved to {output_prefix}_vae_metrics.json")
+
+def save_latent_features(encoder, input_data, patient_ids, output_prefix='vae'):
+    x_pred = {
+        f'input_{key}': value for key, value in input_data.items() 
+        if key != 'continuous'
+    }
+    x_pred['input_continuous'] = input_data['continuous']
+    z_mean, _, _ = encoder.predict(x_pred)
+
+    df = pd.DataFrame(z_mean)
+    df['Id'] = patient_ids
+    csv_name = f'{output_prefix}_latent_features.csv'
+    df.to_csv(csv_name, index=False)
+    logger.info(f"Latent features saved to {csv_name}.")
+
+def main(input_file='patient_data_with_health_index.pkl', output_prefix='vae'):
+    """
+    Args:
+        input_file (str): Name of the input pickle file containing patient data.
+        output_prefix (str): A unique prefix for saving model artifacts 
+                             (latent CSV, model files, etc.).
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(script_dir, 'Data')
+    patient_data = load_data(output_dir, input_file)
+    input_data, embedding_info, patient_ids, continuous_features, categorical_features = prepare_data(patient_data)
+
+    input_dim = sum(info['embedding_dim'] for info in embedding_info.values()) + len(continuous_features)
+    continuous_dim = len(continuous_features)
+    vae, encoder, decoder = build_vae(input_dim, embedding_info, continuous_dim)
+
+    train_vae(vae, input_data, output_prefix=output_prefix)
+    encoder.save(f'{output_prefix}_encoder', save_format='tf')
+    decoder.save(f'{output_prefix}_decoder', save_format='tf')
+
+    save_latent_features(encoder, input_data, patient_ids, output_prefix=output_prefix)
+
+if __name__ == '__main__':
+    main()

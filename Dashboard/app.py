@@ -13,6 +13,7 @@ import threading
 import queue
 import signal
 import re
+import shlex  # Add this import
 from datetime import datetime
 from typing import Optional, Union
 
@@ -43,6 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import multiprocessing
 import platform
+import paramiko
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -83,14 +85,69 @@ risk_colors = [
 
 intersectional_colors = ["#E66C6C", "#F0A860", "#52A373"]
 
+# --- Remote execution -------------------------------------------------
+SSH_ENABLED_DEFAULT = True                  # default option
+SSH_HOST         = "imran@192.168.137.87"   # Direct ethernet IP
+SSH_KEY_PATH     = os.path.expanduser("~/.ssh/id_ed25519")   # private key
+REMOTE_WORKDIR   = "/home/imran/Desktop/VITAI"
+
+# Direct ethernet connection settings
+DIRECT_ETHERNET_IP = "192.168.137.87"  # Your Pi's IP from direct connection
+DIRECT_ETHERNET_USER = "imran"         # Your Pi's username
+
+def get_raspberry_pi_ip():
+    """Try to resolve Raspberry Pi IP address using multiple methods"""
+    try:
+        # For direct ethernet connection, try the known IP first
+        import subprocess
+        import platform
+        
+        def ping(host):
+            """
+            Returns True if host responds to a ping request
+            """
+            # Ping command parameters as function of OS
+            param = '-n' if platform.system().lower() == 'windows' else '-c'
+            command = ['ping', param, '1', host]
+            
+            try:
+                return subprocess.call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+            except:
+                return False
+
+        # Try direct ethernet IP first
+        if ping(DIRECT_ETHERNET_IP):
+            return DIRECT_ETHERNET_IP
+
+        # If direct connection fails, try other methods
+        import socket
+        try:
+            socket.gethostbyname("raspberrypi.local")
+            return "raspberrypi.local"
+        except socket.gaierror:
+            pass
+
+        return None
+    except Exception as e:
+        logger.error(f"Error resolving Raspberry Pi IP: {str(e)}")
+        return None
+
 def get_system_resources():
     """Detect system resources and optimize settings accordingly"""
     cpu_count = multiprocessing.cpu_count()
     total_memory_gb = psutil.virtual_memory().total / (1024 * 1024 * 1024)
+    cpu_percent = psutil.cpu_percent(interval=1)
+    memory = psutil.virtual_memory()
+    memory_percent = memory.percent
+    memory_used_gb = memory.used / (1024 * 1024 * 1024)
+    memory_total_gb = memory.total / (1024 * 1024 * 1024)
 
     system_info = {
         "cpu_count": cpu_count,
-        "memory_gb": total_memory_gb,
+        "cpu_percent": cpu_percent,
+        "memory_total_gb": memory_total_gb,
+        "memory_used_gb": memory_used_gb,
+        "memory_percent": memory_percent,
         "platform": platform.system(),
         "processor": platform.processor(),
         "is_high_end": cpu_count >= 8 and total_memory_gb >= 32,
@@ -111,9 +168,127 @@ def get_system_resources():
     logger.info(f"System resources detected: {system_info}")
     logger.info(f"Performance settings: {optimization_settings}")
 
-    return optimization_settings
+    return system_info, optimization_settings
 
-PERF_SETTINGS = get_system_resources()
+def get_remote_system_resources():
+    """Get system resources from Raspberry Pi via SSH"""
+    try:
+        # For direct ethernet connection, use the known IP
+        hostname = DIRECT_ETHERNET_IP
+        username = DIRECT_ETHERNET_USER
+
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        # Connect with timeout and retry
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Attempting SSH connection to {hostname} as {username}")
+                ssh.connect(
+                    hostname,
+                    username=username,
+                    key_filename=SSH_KEY_PATH,
+                    timeout=5,
+                    banner_timeout=5
+                )
+                logger.info("SSH connection successful")
+                break
+            except paramiko.AuthenticationException as e:
+                logger.error(f"SSH Authentication failed: {str(e)}")
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(1)
+            except paramiko.SSHException as e:
+                logger.error(f"SSH error: {str(e)}")
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"Connection attempt {attempt + 1} failed: {str(e)}")
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(1)
+        
+        # Get CPU info using mpstat for more accurate readings
+        stdin, stdout, stderr = ssh.exec_command("mpstat 1 1 | tail -n 1 | awk '{print 100-$NF}'")
+        cpu_percent = float(stdout.read().decode().strip())
+        
+        # Get memory info using free command
+        stdin, stdout, stderr = ssh.exec_command("free -m | grep Mem")
+        mem_info = stdout.read().decode().strip().split()
+        memory_total_mb = int(mem_info[1])
+        memory_used_mb = int(mem_info[2])
+        memory_percent = (memory_used_mb / memory_total_mb) * 100
+        
+        # Get CPU count
+        stdin, stdout, stderr = ssh.exec_command("nproc")
+        cpu_count = int(stdout.read().decode().strip())
+        
+        # Get temperature with error handling
+        try:
+            stdin, stdout, stderr = ssh.exec_command("vcgencmd measure_temp")
+            temp = stdout.read().decode().strip().replace("temp=", "").replace("'C", "")
+            temperature = float(temp)
+        except:
+            temperature = None
+        
+        # Get uptime
+        stdin, stdout, stderr = ssh.exec_command("uptime -p")
+        uptime = stdout.read().decode().strip()
+        
+        # Get load average
+        stdin, stdout, stderr = ssh.exec_command("cat /proc/loadavg | awk '{print $1}'")
+        load_avg = float(stdout.read().decode().strip())
+        
+        system_info = {
+            "cpu_count": cpu_count,
+            "cpu_percent": cpu_percent,
+            "memory_total_gb": memory_total_mb / 1024,
+            "memory_used_gb": memory_used_mb / 1024,
+            "memory_percent": memory_percent,
+            "temperature": temperature,
+            "platform": "Raspberry Pi",
+            "processor": "ARM",
+            "is_high_end": False,
+            "uptime": uptime,
+            "load_average": load_avg,
+            "hostname": hostname
+        }
+        
+        ssh.close()
+        return system_info
+        
+    except paramiko.AuthenticationException:
+        logger.error("SSH Authentication failed")
+        return None
+    except paramiko.SSHException as e:
+        logger.error(f"SSH error: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to get remote system resources: {str(e)}")
+        return None
+
+def create_system_monitor_card():
+    """Create a card to display system resources"""
+    return dbc.Card(
+        [
+            dbc.CardHeader("System Resources", className="text-center"),
+            dbc.CardBody(
+                [
+                    html.Div(id="system-resources-content"),
+                    dcc.Interval(
+                        id="system-resources-interval",
+                        interval=2000,  # Update every 2 seconds
+                        n_intervals=0
+                    )
+                ]
+            )
+        ],
+        className="mb-4"
+    )
+
+SYSTEM_INFO, PERF_SETTINGS = get_system_resources()
 
 if os.path.exists(PICKLE_ALL):
     if PERF_SETTINGS["is_high_end"]:
@@ -621,7 +796,8 @@ def create_enhanced_geo_disparities_map(df, height=600, health_index_range=None,
                 center=center,
                 zoom=zoom
             ),
-            margin={"r": 0, "t": 40, "l": 0, "b": 0},
+            margin={"r": 20, "t": 40, "l": 20, "b": 20},
+            autosize=True,
         )
         
     elif has_race and has_health_index:
@@ -652,7 +828,8 @@ def create_enhanced_geo_disparities_map(df, height=600, health_index_range=None,
                     center=center,
                     zoom=zoom
                 ),
-                margin={"r": 0, "t": 40, "l": 0, "b": 0},
+                margin={"r": 20, "t": 40, "l": 20, "b": 20},
+                autosize=True,
             )
         else:
             fig = go.Figure(layout={
@@ -698,7 +875,8 @@ def create_enhanced_geo_disparities_map(df, height=600, health_index_range=None,
                     center=center,
                     zoom=zoom
                 ),
-                margin={"r": 0, "t": 40, "l": 0, "b": 0},
+                margin={"r": 20, "t": 40, "l": 20, "b": 20},
+                autosize=True,
             )
         else:
             fig = go.Figure(layout={
@@ -729,492 +907,279 @@ def create_enhanced_geo_disparities_map(df, height=600, health_index_range=None,
     logger.info("Successfully created enhanced geographic disparities map.")
     return fig
 
-def create_health_inequality_chart(df, max_points=3000):
-    if df is None or df.empty:
-        return None
-        
-    required_cols = ["Health_Index", "INCOME", "RACE", "AGE"]
-    if not all(col in df.columns for col in required_cols):
-        fig = go.Figure()
-        fig.add_annotation(
-            text="Missing required data for health inequality analysis",
-            xref="paper", yref="paper",
-            x=0.5, y=0.5,
-            showarrow=False,
-            font=dict(size=14)
-        )
-        fig.update_layout(height=400, title="Health Inequality Analysis - Missing Data")
-        return fig
-        
-    if len(df) > max_points:
-        df_sample = df.sample(max_points, random_state=42)
-    else:
-        df_sample = df.copy()
-        
-    df_sample['Income_Quartile'] = pd.qcut(
-        df_sample['INCOME'], 
-        q=4, 
-        labels=['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']
-    )
-    
-    income_health = df_sample.groupby('Income_Quartile')['Health_Index'].agg(['mean', 'count']).reset_index()
-    income_health.columns = ['Income_Quartile', 'Avg_Health_Index', 'Count']
-    
-    total_count = income_health['Count'].sum()
-    income_health['Percentage'] = (income_health['Count'] / total_count * 100).round(1)
-    
-    if len(income_health) >= 4:
-        highest_health = income_health.iloc[-1]['Avg_Health_Index']
-        lowest_health = income_health.iloc[0]['Avg_Health_Index']
-        inequality_ratio = highest_health / lowest_health if lowest_health > 0 else float('nan')
-    else:
-        inequality_ratio = float('nan')
-    
-    fig = px.bar(
-        income_health,
-        x='Income_Quartile',
-        y='Avg_Health_Index',
-        color='Income_Quartile',
-        color_discrete_sequence=['#5A9BD5', '#52A373', '#F0A860', '#E66C6C'],
-        text='Percentage',
-        labels={
-            'Income_Quartile': 'Income Quartile',
-            'Avg_Health_Index': 'Average Health Index'
-        },
-        title='Health Inequality Across Income Groups'
-    )
-    
-    fig.update_traces(texttemplate='%{text}%', textposition='outside')
-    
-    if not pd.isna(inequality_ratio):
-        fig.add_annotation(
-            text=f"Health Inequality Ratio: {inequality_ratio:.2f}",
-            xref="paper", yref="paper",
-            x=0.5, y=1.05,
-            showarrow=False,
-            font=dict(size=12, color="red" if inequality_ratio > 1.5 else "black"),
-            bgcolor="rgba(255, 255, 255, 0.8)",
-            bordercolor="black",
-            borderwidth=1,
-            borderpad=4
-        )
-    
-    fig.update_layout(
-        xaxis_title="Income Quartile",
-        yaxis_title="Average Health Index",
-        xaxis={'categoryorder': 'array', 'categoryarray': ['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']},
-        height=400
-    )
-    
-    return fig
-
-def sanitize_datatable_values(df):
-    """Sanitize values for display in DataTable"""
-    if df is None or df.empty:
-        return pd.DataFrame()
-    
-    df_copy = df.copy()
-    
-    # Convert numeric values to formatted strings
-    for col in df_copy.select_dtypes(include=['float']).columns:
-        df_copy[col] = df_copy[col].round(2).astype(str)
-    
-    # Convert date columns to formatted strings
-    date_cols = [col for col in df_copy.columns if 'date' in col.lower() or 'time' in col.lower()]
-    for col in date_cols:
-        if col in df_copy.columns and pd.api.types.is_datetime64_any_dtype(df_copy[col]):
-            df_copy[col] = df_copy[col].dt.strftime('%Y-%m-%d')
-    
-    # Replace NaN values with empty strings
-    df_copy = df_copy.fillna('')
-    
-    return df_copy
-
-def create_demographic_charts(df):
-    """Create charts for demographic data"""
-    if df is None or df.empty:
-        return None, None, None
-    
-    # Gender distribution
-    if "GENDER" in df.columns:
-        gender_counts = df["GENDER"].value_counts().reset_index()
-        gender_counts.columns = ["Gender", "Count"]
-        gender_fig = px.pie(
-            gender_counts,
-            values="Count",
-            names="Gender",
-            title="Gender Distribution",
-            color_discrete_sequence=["#5A9BD5", "#F0A860", "#52A373"],
-        )
-        gender_fig.update_layout(height=300)
-    else:
-        gender_fig = None
-    
-    # Age distribution
-    if "Age_Group" in df.columns:
-        age_counts = df["Age_Group"].value_counts().reset_index()
-        age_counts.columns = ["Age Group", "Count"]
-        age_fig = px.bar(
-            age_counts,
-            x="Age Group",
-            y="Count",
-            title="Age Distribution",
-            color_discrete_sequence=["#5A9BD5"],
-        )
-        age_fig.update_layout(height=300)
-    else:
-        age_fig = None
-    
-    # Risk distribution
-    if "Risk_Category" in df.columns:
-        risk_counts = df["Risk_Category"].value_counts().reset_index()
-        risk_counts.columns = ["Risk Category", "Count"]
-        risk_fig = px.bar(
-            risk_counts,
-            x="Risk Category",
-            y="Count",
-            title="Risk Distribution",
-            color="Risk Category",
-            color_discrete_map={
-                "Very Low Risk": nhs_colors["risk_verylow"],
-                "Low Risk": nhs_colors["risk_low"],
-                "Moderate Risk": nhs_colors["risk_medium"],
-                "High Risk": nhs_colors["risk_high"],
-            },
-        )
-        risk_fig.update_layout(height=300)
-    else:
-        risk_fig = None
-    
-    return gender_fig, age_fig, risk_fig
-
-def create_race_demographics(df):
-    """Create race distribution and healthcare expense charts"""
-    if df is None or df.empty:
-        return None, None
-    
-    # Race distribution
-    if "RACE" in df.columns:
-        race_counts = df["RACE"].value_counts().reset_index()
-        race_counts.columns = ["Race", "Count"]
-        race_fig = px.pie(
-            race_counts,
-            values="Count",
-            names="Race",
-            title="Race Distribution",
-            hole=0.4,
-        )
-        race_fig.update_layout(height=400)
-    else:
-        race_fig = None
-    
-    # Healthcare expenses
-    if "HEALTHCARE_EXPENSES" in df.columns and "Risk_Category" in df.columns:
-        expenses_by_risk = df.groupby("Risk_Category")["HEALTHCARE_EXPENSES"].mean().reset_index()
-        expense_fig = px.bar(
-            expenses_by_risk,
-            x="Risk_Category",
-            y="HEALTHCARE_EXPENSES",
-            title="Average Healthcare Expenses by Risk Category",
-            color="Risk_Category",
-            color_discrete_map={
-                "Very Low Risk": nhs_colors["risk_verylow"],
-                "Low Risk": nhs_colors["risk_low"],
-                "Moderate Risk": nhs_colors["risk_medium"],
-                "High Risk": nhs_colors["risk_high"],
-            },
-        )
-        expense_fig.update_layout(height=400)
-        expense_fig.update_yaxes(title="Average Expenses ($)")
-    else:
-        expense_fig = None
-    
-    return race_fig, expense_fig
-
-def create_income_health_chart(df):
-    """Create a chart showing the relationship between income and health index"""
-    if df is None or df.empty or "INCOME" not in df.columns or "Health_Index" not in df.columns:
-        return None
-    
-    # Sample data if it's too large
-    if len(df) > 5000:
-        df_sample = df.sample(5000, random_state=42)
-    else:
-        df_sample = df
-    
-    # Create scatter plot
-    fig = px.scatter(
-        df_sample,
-        x="INCOME",
-        y="Health_Index",
-        color="Risk_Category" if "Risk_Category" in df_sample.columns else None,
-        color_discrete_map={
-            "Very Low Risk": nhs_colors["risk_verylow"],
-            "Low Risk": nhs_colors["risk_low"],
-            "Moderate Risk": nhs_colors["risk_medium"],
-            "High Risk": nhs_colors["risk_high"],
-        },
-        title="Income vs. Health Index",
-        opacity=0.7,
-    )
-    
-    # Add trend line
-    if len(df_sample) > 10:
-        try:
-            from scipy import stats
-            slope, intercept, r_value, p_value, std_err = stats.linregress(
-                df_sample["INCOME"], df_sample["Health_Index"]
-            )
-            x_range = [df_sample["INCOME"].min(), df_sample["INCOME"].max()]
-            y_range = [slope * x + intercept for x in x_range]
-            
-            fig.add_trace(
-                go.Scatter(
-                    x=x_range,
-                    y=y_range,
-                    mode="lines",
-                    line=dict(color="black", width=2),
-                    name=f"Trend Line (r={r_value:.2f})",
-                )
-            )
-        except Exception as e:
-            logger.warning(f"Could not add trend line: {e}")
-    
-    fig.update_layout(height=500)
-    return fig
-
-def create_intersectional_analysis(df):
-    """Create charts for intersectional analysis"""
+def create_health_inequalities_chart(df):
+    """Create visualizations showing health inequalities across different demographic groups"""
     if df is None or df.empty:
         return None
     
     charts = []
     
-    # Gender and Race analysis
-    if "GENDER" in df.columns and "RACE" in df.columns and "Health_Index" in df.columns:
-        # Filter to include only the most frequent racial categories for clarity
-        top_races = df["RACE"].value_counts().nlargest(5).index.tolist()
-        filtered_df = df[df["RACE"].isin(top_races)].copy()
-        
-        if not filtered_df.empty:
-            # Calculate mean health index by gender and race
-            grouped = filtered_df.groupby(["GENDER", "RACE"])["Health_Index"].mean().reset_index()
-            
-            # Create grouped bar chart
-            fig1 = px.bar(
-                grouped,
-                x="RACE",
-                y="Health_Index",
-                color="GENDER",
-                title="Health Index by Race and Gender",
-                barmode="group",
-                color_discrete_sequence=["#5A9BD5", "#F0A860"],
-            )
-            fig1.update_layout(height=400)
-            charts.append(fig1)
+    # Check for required columns
+    demo_cols = ["RACE", "GENDER", "ETHNICITY", "INCOME", "Health_Index"]
+    if not all(col in df.columns for col in demo_cols):
+        return None
     
-    # Income and Race analysis
-    if "RACE" in df.columns and "INCOME" in df.columns:
+    # 1. Health Index by Race and Gender (Intersectional analysis)
+    try:
         # Filter to include only the most frequent racial categories
         top_races = df["RACE"].value_counts().nlargest(5).index.tolist()
         filtered_df = df[df["RACE"].isin(top_races)].copy()
         
         if not filtered_df.empty:
-            # Calculate mean income by race
-            grouped = filtered_df.groupby("RACE")["INCOME"].mean().reset_index()
+            # Calculate mean health index by race and gender
+            race_gender_health = filtered_df.groupby(["RACE", "GENDER"])["Health_Index"].mean().reset_index()
             
-            # Create bar chart
-            fig2 = px.bar(
-                grouped,
+            fig1 = px.bar(
+                race_gender_health,
                 x="RACE",
-                y="INCOME",
-                title="Average Income by Race",
-                color="RACE",
-                color_discrete_sequence=px.colors.qualitative.Pastel,
+                y="Health_Index",
+                color="GENDER",
+                barmode="group",
+                title="Health Index by Race and Gender",
+                color_discrete_sequence=["#005EB8", "#F0A860"],
+                labels={"RACE": "Race", "Health_Index": "Average Health Index", "GENDER": "Gender"}
             )
-            fig2.update_layout(height=400, showlegend=False)
-            charts.append(fig2)
+            
+            fig1.update_layout(height=500, margin=dict(l=20, r=20, t=40, b=20), autosize=True)
+            charts.append(fig1)
+    except Exception as e:
+        logger.warning(f"Could not create race/gender health inequality chart: {e}")
+    
+    # 2. Health Index by Income Quartile
+    try:
+        # Create income quartiles
+        df_with_quartiles = df.copy()
+        df_with_quartiles['Income_Quartile'] = pd.qcut(
+            df_with_quartiles['INCOME'], 
+            q=4, 
+            labels=['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']
+        )
+        
+        # Calculate mean health metrics by income quartile
+        income_health = df_with_quartiles.groupby('Income_Quartile').agg({
+            'Health_Index': 'mean',
+            'CharlsonIndex': 'mean',
+            'ElixhauserIndex': 'mean',
+            'HEALTHCARE_EXPENSES': 'mean'
+        }).reset_index()
+        
+        fig2 = px.bar(
+            income_health,
+            x='Income_Quartile',
+            y=['Health_Index', 'CharlsonIndex', 'ElixhauserIndex'],
+            barmode='group',
+            title='Health Indices by Income Quartile',
+            labels={
+                'Income_Quartile': 'Income Quartile',
+                'value': 'Average Index Value',
+                'variable': 'Health Metric'
+            },
+            color_discrete_sequence=["#005EB8", "#00843D", "#E66C6C"]
+        )
+        
+        fig2.update_layout(
+            height=500, 
+            margin=dict(l=20, r=20, t=40, b=20), 
+            autosize=True,
+            xaxis={'categoryorder': 'array', 'categoryarray': ['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']}
+        )
+        charts.append(fig2)
+        
+        # Also create healthcare expenses by income quartile
+        fig3 = px.bar(
+            income_health,
+            x='Income_Quartile',
+            y='HEALTHCARE_EXPENSES',
+            title='Healthcare Expenses by Income Quartile',
+            color='Income_Quartile',
+            color_discrete_sequence=["#5A9BD5", "#52A373", "#F0A860", "#E66C6C"],
+            labels={
+                'Income_Quartile': 'Income Quartile',
+                'HEALTHCARE_EXPENSES': 'Average Healthcare Expenses ($)'
+            }
+        )
+        
+        fig3.update_layout(
+            height=500, 
+            margin=dict(l=20, r=20, t=40, b=20), 
+            autosize=True,
+            xaxis={'categoryorder': 'array', 'categoryarray': ['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']}
+        )
+        charts.append(fig3)
+    except Exception as e:
+        logger.warning(f"Could not create income quartile health inequality chart: {e}")
+    
+    # 3. Healthcare Utilization Metrics by Race
+    try:
+        if all(col in df.columns for col in ["RACE", "Hospitalizations_Count", "Medications_Count", "Abnormal_Observations_Count"]):
+            # Filter to top races for clarity
+            top_races = df["RACE"].value_counts().nlargest(5).index.tolist()
+            filtered_df = df[df["RACE"].isin(top_races)].copy()
+            
+            if not filtered_df.empty:
+                # Calculate mean healthcare utilization metrics by race
+                utilization_by_race = filtered_df.groupby("RACE").agg({
+                    "Hospitalizations_Count": "mean",
+                    "Medications_Count": "mean",
+                    "Abnormal_Observations_Count": "mean"
+                }).reset_index()
+                
+                # Reshape data for grouped bar chart
+                util_long = pd.melt(
+                    utilization_by_race, 
+                    id_vars=["RACE"], 
+                    value_vars=["Hospitalizations_Count", "Medications_Count", "Abnormal_Observations_Count"],
+                    var_name="Metric", 
+                    value_name="Average Count"
+                )
+                
+                fig4 = px.bar(
+                    util_long,
+                    x="RACE",
+                    y="Average Count",
+                    color="Metric",
+                    barmode="group",
+                    title="Healthcare Utilization Metrics by Race",
+                    color_discrete_sequence=["#005EB8", "#00843D", "#FFB81C"],
+                    labels={"RACE": "Race", "Average Count": "Average Count", "Metric": "Healthcare Metric"}
+                )
+                
+                fig4.update_layout(height=500, margin=dict(l=20, r=20, t=40, b=20), autosize=True)
+                charts.append(fig4)
+    except Exception as e:
+        logger.warning(f"Could not create healthcare utilization by race chart: {e}")
     
     return charts if charts else None
 
-def create_indices_comparison(df):
-    """Create a comparison chart for health indices"""
+def create_health_boxplots(df):
+    """Create boxplots showing distribution of health indices across demographic groups"""
     if df is None or df.empty:
         return None
     
-    required_cols = ["Health_Index", "CharlsonIndex", "ElixhauserIndex"]
-    if not all(col in df.columns for col in required_cols):
+    # Check for required columns
+    if not all(col in df.columns for col in ["Health_Index", "RACE", "GENDER"]):
         return None
     
-    # Sample data if too large
-    if len(df) > 3000:
-        df_sample = df.sample(3000, random_state=42)
-    else:
-        df_sample = df
-    
-    # Create figure with secondary y-axis
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-
-    # Add traces
-    fig.add_trace(
-        go.Scatter(
-            x=df_sample["CharlsonIndex"],
-            y=df_sample["Health_Index"],
-            mode="markers",
-            name="Charlson vs Health",
-            marker=dict(color="#5A9BD5", opacity=0.6),
-        ),
-        secondary_y=False,
-    )
-    
-    fig.add_trace(
-        go.Scatter(
-            x=df_sample["ElixhauserIndex"],
-            y=df_sample["Health_Index"],
-            mode="markers",
-            name="Elixhauser vs Health",
-            marker=dict(color="#F0A860", opacity=0.6),
-        ),
-        secondary_y=False,
-    )
-    
-    # Add figure title, axis labels
-    fig.update_layout(
-        title_text="Health Indices Comparison",
-        height=500,
-    )
-    
-    # Set axis titles
-    fig.update_xaxes(title_text="Index Value")
-    fig.update_yaxes(title_text="Health Index", secondary_y=False)
-    
-    return fig
-
-def create_health_trend_chart(df):
-    """Create a chart showing health trends by age group"""
-    if df is None or df.empty or "Age_Group" not in df.columns:
-        return None
-    
-    health_metrics = [col for col in ["Health_Index", "CharlsonIndex", "ElixhauserIndex"] if col in df.columns]
-    
-    if not health_metrics:
-        return None
-    
-    # Aggregate data by age group
-    agg_dict = {metric: "mean" for metric in health_metrics}
-    grouped = df.groupby("Age_Group").agg(agg_dict).reset_index()
-    
-    # Ensure age groups are in correct order
-    age_order = ["0-18", "19-35", "36-50", "51-65", "66-80", "80+"]
-    grouped["Age_Group"] = pd.Categorical(grouped["Age_Group"], categories=age_order, ordered=True)
-    grouped = grouped.sort_values("Age_Group")
-    
-    # Create line chart
-    fig = go.Figure()
-    
-    for metric in health_metrics:
-        fig.add_trace(
-            go.Scatter(
-                x=grouped["Age_Group"],
-                y=grouped[metric],
-                mode="lines+markers",
-                name=metric,
-            )
+    try:
+        # Sample data if too large
+        if len(df) > 5000:
+            df_sample = df.sample(5000, random_state=42)
+        else:
+            df_sample = df.copy()
+        
+        # Filter to top races for clarity
+        top_races = df_sample["RACE"].value_counts().nlargest(5).index.tolist()
+        filtered_df = df_sample[df_sample["RACE"].isin(top_races)].copy()
+        
+        if filtered_df.empty:
+            return None
+        
+        # Create boxplot
+        fig = px.box(
+            filtered_df,
+            x="RACE",
+            y="Health_Index",
+            color="GENDER",
+            title="Health Index Distribution by Race and Gender",
+            points="outliers",
+            labels={"RACE": "Race", "Health_Index": "Health Index", "GENDER": "Gender"},
+            color_discrete_sequence=["#005EB8", "#F0A860"]
         )
-    
-    fig.update_layout(
-        title="Health Metrics by Age Group",
-        xaxis_title="Age Group",
-        yaxis_title="Index Value",
-        height=500,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="center",
-            x=0.5,
-        ),
-    )
-    
-    return fig
+        
+        fig.update_layout(height=600, margin=dict(l=20, r=20, t=40, b=20), autosize=True)
+        return fig
+    except Exception as e:
+        logger.warning(f"Could not create health boxplots: {e}")
+        return None
 
-def create_correlation_matrix(df):
-    """Create a correlation matrix for numeric health data"""
+def create_comorbidity_analysis(df):
+    """Create visualization showing relationship between health factors"""
     if df is None or df.empty:
         return None
     
-    # Select relevant numerical columns
-    numeric_cols = [
-        col for col in ["Health_Index", "CharlsonIndex", "ElixhauserIndex", 
-                       "AGE", "INCOME", "HEALTHCARE_EXPENSES"] 
-        if col in df.columns
-    ]
-    
-    if len(numeric_cols) < 2:
+    # Check for required columns
+    health_cols = ["Health_Index", "HEALTHCARE_EXPENSES", "HEALTHCARE_COVERAGE"]
+    if not all(col in df.columns for col in health_cols):
         return None
     
-    # Calculate correlation matrix
-    corr_matrix = df[numeric_cols].corr()
-    
-    # Create heatmap
-    fig = px.imshow(
-        corr_matrix,
-        text_auto=True,
-        color_continuous_scale="RdBu_r",
-        title="Correlation Matrix of Health Metrics",
-        height=500,
-    )
-    
-    fig.update_layout(
-        xaxis_title="",
-        yaxis_title="",
-    )
-    
-    return fig
+    try:
+        # Sample data if too large
+        if len(df) > 5000:
+            df_sample = df.sample(5000, random_state=42)
+        else:
+            df_sample = df.copy()
+        
+        # Create scatter plot of healthcare expenses vs. health index with healthcare coverage as size
+        fig = px.scatter(
+            df_sample,
+            x="HEALTHCARE_EXPENSES",
+            y="Health_Index",
+            size="HEALTHCARE_COVERAGE" if "HEALTHCARE_COVERAGE" in df_sample.columns else None,
+            color="Risk_Category" if "Risk_Category" in df_sample.columns else None,
+            hover_data=["GENDER", "RACE", "AGE"],
+            title="Healthcare Expenses vs. Health Index",
+            labels={
+                "HEALTHCARE_EXPENSES": "Healthcare Expenses ($)",
+                "Health_Index": "Health Index",
+                "HEALTHCARE_COVERAGE": "Healthcare Coverage",
+                "Risk_Category": "Risk Category"
+            },
+            color_discrete_map={
+                "Very Low Risk": nhs_colors["risk_verylow"],
+                "Low Risk": nhs_colors["risk_low"],
+                "Moderate Risk": nhs_colors["risk_medium"],
+                "High Risk": nhs_colors["risk_high"],
+            } if "Risk_Category" in df_sample.columns else None
+        )
+        
+        fig.update_layout(height=600, margin=dict(l=20, r=20, t=40, b=20), autosize=True)
+        return fig
+    except Exception as e:
+        logger.warning(f"Could not create comorbidity analysis: {e}")
+        return None
 
-def create_clinical_risk_clusters(df, model_name="Unknown"):
-    """Create visualization of clinical risk clusters"""
-    if df is None or df.empty:
-        return None
-    
-    required_cols = ["Health_Index", "CharlsonIndex", "ElixhauserIndex"]
-    if not all(col in df.columns for col in required_cols):
-        return None
-    
-    # Sample data if too large
-    if len(df) > 3000:
-        df_sample = df.sample(3000, random_state=42)
-    else:
-        df_sample = df
-    
-    # Add cluster if available, otherwise use Risk_Category
-    color_col = "Cluster" if "Cluster" in df_sample.columns else "Risk_Category"
-    
-    # Create 3D scatter plot
-    fig = px.scatter_3d(
-        df_sample,
-        x="Health_Index",
-        y="CharlsonIndex",
-        z="ElixhauserIndex",
-        color=color_col if color_col in df_sample.columns else None,
-        title=f"Clinical Risk Clustering for {model_name} Model",
-        opacity=0.7,
-        color_discrete_sequence=risk_colors if "Cluster" in df_sample.columns else None,
-    )
-    
-    # Update layout
-    fig.update_layout(
-        scene=dict(
-            xaxis_title="Health Index",
-            yaxis_title="Charlson Index",
-            zaxis_title="Elixhauser Index",
-        ),
-        height=700,
-    )
-    
-    return fig
-
+# Define external_stylesheets before app initialization
 external_stylesheets = [dbc.themes.FLATLY]
+
+app = dash.Dash(
+    __name__,
+    suppress_callback_exceptions=True,
+    external_stylesheets=external_stylesheets
+    + [
+        {
+            "href": "https://use.fontawesome.com/releases/v5.8.1/css/all.css",
+            "rel": "stylesheet",
+        }
+    ],
+)
+server = app.server
+
+cache = Cache(
+    app.server,
+    config={
+        "CACHE_TYPE": "filesystem",
+        "CACHE_DIR": "cache-directory",
+        "CACHE_DEFAULT_TIMEOUT": 3600,
+    },
+)
+app.server.config.update(
+    {
+        "CACHE_TYPE": "filesystem",
+        "CACHE_DIR": "cache-directory",
+        "CACHE_DEFAULT_TIMEOUT": 3600,
+    },
+)
+cache = Cache(app.server)
+
+cache_dir = os.path.join(BASE_DIR, "Dashboard", "cache")
+if not os.path.exists(cache_dir):
+    os.makedirs(cache_dir)
+
+cache_size_limit = (
+    PERF_SETTINGS["memory_limit"] * 1024 * 1024 * 1024 / 2
+)
+long_callback_cache = diskcache.Cache(cache_dir, size_limit=cache_size_limit)
+long_callback_manager = DiskcacheLongCallbackManager(long_callback_cache)
 
 progress_stage_icons = {
     "Initializing": "fa fa-cog",
@@ -1392,131 +1357,39 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
         ]
     )
 
-app = dash.Dash(
-    __name__,
-    suppress_callback_exceptions=True,
-    external_stylesheets=external_stylesheets
-    + [
-        {
-            "href": "https://use.fontawesome.com/releases/v5.8.1/css/all.css",
-            "rel": "stylesheet",
-        }
-    ],
-)
-server = app.server
-
-cache = Cache(
-    app.server,
-    config={
-        "CACHE_TYPE": "filesystem",
-        "CACHE_DIR": "cache-directory",
-        "CACHE_DEFAULT_TIMEOUT": 3600,
-    },
-)
-app.server.config.update(
-    {
-        "CACHE_TYPE": "filesystem",
-        "CACHE_DIR": "cache-directory",
-        "CACHE_DEFAULT_TIMEOUT": 3600,
-    },
-)
-cache = Cache(app.server)
-
-cache_dir = os.path.join(BASE_DIR, "Dashboard", "cache")
-if not os.path.exists(cache_dir):
-    os.makedirs(cache_dir)
-
-cache_size_limit = (
-    PERF_SETTINGS["memory_limit"] * 1024 * 1024 * 1024 / 2
-)
-long_callback_cache = diskcache.Cache(cache_dir, size_limit=cache_size_limit)
-long_callback_manager = DiskcacheLongCallbackManager(long_callback_cache)
-
-progress_queue: queue.Queue[str] = queue.Queue(maxsize=10_000)
-process_handle: Optional[subprocess.Popen] = None
-process_lock = threading.Lock()
-
-def _launch_generate_and_predict(cmd: list[str]) -> None:
-    global process_handle
-
-    with subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        universal_newlines=True,
-        creationflags=(
-            subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        ),
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
-    ) as proc:
-        with process_lock:
-            process_handle = proc
-
-        while True:
-            raw = proc.stdout.readline()
-            if not raw:
-                break
-            progress_queue.put_nowait(raw.rstrip("\n"))
-            
-            if "[PROGRESS]" in raw:
-                sys.stdout.flush()
-
-        progress_queue.put_nowait(f"[EXITCODE] {proc.returncode}")
-
-    with process_lock:
-        process_handle = None
-
-from pathlib import Path
-def _build_command(population, perf_opts, mem_util, cpu_util, threads):
-    exe_root = Path(__file__).resolve().parents[1]
-    for cand in (
-        exe_root / "GenerateAndPredict.exe",
-        exe_root / "GenerateAndPredict",
-        Path("./GenerateAndPredict.exe"),
-        Path("./GenerateAndPredict"),
-    ):
-        if cand.exists():
-            exe_path = str(cand)
-            break
-    else:
-        raise FileNotFoundError("GenerateAndPredict executable not found")
-
-    flags = [
-        f"--population={population}",
-        *(opt for opt in (
-            "--enable-xai"          if "enable_xai"          in perf_opts else "",
-            "--performance-mode"    if "performance_mode"    in perf_opts else "",
-            "--extreme-performance" if "extreme_performance" in perf_opts else "",
-            "--force-cpu"           if "force_cpu"           in perf_opts else "",
-        ) if opt),
-        f"--memory-util={mem_util}",
-        f"--cpu-util={cpu_util}",
-        f"--threads={threads}",
-    ]
-    return [exe_path, *flags]
-
 @app.callback(
     Output("progress-interval",    "disabled"),
     Output("run-model-btn",        "disabled"),
     Output("cancel-btn-container", "style"),
+    Output("reset-btn-container",  "style"),
     Input("run-model-btn",   "n_clicks"),
     Input("cancel-model-btn","n_clicks"),
+    Input("reset-model-btn", "n_clicks"),
+    Input("execution-state-store", "data"),  # Add this input
     State("population-input",   "value"),
     State("performance-options","value"),
     State("memory-util-slider", "value"),
     State("cpu-util-slider",    "value"),
     State("threads-slider",     "value"),
+    State("execution-mode-toggle", "value"),
     prevent_initial_call=True,
 )
-def start_or_cancel(run_clicks, cancel_clicks,
+def start_or_cancel(run_clicks, cancel_clicks, reset_clicks, execution_state,
                     population, perf_opts,
-                    mem_util, cpu_util, threads):
+                    mem_util, cpu_util, threads,
+                    execution_mode):
 
-    trig = dash.callback_context.triggered[0]["prop_id"].split(".")[0]
+    ctx = dash.callback_context
+    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    
+    # Show reset button if execution completed or errored
+    if trigger_id == "execution-state-store" and execution_state:
+        if execution_state.get("status") in ["completed", "error"]:
+            # Keep existing state for other outputs
+            return no_update, no_update, no_update, {"display": "block", "marginTop": "10px"}
+        return no_update, no_update, no_update, {"display": "none"}
 
-    if trig == "cancel-model-btn":
+    if trigger_id == "cancel-model-btn":
         with process_lock:
             if process_handle and process_handle.poll() is None:
                 try:
@@ -1524,25 +1397,47 @@ def start_or_cancel(run_clicks, cancel_clicks,
                     process_handle.wait(timeout=5)
                 except Exception:
                     process_handle.kill()
-        return True, False, {"display": "none"}
+        return True, False, {"display": "none"}, {"display": "none"}
+
+    if trigger_id == "reset-model-btn":
+        # Reset the UI state to allow running the model again
+        return True, False, {"display": "none"}, {"display": "none"}
 
     if not run_clicks:
         raise PreventUpdate
 
-    cmd = _build_command(population, perf_opts, mem_util, cpu_util, threads)
+    # Pass the execution mode to _build_command
+    use_remote = (execution_mode == "remote")
+    cmd = _build_command(population, perf_opts, mem_util, cpu_util, threads, use_remote)
     threading.Thread(
         target=_launch_generate_and_predict, args=(cmd,), daemon=True
     ).start()
 
-    return False, True, {"display": "block"}
+    return False, True, {"display": "block"}, {"display": "none"}
 
 @app.callback(
     Output("execution-state-store", "data"),
     Input("progress-interval", "n_intervals"),
+    Input("reset-model-btn", "n_clicks"),    # Add reset button as input
     State("execution-state-store", "data"),
     prevent_initial_call=True,
 )
-def stream_progress(_tick, state):
+def stream_progress(_tick, reset_clicks, state):
+    ctx = dash.callback_context
+    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    
+    # If reset button clicked, return a fresh state
+    if trigger_id == "reset-model-btn":
+        return {
+            "status":   "idle",
+            "stage":    "Initializing",
+            "progress": 0.0,
+            "output":   [],
+            "error":    None,
+            "remaining":"calculating...",
+            "last_update": time.time(),
+        }
+    
     if state is None:
         state = {
             "status":   "running",
@@ -1622,6 +1517,31 @@ model_execution_form = html.Div(
             value=100,
             style={"marginBottom": "15px"},
         ),
+        # Add remote execution toggle
+        html.Div(
+            [
+                html.Label("Execution Mode:", style={"marginBottom": "5px"}),
+                dbc.RadioItems(
+                    id="execution-mode-toggle",
+                    options=[
+                        {"label": "Local Machine", "value": "local"},
+                        {"label": "Raspberry Pi (Remote)", "value": "remote"},
+                    ],
+                    value="remote" if SSH_ENABLED_DEFAULT else "local",
+                    inline=True,
+                    style={"marginBottom": "15px"},
+                ),
+                html.Div(
+                    [
+                        html.I(className="fas fa-info-circle me-2"),
+                        html.Span("Remote execution runs the model on Raspberry Pi via SSH.")
+                    ],
+                    className="text-muted small",
+                    style={"marginTop": "5px"}
+                )
+            ],
+            style={"marginBottom": "15px"},
+        ),
         html.Label("Performance Options:"),
         dbc.Checklist(
             id="performance-options",
@@ -1687,6 +1607,19 @@ model_execution_form = html.Div(
             ],
             id="cancel-btn-container",
         ),
+        html.Div(
+            [
+                dbc.Button(
+                    "Reset & Run Again",
+                    id="reset-model-btn",
+                    color="success",
+                    className="mr-1",
+                    style={"marginTop": "10px", "width": "100%"},
+                ),
+            ],
+            id="reset-btn-container",
+            style={"display": "none"},
+        ),
     ],
     style={
         "backgroundColor": nhs_colors["secondary"],
@@ -1703,64 +1636,74 @@ progress_visualization = html.Div(
                 html.H4("Model Execution Progress", style={"marginBottom": "15px"}),
                 html.Div(
                     [
-                        html.Label("Current Stage:"),
+                        create_system_monitor_card(),  # Add system monitor card
                         html.Div(
-                            id="current-stage",
-                            style={
-                                "padding": "10px",
-                                "backgroundColor": "#f8f9fa",
-                                "borderRadius": "5px",
-                                "marginBottom": "15px",
-                                "fontWeight": "bold",
-                            },
+                            [
+                                html.Div(
+                                    [
+                                        html.H5("Current Stage", className="text-center"),
+                                        html.Div(id="current-stage", className="text-center"),
+                                    ],
+                                    className="col-12 col-md-4",
+                                ),
+                                html.Div(
+                                    [
+                                        html.H5("Overall Progress", className="text-center"),
+                                        html.Div(id="progress-bar-with-stages"),
+                                    ],
+                                    className="col-12 col-md-8",
+                                ),
+                            ],
+                            className="row mb-4",
                         ),
-                    ]
-                ),
-                html.Div(
-                    [
                         html.Div(
-                            id="progress-bar-with-stages",
-                            style={"marginBottom": "30px", "position": "relative"},
-                        )
-                    ]
-                ),
-                html.Label("Execution Log:"),
-                dbc.Card(
-                    dbc.CardBody(
+                            [
+                                html.H5("Execution Log", className="text-center"),
+                                html.Div(
+                                    id="execution-log",
+                                    style={
+                                        "maxHeight": "200px",
+                                        "overflowY": "auto",
+                                        "backgroundColor": "#f8f9fa",
+                                        "padding": "10px",
+                                        "borderRadius": "5px",
+                                    },
+                                ),
+                            ],
+                            className="mb-4",
+                        ),
                         html.Div(
-                            id="execution-log",
-                            style={
-                                "maxHeight": "400px",
-                                "overflowY": "auto",
-                                "whiteSpace": "pre-line",
-                                "fontFamily": "monospace",
-                                "fontSize": "12px",
-                            },
-                        )
-                    ),
-                    style={"marginBottom": "15px"},
-                ),
-                html.Div(
-                    id="error-message",
-                    style={"color": "red", "marginBottom": "15px", "display": "none"},
-                ),
-                html.Div(
-                    id="execution-status",
-                    style={"marginTop": "10px", "fontWeight": "bold"},
+                            id="error-message",
+                            style={"display": "none"},
+                            className="alert alert-danger",
+                        ),
+                        html.Div(
+                            id="execution-status",
+                            className="mt-3 text-center",
+                            style={"fontWeight": "bold"}
+                        ),
+                    ],
+                    style={
+                        "backgroundColor": nhs_colors["secondary"],
+                        "padding": "20px",
+                        "borderRadius": "5px",
+                        "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
+                    },
                 ),
             ],
-            style={
-                "backgroundColor": nhs_colors["secondary"],
-                "padding": "15px",
-                "borderRadius": "5px",
-                "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
-                "marginBottom": "15px",
-            },
+            className="col-12",
         ),
-        html.Div(id="results-container", style={"display": "none"}),
     ],
+    className="row",
     id="progress-container",
     style={"display": "none"},
+)
+
+# Add results container
+results_container = html.Div(
+    id="results-container",
+    style={"display": "none"},
+    className="mt-4"
 )
 
 # Define default ranges for sliders, handle case where df_all might be empty initially
@@ -2164,6 +2107,7 @@ app.layout = html.Div(
         dcc.Interval(id="initial-load-trigger", interval=100, max_intervals=1),
         html.Div(id="memory-management", style={"display": "none"}),
         patient_modal,
+        results_container,
     ],
     style={"backgroundColor": nhs_colors["background"], "padding": "15px"},
 )
@@ -2172,6 +2116,7 @@ app.layout = html.Div(
     Output("filtered-data-store", "data"),
     [
         Input("apply-filters-btn", "n_clicks"),
+        Input("reset-filters-btn", "n_clicks"),
         Input("initial-load-trigger", "n_intervals"),
     ],
     [
@@ -2183,7 +2128,7 @@ app.layout = html.Div(
     ],
 )
 def filter_data(
-    n_clicks, n_intervals, model, risk, age_range, income_range, health_range
+    apply_clicks, reset_clicks, n_intervals, model, risk, age_range, income_range, health_range
 ):
     ctx = callback_context
     if not ctx.triggered:
@@ -2194,7 +2139,11 @@ def filter_data(
     if trigger_id == "initial-load-trigger" and n_intervals is not None:
         return df_all.to_dict("records")
 
-    if n_clicks is None and trigger_id == "apply-filters-btn":
+    if trigger_id == "reset-filters-btn":
+        # For reset, return the entire dataset
+        return df_all.to_dict("records")
+
+    if apply_clicks is None and trigger_id == "apply-filters-btn":
         return df_all.to_dict("records")
 
     filtered_df = df_all.copy()
@@ -2220,6 +2169,38 @@ def filter_data(
         filtered_df, max_points=10000, method="stratified"
     )
     return filtered_df.to_dict("records")
+
+@app.callback(
+    [
+        Output("global-model-dropdown", "value"),
+        Output("global-risk-dropdown", "value"),
+        Output("age-range-slider", "value"),
+        Output("income-range-slider", "value"),
+        Output("health-index-slider", "value")
+    ],
+    [Input("reset-filters-btn", "n_clicks")],
+    prevent_initial_call=True
+)
+def reset_filters(n_clicks):
+    if n_clicks is None:
+        raise PreventUpdate
+    
+    # Get default values for sliders
+    default_age_min = df_all["AGE"].min() if "AGE" in df_all.columns and not df_all.empty else 0
+    default_age_max = df_all["AGE"].max() if "AGE" in df_all.columns and not df_all.empty else 100
+    default_income_min = df_all["INCOME"].min() if "INCOME" in df_all.columns and not df_all.empty else 0
+    default_income_max = df_all["INCOME"].max() if "INCOME" in df_all.columns and not df_all.empty else 100000
+    default_health_min = df_all["Health_Index"].min() if "Health_Index" in df_all.columns and not df_all.empty else 0
+    default_health_max = df_all["Health_Index"].max() if "Health_Index" in df_all.columns and not df_all.empty else 10
+    
+    # Return default values for all filter components
+    return (
+        "All",  # global-model-dropdown
+        "All",  # global-risk-dropdown
+        [default_age_min, default_age_max],  # age-range-slider
+        [default_income_min, default_income_max],  # income-range-slider
+        [default_health_min, default_health_max]  # health-index-slider
+    )
 
 @app.callback(
     Output("geo-tab-content", "children"), 
@@ -2549,68 +2530,697 @@ def update_demographics_content(filtered_data):
 
 @app.callback(
     Output("health-indices-tab-content", "children"),
-    [Input("filtered-data-store", "data")],
+    [Input("filtered-data-store", "data")]
 )
 def load_health_indices_content(filtered_data):
     if filtered_data is None:
         df_to_use = df_all
     else:
         df_to_use = pd.DataFrame(filtered_data)
+    
     if df_to_use.empty:
         return html.Div(
             "No data available after filtering",
             style={"padding": "20px", "textAlign": "center"},
         )
-    indices_fig = create_indices_comparison(df_to_use)
-    health_trend = create_health_trend_chart(df_to_use)
-    corr_matrix = create_correlation_matrix(df_to_use)
     
-    return html.Div(
-        [
-            html.Div(
-                [
-                    html.H5("Health Indices Comparison"),
-                    dcc.Graph(figure=indices_fig) if indices_fig else 
-                    html.Div("No health indices data available")
-                ],
-                style={
-                    "backgroundColor": "white", 
-                    "borderRadius": "5px", 
-                    "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
-                    "marginBottom": "15px",
-                    "padding": "15px"
-                }
-            ),
-            html.Div(
-                [
-                    html.H5("Health Trends by Age Group"),
-                    dcc.Graph(figure=health_trend) if health_trend else 
-                    html.Div("No health trend data available")
-                ],
-                style={
-                    "backgroundColor": "white", 
-                    "borderRadius": "5px", 
-                    "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
-                    "marginBottom": "15px",
-                    "padding": "15px"
-                }
-            ),
-            html.Div(
-                [
-                    html.H5("Feature Correlation Matrix"),
-                    dcc.Graph(figure=corr_matrix) if corr_matrix else 
-                    html.Div("No correlation data available")
-                ],
-                style={
-                    "backgroundColor": "white", 
-                    "borderRadius": "5px", 
-                    "boxShadow": "0 2px 4px rgba(0,0,0,0.1)",
-                    "marginBottom": "15px",
-                    "padding": "15px"
+    # Create visualization components for health indices
+    health_inequalities_charts = create_health_inequalities_visualizations(df_to_use)
+    
+    return html.Div([
+        html.H4("Health Indices Analysis", style={"marginBottom": "15px"}),
+        html.P(
+            "This analysis explores health inequalities across different demographic factors including income, race, gender, and age groups.",
+            style={"marginBottom": "20px"}
+        ),
+        html.Div(health_inequalities_charts)
+    ], style={"padding": "15px", "backgroundColor": "white", "borderRadius": "5px"})
+
+def create_health_inequalities_visualizations(df):
+    """Create comprehensive visualizations showing health inequalities"""
+    if df is None or df.empty:
+        return html.Div("No data available for health indices analysis.")
+    
+    visualizations = []
+    
+    # 1. Health indices distribution by demographic groups
+    health_distribution_card = create_health_distribution_card(df)
+    if health_distribution_card:
+        visualizations.append(health_distribution_card)
+    
+    # 2. Income vs health index with trend analysis
+    income_health_card = create_income_health_trends_card(df)
+    if income_health_card:
+        visualizations.append(income_health_card)
+    
+    # 3. Multiple health indices comparison across groups
+    multi_indices_card = create_multi_indices_comparison(df)
+    if multi_indices_card:
+        visualizations.append(multi_indices_card)
+    
+    # 4. Health indices radar chart by demographic group
+    radar_card = create_health_indices_radar(df)
+    if radar_card:
+        visualizations.append(radar_card)
+    
+    # 5. Healthcare access and utilization inequality card
+    healthcare_access_card = create_healthcare_access_card(df)
+    if healthcare_access_card:
+        visualizations.append(healthcare_access_card)
+    
+    return html.Div(visualizations)
+
+def create_health_distribution_card(df):
+    """Create visualization showing distribution of health indices across demographic groups"""
+    if df is None or df.empty:
+        return None
+    
+    try:
+        # Create the boxplots showing health index distribution by race and gender
+        boxplot_fig = create_health_boxplots(df)
+        
+        # Create violin plots for more detailed health index distribution by income quartile
+        violin_fig = None
+        if all(col in df.columns for col in ["Health_Index", "INCOME"]):
+            # Create income quartiles
+            df_with_quartiles = df.copy()
+            df_with_quartiles['Income_Quartile'] = pd.qcut(
+                df_with_quartiles['INCOME'], 
+                q=4, 
+                labels=['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']
+            )
+            
+            # Sample if dataset is too large for violin plot
+            if len(df_with_quartiles) > 5000:
+                df_sample = smart_sample_dataframe(df_with_quartiles, max_points=5000, method="stratified")
+            else:
+                df_sample = df_with_quartiles
+                
+            # Create violin plot
+            violin_fig = px.violin(
+                df_sample, 
+                x="Income_Quartile", 
+                y="Health_Index",
+                color="Income_Quartile",
+                box=True, 
+                points="all", 
+                title="Health Index Distribution by Income Quartile",
+                color_discrete_map={
+                    "Q1 (Low)": nhs_colors["risk_high"],
+                    "Q2": nhs_colors["risk_medium"],
+                    "Q3": nhs_colors["risk_low"],
+                    "Q4 (High)": nhs_colors["risk_verylow"]
+                },
+                labels={"Income_Quartile": "Income Quartile", "Health_Index": "Health Index"}
+            )
+            
+            violin_fig.update_layout(
+                height=600, 
+                margin=dict(l=20, r=20, t=40, b=20), 
+                autosize=True,
+                xaxis={'categoryorder': 'array', 'categoryarray': ['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']}
+            )
+        
+        return collapsible_card(
+            "Health Index Distribution by Demographic Groups",
+            html.Div([
+                html.P("These visualizations show how Health Index values are distributed across different demographic groups, highlighting potential inequalities in health outcomes.", 
+                       style={"marginBottom": "15px"}),
+                dbc.Row([
+                    dbc.Col(
+                        dcc.Graph(figure=boxplot_fig) if boxplot_fig else "No data available for boxplot visualization",
+                        width=12,
+                        lg=6
+                    ),
+                    dbc.Col(
+                        dcc.Graph(figure=violin_fig) if violin_fig else "No data available for violin plot visualization",
+                        width=12,
+                        lg=6
+                    ),
+                ]),
+            ]),
+            "health-distribution-card",
+            initially_open=True
+        )
+    except Exception as e:
+        logger.warning(f"Could not create health distribution card: {e}")
+        return None
+
+def create_income_health_trends_card(df):
+    """Create visualization showing income vs health trends with inequalities"""
+    if df is None or df.empty:
+        return None
+    
+    try:
+        # Income vs Health Index Trend
+        income_health_fig = create_income_health_chart(df)
+        
+        # Create inequality curve showing healthcare expenses vs income
+        inequality_fig = None
+        if all(col in df.columns for col in ["INCOME", "HEALTHCARE_EXPENSES"]):
+            # Create income deciles
+            df_with_deciles = df.copy()
+            df_with_deciles['Income_Decile'] = pd.qcut(
+                df_with_deciles['INCOME'], 
+                q=10, 
+                labels=[f'D{i}' for i in range(1, 11)]
+            )
+            
+            # Calculate ratio of healthcare expenses to income by income decile
+            expense_ratio = df_with_deciles.groupby('Income_Decile').apply(
+                lambda x: (x['HEALTHCARE_EXPENSES'].mean() / x['INCOME'].mean()) * 100
+            ).reset_index()
+            expense_ratio.columns = ['Income_Decile', 'Expense_Percentage']
+            
+            inequality_fig = px.line(
+                expense_ratio,
+                x='Income_Decile',
+                y='Expense_Percentage',
+                markers=True,
+                title="Healthcare Expenses as % of Income (by Income Decile)",
+                labels={
+                    'Income_Decile': 'Income Decile (D1=Lowest, D10=Highest)',
+                    'Expense_Percentage': 'Healthcare Expenses (% of Income)'
                 }
             )
-        ]
-    )
+            
+            inequality_fig.update_traces(
+                line=dict(color=nhs_colors["primary"], width=3),
+                marker=dict(size=10, color=nhs_colors["primary"])
+            )
+            
+            # Add annotation for inequality interpretation
+            inequality_fig.add_annotation(
+                text="Higher percentages for lower income groups indicate<br>disproportionate financial burden of healthcare",
+                xref="paper", yref="paper",
+                x=0.02, y=0.95,
+                showarrow=False,
+                font=dict(size=12, color="#333"),
+                bgcolor="rgba(255, 255, 255, 0.7)",
+                bordercolor="#005EB8",
+                borderwidth=1,
+                borderpad=4,
+                align="left"
+            )
+            
+            inequality_fig.update_layout(height=600, margin=dict(l=20, r=20, t=40, b=20), autosize=True)
+        
+        return collapsible_card(
+            "Income-Related Health Inequalities",
+            html.Div([
+                html.P("These visualizations explore the relationship between income and health outcomes, highlighting socioeconomic inequalities in health.", 
+                       style={"marginBottom": "15px"}),
+                dbc.Row([
+                    dbc.Col(
+                        dcc.Graph(figure=income_health_fig) if income_health_fig else "No data available for income-health visualization",
+                        width=12,
+                        lg=6
+                    ),
+                    dbc.Col(
+                        dcc.Graph(figure=inequality_fig) if inequality_fig else "No data available for healthcare expense inequality visualization",
+                        width=12,
+                        lg=6
+                    ),
+                ]),
+            ]),
+            "income-health-trends-card",
+            initially_open=True
+        )
+    except Exception as e:
+        logger.warning(f"Could not create income health trends card: {e}")
+        return None
+
+def create_multi_indices_comparison(df):
+    """Create visualization comparing multiple health indices across demographic groups"""
+    if df is None or df.empty:
+        return None
+    
+    try:
+        # First visualization: Compare health indices across racial groups
+        race_indices_fig = None
+        if all(col in df.columns for col in ["RACE", "Health_Index", "CharlsonIndex", "ElixhauserIndex"]):
+            top_races = df["RACE"].value_counts().nlargest(5).index.tolist()
+            filtered_df = df[df["RACE"].isin(top_races)].copy()
+            
+            if not filtered_df.empty:
+                # Calculate mean indices by race
+                race_indices = filtered_df.groupby("RACE").agg({
+                    "Health_Index": "mean",
+                    "CharlsonIndex": "mean",
+                    "ElixhauserIndex": "mean"
+                }).reset_index()
+                
+                # Normalize values between 0-1 for comparison (higher is better for Health_Index, lower is better for others)
+                for col in ["CharlsonIndex", "ElixhauserIndex"]:
+                    max_val = race_indices[col].max()
+                    if max_val > 0:  # Avoid division by zero
+                        race_indices[f"{col}_Normalized"] = 1 - (race_indices[col] / max_val)
+                
+                if race_indices["Health_Index"].max() > 0:
+                    race_indices["Health_Index_Normalized"] = race_indices["Health_Index"] / race_indices["Health_Index"].max()
+                
+                # Create the radar chart data
+                categories = ["Health", "Comorbidity (inverse)", "Disease Burden (inverse)"]
+                
+                fig = go.Figure()
+                
+                for i, race in enumerate(race_indices["RACE"]):
+                    fig.add_trace(go.Scatterpolar(
+                        r=[
+                            race_indices.loc[race_indices["RACE"] == race, "Health_Index_Normalized"].iloc[0],
+                            race_indices.loc[race_indices["RACE"] == race, "CharlsonIndex_Normalized"].iloc[0],
+                            race_indices.loc[race_indices["RACE"] == race, "ElixhauserIndex_Normalized"].iloc[0],
+                        ],
+                        theta=categories,
+                        fill='toself',
+                        name=race
+                    ))
+                
+                fig.update_layout(
+                    polar=dict(
+                        radialaxis=dict(
+                            visible=True,
+                            range=[0, 1]
+                        )
+                    ),
+                    title="Comparative Health Indices by Race",
+                    height=600,
+                    margin=dict(l=50, r=50, t=50, b=50),
+                    showlegend=True
+                )
+                
+                race_indices_fig = fig
+        
+        # Second visualization: Compare indices across income groups
+        income_indices_fig = None
+        if all(col in df.columns for col in ["INCOME", "Health_Index", "CharlsonIndex", "ElixhauserIndex"]):
+            # Create income quartiles
+            df_with_quartiles = df.copy()
+            df_with_quartiles['Income_Quartile'] = pd.qcut(
+                df_with_quartiles['INCOME'], 
+                q=4, 
+                labels=['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']
+            )
+            
+            # Calculate mean indices by income quartile
+            income_indices = df_with_quartiles.groupby("Income_Quartile").agg({
+                "Health_Index": "mean",
+                "CharlsonIndex": "mean",
+                "ElixhauserIndex": "mean"
+            }).reset_index()
+            
+            # Create comparative bar chart
+            income_indices_fig = px.bar(
+                income_indices,
+                x="Income_Quartile",
+                y=["Health_Index", "CharlsonIndex", "ElixhauserIndex"],
+                barmode="group",
+                title="Health Indices by Income Quartile",
+                color_discrete_sequence=[nhs_colors["primary"], nhs_colors["risk_medium"], nhs_colors["risk_high"]],
+                labels={
+                    "Income_Quartile": "Income Quartile",
+                    "value": "Index Value",
+                    "variable": "Health Metric"
+                }
+            )
+            
+            income_indices_fig.update_layout(
+                height=600, 
+                margin=dict(l=20, r=20, t=40, b=20), 
+                autosize=True,
+                xaxis={'categoryorder': 'array', 'categoryarray': ['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']}
+            )
+            
+            # Add annotation explaining the metrics
+            income_indices_fig.add_annotation(
+                text="Health Index: higher is better<br>Charlson & Elixhauser: lower is better",
+                xref="paper", yref="paper",
+                x=0.01, y=0.98,
+                showarrow=False,
+                font=dict(size=12),
+                bgcolor="rgba(255, 255, 255, 0.7)",
+                bordercolor="#005EB8",
+                borderwidth=1,
+                borderpad=4
+            )
+        
+        return collapsible_card(
+            "Comparative Health Indices Analysis",
+            html.Div([
+                html.P(
+                    "These visualizations compare multiple health indices across different demographic groups, revealing patterns of health inequality.",
+                    style={"marginBottom": "15px"}
+                ),
+                dbc.Row([
+                    dbc.Col(
+                        dcc.Graph(figure=race_indices_fig) if race_indices_fig else "No data available for racial health indices comparison",
+                        width=12,
+                        lg=6
+                    ),
+                    dbc.Col(
+                        dcc.Graph(figure=income_indices_fig) if income_indices_fig else "No data available for income-based health indices comparison",
+                        width=12,
+                        lg=6
+                    ),
+                ]),
+            ]),
+            "multi-indices-comparison-card",
+            initially_open=True
+        )
+    except Exception as e:
+        logger.warning(f"Could not create multi-indices comparison card: {e}")
+        return None
+
+def create_health_indices_radar(df):
+    """Create radar chart visualization showing health indices by demographic group"""
+    if df is None or df.empty:
+        return None
+    
+    try:
+        # Create intersectional demographic radar chart for Health Index
+        intersectional_fig = None
+        if all(col in df.columns for col in ["GENDER", "Age_Group", "RACE", "Health_Index"]):
+            # Focus on the most common race categories
+            top_races = df["RACE"].value_counts().nlargest(3).index.tolist()
+            
+            # Create intersectional groups (gender + age group + race)
+            intersect_data = []
+            for gender in df["GENDER"].unique():
+                for age_group in ["19-35", "36-50", "51-65", "66-80"]:  # Select key age groups
+                    for race in top_races:
+                        subset = df[(df["GENDER"] == gender) & 
+                                   (df["Age_Group"] == age_group) & 
+                                   (df["RACE"] == race)]
+                        
+                        if len(subset) >= 30:  # Only include if we have enough data
+                            group_name = f"{gender}, {age_group}, {race}"
+                            health_index = subset["Health_Index"].mean()
+                            intersect_data.append({
+                                "Group": group_name,
+                                "Gender": gender,
+                                "Age_Group": age_group,
+                                "Race": race,
+                                "Health_Index": health_index
+                            })
+            
+            if intersect_data:
+                intersect_df = pd.DataFrame(intersect_data)
+                
+                # Create pivot table for radar chart
+                pivot_table = pd.pivot_table(
+                    intersect_df,
+                    values="Health_Index",
+                    index=["Gender", "Race"],
+                    columns=["Age_Group"],
+                    aggfunc="mean"
+                ).reset_index()
+                
+                # Filter to ensure we have complete data across age groups
+                complete_rows = pivot_table.dropna()
+                
+                if not complete_rows.empty:
+                    # Create radar chart
+                    fig = go.Figure()
+                    
+                    for i, row in complete_rows.iterrows():
+                        fig.add_trace(go.Scatterpolar(
+                            r=row[["19-35", "36-50", "51-65", "66-80"]].values,
+                            theta=["19-35", "36-50", "51-65", "66-80"],
+                            fill='toself',
+                            name=f"{row['Gender']}, {row['Race']}"
+                        ))
+                    
+                    fig.update_layout(
+                        polar=dict(
+                            radialaxis=dict(
+                                visible=True,
+                                range=[0, 10]
+                            )
+                        ),
+                        title="Health Index Across Age Groups by Gender and Race",
+                        height=600,
+                        margin=dict(l=50, r=50, t=50, b=50),
+                        showlegend=True,
+                        legend=dict(
+                            title="Demographic Group",
+                            orientation="h",
+                            yanchor="bottom",
+                            y=-0.2,
+                            xanchor="center",
+                            x=0.5
+                        )
+                    )
+                    
+                    # Add annotation explaining the visualization
+                    fig.add_annotation(
+                        text="This radar chart shows health inequalities across intersectional demographic groups.<br>Each line represents a combined gender and race group, with values across age groups.",
+                        xref="paper", yref="paper",
+                        x=0.5, y=-0.3,
+                        showarrow=False,
+                        font=dict(size=12),
+                        bgcolor="rgba(255, 255, 255, 0.7)",
+                        bordercolor="#005EB8",
+                        borderwidth=1,
+                        borderpad=4,
+                        align="center"
+                    )
+                    
+                    intersectional_fig = fig
+        
+        # Create a complementary visualization - Health Indices by age and gender
+        age_gender_fig = None
+        if all(col in df.columns for col in ["GENDER", "Age_Group", "Health_Index", "CharlsonIndex"]):
+            # Calculate mean indices by age group and gender
+            age_gender_indices = df.groupby(["Age_Group", "GENDER"]).agg({
+                "Health_Index": "mean",
+                "CharlsonIndex": "mean"
+            }).reset_index()
+            
+            # Create a proper ordering for age groups
+            age_order = ["0-18", "19-35", "36-50", "51-65", "66-80", "80+"]
+            age_gender_indices["Age_Group"] = pd.Categorical(
+                age_gender_indices["Age_Group"], 
+                categories=age_order, 
+                ordered=True
+            )
+            age_gender_indices = age_gender_indices.sort_values("Age_Group")
+            
+            # Create line chart
+            age_gender_fig = px.line(
+                age_gender_indices,
+                x="Age_Group",
+                y="Health_Index",
+                color="GENDER",
+                markers=True,
+                title="Health Index Trajectory Across Lifespan by Gender",
+                color_discrete_sequence=[nhs_colors["primary"], nhs_colors["risk_medium"]],
+                labels={"Age_Group": "Age Group", "Health_Index": "Health Index", "GENDER": "Gender"}
+            )
+            
+            # Add Charlson Index as second y-axis
+            age_gender_fig.add_trace(
+                go.Scatter(
+                    x=age_gender_indices[age_gender_indices["GENDER"] == df["GENDER"].iloc[0]]["Age_Group"],
+                    y=age_gender_indices[age_gender_indices["GENDER"] == df["GENDER"].iloc[0]]["CharlsonIndex"],
+                    mode="lines+markers",
+                    name="Charlson Index",
+                    line=dict(color="#FFB81C", width=2, dash="dot"),
+                    marker=dict(size=8, color="#FFB81C"),
+                    yaxis="y2"
+                )
+            )
+            
+            # Update layout for dual y-axis
+            age_gender_fig.update_layout(
+                height=600,
+                margin=dict(l=20, r=20, t=40, b=20),
+                autosize=True,
+                yaxis=dict(title="Health Index"),
+                yaxis2=dict(
+                    title="Charlson Index",
+                    overlaying="y",
+                    side="right",
+                    range=[0, age_gender_indices["CharlsonIndex"].max() * 1.2]
+                ),
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="center",
+                    x=0.5
+                )
+            )
+            
+            # Add annotation explaining the two metrics
+            age_gender_fig.add_annotation(
+                text="Health Index (left axis): higher is better<br>Charlson Index (right axis): lower is better",
+                xref="paper", yref="paper",
+                x=0.01, y=0.98,
+                showarrow=False,
+                font=dict(size=12),
+                bgcolor="rgba(255, 255, 255, 0.7)",
+                bordercolor="#005EB8",
+                borderwidth=1,
+                borderpad=4
+            )
+        
+        return collapsible_card(
+            "Intersectional Health Inequalities Analysis",
+            html.Div([
+                html.P(
+                    "These visualizations analyze health indices across multiple demographic factors simultaneously, highlighting intersectional health inequalities.",
+                    style={"marginBottom": "15px"}
+                ),
+                dbc.Row([
+                    dbc.Col(
+                        dcc.Graph(figure=intersectional_fig) if intersectional_fig else "Insufficient data for intersectional health analysis",
+                        width=12,
+                        lg=6
+                    ),
+                    dbc.Col(
+                        dcc.Graph(figure=age_gender_fig) if age_gender_fig else "No data available for age-gender health indices analysis",
+                        width=12,
+                        lg=6
+                    ),
+                ]),
+            ]),
+            "health-indices-radar-card",
+            initially_open=True
+        )
+    except Exception as e:
+        logger.warning(f"Could not create health indices radar card: {e}")
+        return None
+
+def create_healthcare_access_card(df):
+    """Create visualization showing healthcare access and utilization inequalities"""
+    if df is None or df.empty:
+        return None
+    
+    try:
+        # Healthcare expenses vs. coverage visualization
+        expenses_coverage_fig = None
+        if all(col in df.columns for col in ["HEALTHCARE_EXPENSES", "HEALTHCARE_COVERAGE", "Risk_Category"]):
+            # Sample data for scatter plot
+            if len(df) > 3000:
+                df_sample = df.sample(3000, random_state=42)
+            else:
+                df_sample = df.copy()
+            
+            # Create scatter plot
+            expenses_coverage_fig = px.scatter(
+                df_sample,
+                x="HEALTHCARE_EXPENSES",
+                y="HEALTHCARE_COVERAGE",
+                color="Risk_Category",
+                size="Health_Index",
+                hover_data=["GENDER", "RACE", "AGE"],
+                title="Healthcare Coverage vs. Expenses by Risk Category",
+                color_discrete_map={
+                    "Very Low Risk": nhs_colors["risk_verylow"],
+                    "Low Risk": nhs_colors["risk_low"],
+                    "Moderate Risk": nhs_colors["risk_medium"],
+                    "High Risk": nhs_colors["risk_high"],
+                },
+                labels={
+                    "HEALTHCARE_EXPENSES": "Healthcare Expenses ($)",
+                    "HEALTHCARE_COVERAGE": "Healthcare Coverage",
+                    "Risk_Category": "Risk Category",
+                    "Health_Index": "Health Index"
+                }
+            )
+            
+            # Add trend line for the entire dataset
+            expenses_coverage_fig.update_layout(
+                height=600,
+                margin=dict(l=20, r=20, t=40, b=20),
+                autosize=True
+            )
+        
+        # Healthcare coverage by demographic group visualization
+        coverage_demo_fig = None
+        if all(col in df.columns for col in ["HEALTHCARE_COVERAGE", "RACE", "INCOME"]):
+            # Create income quartiles
+            df_with_quartiles = df.copy()
+            df_with_quartiles['Income_Quartile'] = pd.qcut(
+                df_with_quartiles['INCOME'], 
+                q=4, 
+                labels=['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']
+            )
+            
+            # Get top races
+            top_races = df["RACE"].value_counts().nlargest(5).index.tolist()
+            filtered_df = df_with_quartiles[df_with_quartiles["RACE"].isin(top_races)].copy()
+            
+            # Calculate mean healthcare coverage by race and income quartile
+            coverage_by_demo = filtered_df.groupby(["RACE", "Income_Quartile"])["HEALTHCARE_COVERAGE"].mean().reset_index()
+            
+            # Create grouped bar chart
+            coverage_demo_fig = px.bar(
+                coverage_by_demo,
+                x="RACE",
+                y="HEALTHCARE_COVERAGE",
+                color="Income_Quartile",
+                barmode="group",
+                title="Healthcare Coverage by Race and Income",
+                color_discrete_map={
+                    "Q1 (Low)": nhs_colors["risk_high"],
+                    "Q2": nhs_colors["risk_medium"],
+                    "Q3": nhs_colors["risk_low"],
+                    "Q4 (High)": nhs_colors["risk_verylow"]
+                },
+                labels={
+                    "RACE": "Race",
+                    "HEALTHCARE_COVERAGE": "Average Healthcare Coverage",
+                    "Income_Quartile": "Income Quartile"
+                }
+            )
+            
+            coverage_demo_fig.update_layout(
+                height=600,
+                margin=dict(l=20, r=20, t=40, b=20),
+                autosize=True,
+                yaxis=dict(title="Average Healthcare Coverage")
+            )
+            
+            # Add annotation about healthcare coverage
+            coverage_demo_fig.add_annotation(
+                text="Higher healthcare coverage values indicate better insurance<br>and access to healthcare services",
+                xref="paper", yref="paper",
+                x=0.01, y=0.98,
+                showarrow=False,
+                font=dict(size=12),
+                bgcolor="rgba(255, 255, 255, 0.7)",
+                bordercolor="#005EB8",
+                borderwidth=1,
+                borderpad=4
+            )
+        
+        return collapsible_card(
+            "Healthcare Access and Utilization Inequalities",
+            html.Div([
+                html.P(
+                    "These visualizations explore inequalities in healthcare access, coverage, and utilization across different demographic groups.",
+                    style={"marginBottom": "15px"}
+                ),
+                dbc.Row([
+                    dbc.Col(
+                        dcc.Graph(figure=expenses_coverage_fig) if expenses_coverage_fig else "No data available for healthcare expenses vs. coverage visualization",
+                        width=12,
+                        lg=6
+                    ),
+                    dbc.Col(
+                        dcc.Graph(figure=coverage_demo_fig) if coverage_demo_fig else "No data available for healthcare coverage by demographic group visualization",
+                        width=12,
+                        lg=6
+                    ),
+                ]),
+            ]),
+            "healthcare-access-card",
+            initially_open=True
+        )
+    except Exception as e:
+        logger.warning(f"Could not create healthcare access card: {e}")
+        return None
 
 @app.callback(
     Output("model-tab-content", "children"), [Input("filtered-data-store", "data")]
@@ -2787,7 +3397,9 @@ def load_model_performance_content(filtered_data):
                 xaxis_title="Actual Health Index",
                 yaxis_title="Predicted Health Index",
                 legend_title="Cluster",
-                height=500
+                height=600,
+                margin=dict(l=20, r=20, t=40, b=20),
+                autosize=True,
             )
             
             model_plot = dcc.Graph(figure=perf_fig)
@@ -2881,7 +3493,7 @@ def load_model_performance_content(filtered_data):
                                     color="Cluster",
                                     color_discrete_sequence=risk_colors,
                                     labels={"Cluster": "Cluster ID"}
-                                ).update_layout(showlegend=False)
+                                ).update_layout(showlegend=False, height=600, margin=dict(l=20, r=20, t=40, b=20), autosize=True)
                             )
                         ]
                     ) if "Cluster" in model_df.columns and not model_df.empty else None,
@@ -3136,11 +3748,40 @@ def update_results_display(state):
         return "", {"display": "none"}
     
     results_content = html.Div([
-        html.H5("Execution Completed Successfully", style={"color": "green"}),
-        html.P("Model execution finished. Results may be available in the 'Data/finals' or 'Data/explain_xai' directories."),
-    ], style={"padding": "15px", "backgroundColor": "#e9f7ef", "borderRadius": "5px", "border": "1px solid green"})
+        html.H4("Model Execution Results", className="mb-4"),
+        html.Div([
+            html.H5("Execution Summary", className="mb-3"),
+            html.P([
+                html.Strong("Status: "),
+                html.Span("Completed Successfully", className="text-success")
+            ]),
+            html.P([
+                html.Strong("Total Time: "),
+                html.Span(state.get("remaining", "N/A"))
+            ]),
+            html.P([
+                html.Strong("Final Stage: "),
+                html.Span(state.get("stage", "Unknown"))
+            ])
+        ], className="mb-4"),
+        html.Div([
+            html.H5("Output Log", className="mb-3"),
+            html.Div(
+                "\n".join(state.get("output", [])),
+                style={
+                    "maxHeight": "300px",
+                    "overflowY": "auto",
+                    "backgroundColor": "#f8f9fa",
+                    "padding": "15px",
+                    "borderRadius": "5px",
+                    "fontFamily": "monospace",
+                    "fontSize": "12px"
+                }
+            )
+        ])
+    ])
     
-    return results_content, {"display": "block", "marginTop": "15px"}
+    return results_content, {"display": "block"}
 
 collapsible_card_ids = ["demographics"]
 
@@ -3185,6 +3826,602 @@ def toggle_collapsible_cards(*args):
         icon_outputs.append(icon_class)
     
     return outputs + icon_outputs
+
+def sanitize_datatable_values(df):
+    """Prepare dataframe values for presentation in a data table"""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    
+    # Create a copy to avoid modifying the original
+    display_df = df.copy()
+    
+    # Convert floats to 2 decimal places
+    for col in display_df.select_dtypes(include=['float']).columns:
+        display_df[col] = display_df[col].round(2)
+    
+    # Format currency values
+    if 'INCOME' in display_df.columns:
+        display_df['INCOME'] = display_df['INCOME'].apply(lambda x: f"${x:,.2f}" if not pd.isna(x) else "")
+    if 'HEALTHCARE_EXPENSES' in display_df.columns:
+        display_df['HEALTHCARE_EXPENSES'] = display_df['HEALTHCARE_EXPENSES'].apply(lambda x: f"${x:,.2f}" if not pd.isna(x) else "")
+    
+    # Convert date columns to string format
+    for col in display_df.select_dtypes(include=['datetime']).columns:
+        display_df[col] = display_df[col].dt.strftime('%Y-%m-%d')
+    
+    # Fill NaN values with an empty string for display
+    display_df = display_df.fillna("")
+    
+    return display_df
+
+def create_demographic_charts(df):
+    """Create charts showing gender, age, and risk distribution"""
+    if df is None or df.empty:
+        return None, None, None
+    
+    # 1. Gender distribution
+    gender_chart = None
+    if "GENDER" in df.columns:
+        gender_counts = df["GENDER"].value_counts().reset_index()
+        gender_counts.columns = ["GENDER", "Count"]
+        
+        gender_chart = px.pie(
+            gender_counts, 
+            values="Count", 
+            names="GENDER",
+            title="Gender Distribution",
+            color_discrete_sequence=[nhs_colors["primary"], nhs_colors["risk_medium"]],
+            hole=0.4
+        )
+        gender_chart.update_traces(textposition='inside', textinfo='percent+label')
+        gender_chart.update_layout(margin=dict(l=20, r=20, t=30, b=20), height=300)
+    
+    # 2. Age distribution
+    age_chart = None
+    if "Age_Group" in df.columns:
+        age_counts = df["Age_Group"].value_counts().reset_index()
+        age_counts.columns = ["Age_Group", "Count"]
+        
+        # Sort age groups in correct order
+        age_order = ["0-18", "19-35", "36-50", "51-65", "66-80", "80+"]
+        age_counts["Age_Group"] = pd.Categorical(age_counts["Age_Group"], categories=age_order, ordered=True)
+        age_counts = age_counts.sort_values("Age_Group")
+        
+        age_chart = px.bar(
+            age_counts,
+            x="Age_Group",
+            y="Count",
+            title="Age Distribution",
+            color_discrete_sequence=[nhs_colors["primary"]],
+            labels={"Age_Group": "Age Group", "Count": "Number of Patients"}
+        )
+        age_chart.update_layout(margin=dict(l=20, r=20, t=30, b=20), height=300)
+    
+    # 3. Risk category distribution
+    risk_chart = None
+    if "Risk_Category" in df.columns:
+        risk_counts = df["Risk_Category"].value_counts().reset_index()
+        risk_counts.columns = ["Risk_Category", "Count"]
+        
+        # Sort risk categories in correct order
+        risk_order = ["Very Low Risk", "Low Risk", "Moderate Risk", "High Risk"]
+        risk_counts["Risk_Category"] = pd.Categorical(risk_counts["Risk_Category"], categories=risk_order, ordered=True)
+        risk_counts = risk_counts.sort_values("Risk_Category")
+        
+        risk_chart = px.bar(
+            risk_counts,
+            x="Risk_Category",
+            y="Count",
+            title="Risk Distribution",
+            color="Risk_Category",
+            color_discrete_map={
+                "Very Low Risk": nhs_colors["risk_verylow"],
+                "Low Risk": nhs_colors["risk_low"],
+                "Moderate Risk": nhs_colors["risk_medium"],
+                "High Risk": nhs_colors["risk_high"],
+            },
+            labels={"Risk_Category": "Risk Category", "Count": "Number of Patients"}
+        )
+        risk_chart.update_layout(margin=dict(l=20, r=20, t=30, b=20), height=300, showlegend=False)
+    
+    return gender_chart, age_chart, risk_chart
+
+def create_race_demographics(df):
+    """Create charts showing race distribution and healthcare expenses by race"""
+    if df is None or df.empty:
+        return None, None
+    
+    # 1. Race distribution
+    race_chart = None
+    if "RACE" in df.columns:
+        # Get top N races to keep chart readable
+        top_races = df["RACE"].value_counts().nlargest(7).index.tolist()
+        df_top_races = df[df["RACE"].isin(top_races)].copy()
+        other_count = len(df) - len(df_top_races)
+        
+        race_counts = df_top_races["RACE"].value_counts().reset_index()
+        race_counts.columns = ["RACE", "Count"]
+        
+        # Add "Other" category if needed
+        if other_count > 0:
+            race_counts = pd.concat([
+                race_counts,
+                pd.DataFrame({"RACE": ["Other"], "Count": [other_count]})
+            ])
+        
+        race_chart = px.bar(
+            race_counts,
+            x="RACE",
+            y="Count",
+            title="Racial Distribution",
+            color_discrete_sequence=[nhs_colors["primary"]],
+            labels={"RACE": "Race", "Count": "Number of Patients"}
+        )
+        race_chart.update_layout(margin=dict(l=20, r=20, t=40, b=20), height=400)
+    
+    # 2. Healthcare expenses by race
+    healthcare_expense_chart = None
+    if all(col in df.columns for col in ["RACE", "HEALTHCARE_EXPENSES"]):
+        # Get top N races to keep chart readable
+        top_races = df["RACE"].value_counts().nlargest(5).index.tolist()
+        df_top_races = df[df["RACE"].isin(top_races)].copy()
+        
+        # Calculate mean healthcare expenses by race
+        expenses_by_race = df_top_races.groupby("RACE")["HEALTHCARE_EXPENSES"].mean().reset_index()
+        expenses_by_race = expenses_by_race.sort_values("HEALTHCARE_EXPENSES", ascending=False)
+        
+        healthcare_expense_chart = px.bar(
+            expenses_by_race,
+            x="RACE",
+            y="HEALTHCARE_EXPENSES",
+            title="Average Healthcare Expenses by Race",
+            color_discrete_sequence=[nhs_colors["accent"]],
+            labels={"RACE": "Race", "HEALTHCARE_EXPENSES": "Average Healthcare Expenses ($)"}
+        )
+        healthcare_expense_chart.update_layout(margin=dict(l=20, r=20, t=40, b=20), height=400)
+    
+    return race_chart, healthcare_expense_chart
+
+def create_income_health_chart(df):
+    """Create visualization showing the relationship between income and health indices"""
+    if df is None or df.empty:
+        return None
+    
+    if not all(col in df.columns for col in ["INCOME", "Health_Index"]):
+        return None
+    
+    try:
+        # Sample data if too large
+        if len(df) > 5000:
+            df_sample = df.sample(5000, random_state=42)
+        else:
+            df_sample = df.copy()
+        
+        # Create income quartiles
+        df_sample['Income_Quartile'] = pd.qcut(
+            df_sample['INCOME'], 
+            q=4, 
+            labels=['Q1 (Low)', 'Q2', 'Q3', 'Q4 (High)']
+        )
+        
+        fig = px.scatter(
+            df_sample,
+            x="INCOME",
+            y="Health_Index",
+            color="Income_Quartile",
+            color_discrete_map={
+                "Q1 (Low)": nhs_colors["risk_high"],
+                "Q2": nhs_colors["risk_medium"],
+                "Q3": nhs_colors["risk_low"],
+                "Q4 (High)": nhs_colors["risk_verylow"],
+            },
+            opacity=0.7,
+            title="Income vs. Health Index",
+            labels={
+                "INCOME": "Income ($)",
+                "Health_Index": "Health Index",
+                "Income_Quartile": "Income Quartile"
+            },
+            trendline="ols",
+            trendline_color_override="#333333"
+        )
+        
+        fig.update_layout(height=500, margin=dict(l=20, r=20, t=40, b=20), autosize=True)
+        return fig
+    except Exception as e:
+        logger.warning(f"Could not create income vs health chart: {e}")
+        return None
+
+def create_health_inequality_chart(df):
+    """Create visualization showing health inequality across income levels"""
+    if df is None or df.empty:
+        return None
+    
+    if not all(col in df.columns for col in ["INCOME", "Health_Index", "HEALTHCARE_EXPENSES"]):
+        return None
+    
+    try:
+        # Create income deciles for more granular analysis
+        df_with_deciles = df.copy()
+        df_with_deciles['Income_Decile'] = pd.qcut(
+            df_with_deciles['INCOME'], 
+            q=10, 
+            labels=[f'D{i}' for i in range(1, 11)]
+        )
+        
+        # Calculate mean health index and healthcare expenses by income decile
+        inequality_data = df_with_deciles.groupby('Income_Decile').agg({
+            'Health_Index': 'mean',
+            'HEALTHCARE_EXPENSES': 'mean'
+        }).reset_index()
+        
+        # Create a dual-axis chart
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        
+        # Add health index line
+        fig.add_trace(
+            go.Scatter(
+                x=inequality_data['Income_Decile'], 
+                y=inequality_data['Health_Index'],
+                name="Health Index",
+                line=dict(color=nhs_colors["primary"], width=3),
+                mode="lines+markers"
+            ),
+            secondary_y=False
+        )
+        
+        # Add healthcare expenses bars
+        fig.add_trace(
+            go.Bar(
+                x=inequality_data['Income_Decile'], 
+                y=inequality_data['HEALTHCARE_EXPENSES'],
+                name="Healthcare Expenses",
+                marker_color=nhs_colors["accent"],
+                opacity=0.7
+            ),
+            secondary_y=True
+        )
+        
+        # Customize the layout
+        fig.update_layout(
+            title="Health Inequality Across Income Levels",
+            xaxis_title="Income Decile (D1=Lowest, D10=Highest)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+            height=500,
+            margin=dict(l=20, r=20, t=60, b=20),
+            hovermode="x unified"
+        )
+        
+        # Set y-axis titles
+        fig.update_yaxes(title_text="Average Health Index", secondary_y=False, color=nhs_colors["primary"])
+        fig.update_yaxes(title_text="Average Healthcare Expenses ($)", secondary_y=True, color=nhs_colors["accent"])
+        
+        return fig
+    except Exception as e:
+        logger.warning(f"Could not create health inequality chart: {e}")
+        return None
+
+def create_intersectional_analysis(df):
+    """Create visualizations showing intersectional analysis of health outcomes"""
+    if df is None or df.empty:
+        return None
+    
+    # Check for required columns
+    req_cols = ["GENDER", "RACE", "INCOME", "Health_Index", "AGE"]
+    if not all(col in df.columns for col in req_cols):
+        return None
+    
+    try:
+        # 1. Gender and Race Intersectional Analysis
+        # Get the top 5 most common racial categories
+        top_races = df["RACE"].value_counts().nlargest(5).index.tolist()
+        filtered_df = df[df["RACE"].isin(top_races)].copy()
+        
+        # Calculate mean health index by gender and race
+        intersect_data = filtered_df.groupby(["GENDER", "RACE"])["Health_Index"].mean().reset_index()
+        
+        # Create the first intersectional chart
+        fig1 = px.bar(
+            intersect_data,
+            x="RACE",
+            y="Health_Index",
+            color="GENDER",
+            barmode="group",
+            title="Intersectional Analysis: Gender and Race",
+            color_discrete_sequence=[nhs_colors["primary"], nhs_colors["risk_medium"]],
+            labels={
+                "RACE": "Race",
+                "Health_Index": "Average Health Index",
+                "GENDER": "Gender"
+            }
+        )
+        
+        fig1.update_layout(height=500, margin=dict(l=20, r=20, t=40, b=20), autosize=True)
+        
+        # 2. Age, Gender, and Health Outcomes
+        # Create age groups for analysis
+        if "Age_Group" not in filtered_df.columns:
+            filtered_df["Age_Group"] = pd.cut(
+                filtered_df["AGE"],
+                bins=[0, 18, 35, 50, 65, 80, 120],
+                labels=["0-18", "19-35", "36-50", "51-65", "66-80", "80+"]
+            )
+        
+        # Calculate mean health index by age group and gender
+        age_gender_data = filtered_df.groupby(["Age_Group", "GENDER"])["Health_Index"].mean().reset_index()
+        
+        # Create the second intersectional chart
+        fig2 = px.line(
+            age_gender_data,
+            x="Age_Group",
+            y="Health_Index",
+            color="GENDER",
+            markers=True,
+            title="Intersectional Analysis: Age and Gender",
+            color_discrete_sequence=[nhs_colors["primary"], nhs_colors["risk_medium"]],
+            labels={
+                "Age_Group": "Age Group",
+                "Health_Index": "Average Health Index",
+                "GENDER": "Gender"
+            }
+        )
+        
+        fig2.update_layout(height=500, margin=dict(l=20, r=20, t=40, b=20), autosize=True)
+        
+        return [fig1, fig2]
+    except Exception as e:
+        logger.warning(f"Could not create intersectional analysis charts: {e}")
+        return None
+
+def create_clinical_risk_clusters(df, model_name=""):
+    """Create visualization showing clinical risk clusters"""
+    if df is None or df.empty:
+        return None
+    
+    # Check for required columns
+    if not all(col in df.columns for col in ["Health_Index", "CharlsonIndex", "ElixhauserIndex"]):
+        return None
+    
+    try:
+        # Sample data if too large
+        if len(df) > 3000:
+            df_sample = df.sample(3000, random_state=42)
+        else:
+            df_sample = df.copy()
+        
+        # Create 3D scatter plot
+        fig = px.scatter_3d(
+            df_sample,
+            x="Health_Index",
+            y="CharlsonIndex",
+            z="ElixhauserIndex",
+            color="Cluster" if "Cluster" in df_sample.columns else "Risk_Category",
+            title=f"Clinical Risk Stratification - {model_name}",
+            labels={
+                "Health_Index": "Health Index",
+                "CharlsonIndex": "Charlson Index",
+                "ElixhauserIndex": "Elixhauser Index",
+                "Cluster": "Risk Cluster",
+                "Risk_Category": "Risk Category"
+            },
+            color_discrete_sequence=risk_colors
+        )
+        
+        fig.update_layout(height=800, margin=dict(l=20, r=20, t=40, b=20), autosize=True)
+        return fig
+    except Exception as e:
+        logger.warning(f"Could not create clinical risk clusters visualization: {e}")
+        return None
+
+# Progress queue and process handle initialization
+progress_queue = queue.Queue(maxsize=10_000)
+process_handle = None
+process_lock = threading.Lock()
+
+from pathlib import Path
+def _build_command(population, perf_opts, mem_util, cpu_util, threads, use_remote=False):
+    flags = [
+        f"--population={population}",
+        *(opt for opt in (
+            "--enable-xai"          if "enable_xai"          in perf_opts else "",
+            "--performance-mode"    if "performance_mode"    in perf_opts else "",
+            "--extreme-performance" if "extreme_performance" in perf_opts else "",
+            "--force-cpu"           if "force_cpu"           in perf_opts else "",
+        ) if opt),
+        f"--memory-util={mem_util}",
+        f"--cpu-util={cpu_util}",
+        f"--threads={threads}",
+    ]
+    
+    if use_remote:
+        # Build a single shell string that runs in the Pi's working dir
+        remote_cmd = " ".join(["./GenerateAndPredict", *map(shlex.quote, flags)])
+        return [
+            "ssh",
+            "-i", SSH_KEY_PATH,
+            "-o", "StrictHostKeyChecking=no",  # Don't ask for host key verification
+            "-o", "UserKnownHostsFile=/dev/null",  # Don't store host key
+            "-o", "LogLevel=ERROR",  # Reduce SSH noise
+            SSH_HOST,
+            f"cd {shlex.quote(REMOTE_WORKDIR)} && {remote_cmd}"
+        ]
+    else:
+        # Legacy local execution keeps working
+        exe_root = Path(__file__).resolve().parents[1]
+        for cand in (
+            exe_root / "GenerateAndPredict.exe",
+            exe_root / "GenerateAndPredict",
+            Path("./GenerateAndPredict.exe"),
+            Path("./GenerateAndPredict"),
+        ):
+            if cand.exists():
+                exe_path = str(cand)
+                break
+        else:
+            raise FileNotFoundError("GenerateAndPredict executable not found")
+        return [exe_path, *flags]
+
+def _launch_generate_and_predict(cmd: list[str]) -> None:
+    global process_handle
+
+    logger.info(f"Launching command: {' '.join(cmd)}")
+    
+    # Determine if this is a remote SSH execution
+    is_remote = cmd[0] == "ssh" if cmd else False
+    
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        universal_newlines=True,
+        creationflags=(
+            subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        ),
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    ) as proc:
+        with process_lock:
+            process_handle = proc
+
+        # Log the start of execution
+        if is_remote:
+            progress_queue.put_nowait("[INFO] Started remote execution on Raspberry Pi")
+            progress_queue.put_nowait("[PROGRESS] Initializing")
+        else:
+            progress_queue.put_nowait("[INFO] Started local execution")
+
+        while True:
+            raw = proc.stdout.readline()
+            if not raw:
+                break
+                
+            line = raw.rstrip("\n")
+            
+            # For remote execution, we need to parse the output differently
+            if is_remote:
+                # Look for progress indicators in the output
+                if "[INFO]" in line:
+                    progress_queue.put_nowait(line)
+                elif "[PROGRESS]" in line:
+                    progress_queue.put_nowait(line)
+                elif "[ERROR]" in line:
+                    progress_queue.put_nowait(line)
+                elif "[WARNING]" in line:
+                    progress_queue.put_nowait(line)
+                elif "connection closed" in line.lower():
+                    progress_queue.put_nowait("[WARNING] SSH connection closed unexpectedly")
+                else:
+                    # For other output, prefix with [INFO] to ensure it's captured
+                    progress_queue.put_nowait(f"[INFO] {line}")
+            else:
+                progress_queue.put_nowait(line)
+            
+            # Make sure important progress messages are flushed immediately
+            if "[PROGRESS]" in line:
+                sys.stdout.flush()
+
+        # Check return code and put appropriate message in queue
+        return_code = proc.returncode
+        if return_code == 0:
+            if is_remote:
+                progress_queue.put_nowait("[INFO] Remote execution completed successfully")
+                progress_queue.put_nowait("[PROGRESS] Completed")
+            else:
+                progress_queue.put_nowait("[INFO] Local execution completed successfully")
+        else:
+            if is_remote:
+                progress_queue.put_nowait(f"[ERROR] Remote execution failed with code {return_code}")
+            else:
+                progress_queue.put_nowait(f"[ERROR] Local execution failed with code {return_code}")
+
+        progress_queue.put_nowait(f"[EXITCODE] {return_code}")
+
+    with process_lock:
+        process_handle = None
+
+@app.callback(
+    Output("system-resources-content", "children"),
+    [Input("system-resources-interval", "n_intervals"),
+     Input("execution-mode-toggle", "value")],
+    prevent_initial_call=True
+)
+def update_system_resources(n_intervals, execution_mode):
+    """Update system resources display"""
+    try:
+        if execution_mode == "remote":
+            system_info = get_remote_system_resources()
+            if system_info is None:
+                return html.Div([
+                    html.H6("Remote System Status", className="mt-3"),
+                    html.P("Failed to connect to Raspberry Pi", className="text-danger"),
+                    html.P("Please check:", className="mt-2"),
+                    html.Ul([
+                        html.Li("SSH connection settings"),
+                        html.Li("Raspberry Pi is powered on"),
+                        html.Li("Network connectivity"),
+                        html.Li("SSH key permissions"),
+                        html.Li("Hostname resolution (try using IP address instead of hostname)")
+                    ]),
+                    html.P([
+                        "Current SSH settings: ",
+                        html.Code(f"Host: {SSH_HOST}, Key: {SSH_KEY_PATH}")
+                    ], className="mt-3")
+                ])
+        else:
+            system_info, _ = get_system_resources()
+        
+        # Create resource bars
+        cpu_bar = dbc.Progress(
+            value=system_info["cpu_percent"],
+            label=f"{system_info['cpu_percent']:.1f}%",
+            color="primary",
+            className="mb-2"
+        )
+        
+        memory_bar = dbc.Progress(
+            value=system_info["memory_percent"],
+            label=f"{system_info['memory_percent']:.1f}%",
+            color="info",
+            className="mb-2"
+        )
+        
+        # Create system info display
+        system_info_display = [
+            html.H6("System Information", className="mt-3"),
+            html.P(f"Platform: {system_info['platform']}"),
+            html.P(f"Processor: {system_info['processor']}"),
+            html.P(f"CPU Cores: {system_info['cpu_count']}"),
+            html.H6("Resource Usage", className="mt-3"),
+            html.P("CPU Usage:"),
+            cpu_bar,
+            html.P("Memory Usage:"),
+            memory_bar,
+            html.P(f"Memory: {system_info['memory_used_gb']:.1f}GB / {system_info['memory_total_gb']:.1f}GB")
+        ]
+        
+        # Add Raspberry Pi specific information
+        if system_info.get("temperature") is not None:
+            temp_color = "success" if system_info["temperature"] < 70 else "danger"
+            system_info_display.extend([
+                html.H6("Raspberry Pi Status", className="mt-3"),
+                html.P([
+                    "Temperature: ",
+                    html.Span(
+                        f"{system_info['temperature']}°C",
+                        className=f"text-{temp_color}"
+                    )
+                ]),
+                html.P(f"Uptime: {system_info.get('uptime', 'N/A')}"),
+                html.P(f"Load Average: {system_info.get('load_average', 'N/A'):.2f}"),
+                html.P(f"Connected to: {system_info.get('hostname', 'N/A')}")
+            ])
+        
+        return html.Div(system_info_display)
+        
+    except Exception as e:
+        logger.error(f"Error updating system resources: {str(e)}")
+        return html.Div("Error updating system resources", className="text-danger")
 
 if __name__ == "__main__":
     app.run_server(debug=True)
