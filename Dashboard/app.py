@@ -1358,36 +1358,36 @@ def create_stage_markers(current_stage, overall_progress, eta="calculating..."):
     )
 
 @app.callback(
-    Output("progress-interval",    "disabled"),
-    Output("run-model-btn",        "disabled"),
-    Output("cancel-btn-container", "style"),
-    Output("reset-btn-container",  "style"),
-    Input("run-model-btn",   "n_clicks"),
-    Input("cancel-model-btn","n_clicks"),
-    Input("reset-model-btn", "n_clicks"),
-    Input("execution-state-store", "data"),  # Add this input
-    State("population-input",   "value"),
-    State("performance-options","value"),
-    State("memory-util-slider", "value"),
-    State("cpu-util-slider",    "value"),
-    State("threads-slider",     "value"),
-    State("execution-mode-toggle", "value"),
+    [Output("progress-interval",    "disabled"),
+     Output("run-model-btn",        "disabled"),
+     Output("cancel-btn-container", "style"),
+     Output("reset-btn-container",  "style"),
+     Output("model-run-state-store", "data")],
+    [Input("run-model-btn",   "n_clicks"),
+     Input("cancel-model-btn","n_clicks"),
+     Input("reset-model-btn", "n_clicks"),
+     Input("execution-state-store", "data")],
+    [State("population-input",   "value"),
+     State("performance-options","value"),
+     State("memory-util-slider", "value"),
+     State("cpu-util-slider",    "value"),
+     State("threads-slider",     "value"),
+     State("execution-mode-toggle", "value"),
+     State("model-run-state-store", "data")],
     prevent_initial_call=True,
 )
 def start_or_cancel(run_clicks, cancel_clicks, reset_clicks, execution_state,
                     population, perf_opts,
                     mem_util, cpu_util, threads,
-                    execution_mode):
-
+                    execution_mode, run_state):
     ctx = dash.callback_context
     trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
     
     # Show reset button if execution completed or errored
     if trigger_id == "execution-state-store" and execution_state:
         if execution_state.get("status") in ["completed", "error"]:
-            # Keep existing state for other outputs
-            return no_update, no_update, no_update, {"display": "block", "marginTop": "10px"}
-        return no_update, no_update, no_update, {"display": "none"}
+            return no_update, no_update, no_update, {"display": "block", "marginTop": "10px"}, run_state
+        return no_update, no_update, no_update, {"display": "none"}, run_state
 
     if trigger_id == "cancel-model-btn":
         with process_lock:
@@ -1397,23 +1397,24 @@ def start_or_cancel(run_clicks, cancel_clicks, reset_clicks, execution_state,
                     process_handle.wait(timeout=5)
                 except Exception:
                     process_handle.kill()
-        return True, False, {"display": "none"}, {"display": "none"}
+        return True, False, {"display": "none"}, {"display": "none"}, {"running": False}
 
     if trigger_id == "reset-model-btn":
         # Reset the UI state to allow running the model again
-        return True, False, {"display": "none"}, {"display": "none"}
+        return True, False, {"display": "none"}, {"display": "none"}, {"running": False}
 
-    if not run_clicks:
-        raise PreventUpdate
+    # Robust run logic: allow run if not currently running
+    if trigger_id == "run-model-btn" and (not run_state or not run_state.get("running", False)):
+        use_remote = (execution_mode == "remote")
+        cmd = _build_command(population, perf_opts, mem_util, cpu_util, threads, use_remote)
+        threading.Thread(
+            target=_launch_generate_and_predict, args=(cmd,), daemon=True
+        ).start()
+        # Enable progress interval, disable run button, show cancel, hide reset, set running state
+        return False, True, {"display": "block"}, {"display": "none"}, {"running": True}
 
-    # Pass the execution mode to _build_command
-    use_remote = (execution_mode == "remote")
-    cmd = _build_command(population, perf_opts, mem_util, cpu_util, threads, use_remote)
-    threading.Thread(
-        target=_launch_generate_and_predict, args=(cmd,), daemon=True
-    ).start()
-
-    return False, True, {"display": "block"}, {"display": "none"}
+    # Default: do not update
+    raise PreventUpdate
 
 @app.callback(
     Output("execution-state-store", "data"),
@@ -2053,6 +2054,7 @@ app.layout = html.Div(
         dcc.Markdown(
             """
         <style>
+            @import url('https://fonts.googleapis.com/css2?family=MuseoModerno:ital,wght@0,100..900;1,100..900&display=swap');
             .stage-marker .stage-icon-container {
                 transition: all 0.3s ease;
             }
@@ -2070,9 +2072,18 @@ app.layout = html.Div(
             .stage-marker.active .stage-icon-container {
                 animation: pulse 2s infinite;
             }
-            """
-            + performance_css
-            + """
+            .vitai-logo {
+                font-family: 'MuseoModerno', cursive, sans-serif !important;
+                font-weight: 900 !important;
+                font-variation-settings: "wght" 900;
+                letter-spacing: 0.08em;
+                text-transform: uppercase !important;
+                color: #005EB8 !important;
+                font-size: 2.6rem !important;
+                line-height: 1.1;
+                margin-bottom: 0.2em;
+                display: inline-block;
+            }
         </style>
     """,
             dangerously_allow_html=True,
@@ -2080,7 +2091,7 @@ app.layout = html.Div(
         html.Div(
             [
                 html.H1(
-                    "VITAI Healthcare Analytics Dashboard",
+                    [html.Span("VITAI", className="vitai-logo"), " Healthcare Analytics Dashboard"],
                     style={"color": nhs_colors["primary"], "marginBottom": "5px"},
                 ),
                 html.P(
@@ -2108,6 +2119,7 @@ app.layout = html.Div(
         html.Div(id="memory-management", style={"display": "none"}),
         patient_modal,
         results_container,
+        dcc.Store(id="model-run-state-store", storage_type="memory"),
     ],
     style={"backgroundColor": nhs_colors["background"], "padding": "15px"},
 )
@@ -4347,7 +4359,7 @@ def _launch_generate_and_predict(cmd: list[str]) -> None:
     prevent_initial_call=True
 )
 def update_system_resources(n_intervals, execution_mode):
-    """Update system resources display"""
+    """Update system resources display with modern grid layout and gauges"""
     try:
         if execution_mode == "remote":
             system_info = get_remote_system_resources()
@@ -4371,51 +4383,161 @@ def update_system_resources(n_intervals, execution_mode):
         else:
             system_info, _ = get_system_resources()
         
-        # Create resource bars
-        cpu_bar = dbc.Progress(
+        # Validate system_info before using
+        required_keys = [
+            "cpu_percent", "memory_percent", "processor", "cpu_count", "memory_total_gb", "platform"
+        ]
+        missing_or_none = [k for k in required_keys if k not in system_info or system_info[k] is None]
+        if missing_or_none:
+            logger.error(f"System info missing or None for keys: {missing_or_none}. system_info: {system_info}")
+            return html.Div([
+                html.H6("System Monitor Error", className="mt-3"),
+                html.P("Could not retrieve system resource information.", className="text-danger"),
+                html.P(f"Missing or invalid keys: {', '.join(missing_or_none)}", className="text-muted small"),
+                html.P("Try refreshing the page or check your system monitoring dependencies.", className="text-muted small")
+            ])
+        
+        # Create circular gauge for CPU (remove 'shape': 'semi')
+        cpu_gauge = go.Figure(go.Indicator(
+            mode="gauge+number",
             value=system_info["cpu_percent"],
-            label=f"{system_info['cpu_percent']:.1f}%",
-            color="primary",
-            className="mb-2"
+            domain={'x': [0, 1], 'y': [0, 1]},
+            gauge={
+                'axis': {'range': [0, 100], 'tickwidth': 2, 'tickcolor': "#333"},
+                'bar': {'color': "rgb(0, 123, 255)", 'thickness': 0.25},
+                'steps': [
+                    {'range': [0, 50], 'color': "rgb(40, 167, 69)"},
+                    {'range': [50, 80], 'color': "rgb(255, 193, 7)"},
+                    {'range': [80, 100], 'color': "rgb(220, 53, 69)"}
+                ],
+                'threshold': {
+                    'line': {'color': "red", 'width': 4},
+                    'thickness': 0.75,
+                    'value': 90
+                }
+                # 'shape': 'angular' is default, so omit
+            },
+            number={
+                'font': {'size': 32, 'color': '#223A5E'},
+                'suffix': '%',
+            },
+            title={'text': "CPU Usage (%)", 'font': {'size': 18, 'color': '#223A5E'}},
+        ))
+        cpu_gauge.update_layout(
+            height=220,
+            margin=dict(l=10, r=10, t=40, b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
         )
-        
-        memory_bar = dbc.Progress(
+
+        # Create circular gauge for Memory (remove 'shape': 'semi')
+        memory_gauge = go.Figure(go.Indicator(
+            mode="gauge+number",
             value=system_info["memory_percent"],
-            label=f"{system_info['memory_percent']:.1f}%",
-            color="info",
-            className="mb-2"
+            domain={'x': [0, 1], 'y': [0, 1]},
+            gauge={
+                'axis': {'range': [0, 100], 'tickwidth': 2, 'tickcolor': "#333"},
+                'bar': {'color': "rgb(23, 162, 184)", 'thickness': 0.25},
+                'steps': [
+                    {'range': [0, 50], 'color': "rgb(40, 167, 69)"},
+                    {'range': [50, 80], 'color': "rgb(255, 193, 7)"},
+                    {'range': [80, 100], 'color': "rgb(220, 53, 69)"}
+                ],
+                'threshold': {
+                    'line': {'color': "red", 'width': 4},
+                    'thickness': 0.75,
+                    'value': 90
+                }
+                # 'shape': 'angular' is default, so omit
+            },
+            number={
+                'font': {'size': 32, 'color': '#223A5E'},
+                'suffix': '%',
+            },
+            title={'text': "Memory Usage (%)", 'font': {'size': 18, 'color': '#223A5E'}},
+        ))
+        memory_gauge.update_layout(
+            height=220,
+            margin=dict(l=10, r=10, t=40, b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
         )
-        
-        # Create system info display
+
+        # Create system info cards
         system_info_display = [
-            html.H6("System Information", className="mt-3"),
-            html.P(f"Platform: {system_info['platform']}"),
-            html.P(f"Processor: {system_info['processor']}"),
-            html.P(f"CPU Cores: {system_info['cpu_count']}"),
-            html.H6("Resource Usage", className="mt-3"),
-            html.P("CPU Usage:"),
-            cpu_bar,
-            html.P("Memory Usage:"),
-            memory_bar,
-            html.P(f"Memory: {system_info['memory_used_gb']:.1f}GB / {system_info['memory_total_gb']:.1f}GB")
+            dbc.Row([
+                dbc.Col([
+                    html.Div([
+                        html.H6("System Information", className="text-center mb-3"),
+                        html.Div([
+                            html.P([
+                                html.I(className="fas fa-microchip me-2"),
+                                f"Processor: {system_info['processor']}"
+                            ], className="mb-2"),
+                            html.P([
+                                html.I(className="fas fa-server me-2"),
+                                f"CPU Cores: {system_info['cpu_count']}"
+                            ], className="mb-2"),
+                            html.P([
+                                html.I(className="fas fa-memory me-2"),
+                                f"Total Memory: {system_info['memory_total_gb']:.1f}GB"
+                            ], className="mb-2"),
+                            html.P([
+                                html.I(className="fas fa-desktop me-2"),
+                                f"Platform: {system_info['platform']}"
+                            ], className="mb-2"),
+                        ], className="p-3 bg-light rounded")
+                    ], className="h-100")
+                ], width=12, md=4),
+                dbc.Col([
+                    html.Div([
+                        html.H6("CPU Usage", className="text-center mb-3"),
+                        dcc.Graph(figure=cpu_gauge, config={'displayModeBar': False})
+                    ], className="h-100")
+                ], width=12, md=4),
+                dbc.Col([
+                    html.Div([
+                        html.H6("Memory Usage", className="text-center mb-3"),
+                        dcc.Graph(figure=memory_gauge, config={'displayModeBar': False})
+                    ], className="h-100")
+                ], width=12, md=4)
+            ], className="mb-4")
         ]
         
-        # Add Raspberry Pi specific information
+        # Add Raspberry Pi specific information if available
         if system_info.get("temperature") is not None:
             temp_color = "success" if system_info["temperature"] < 70 else "danger"
-            system_info_display.extend([
-                html.H6("Raspberry Pi Status", className="mt-3"),
-                html.P([
-                    "Temperature: ",
-                    html.Span(
-                        f"{system_info['temperature']}°C",
-                        className=f"text-{temp_color}"
-                    )
-                ]),
-                html.P(f"Uptime: {system_info.get('uptime', 'N/A')}"),
-                html.P(f"Load Average: {system_info.get('load_average', 'N/A'):.2f}"),
-                html.P(f"Connected to: {system_info.get('hostname', 'N/A')}")
-            ])
+            system_info_display.append(
+                dbc.Row([
+                    dbc.Col([
+                        html.Div([
+                            html.H6("Raspberry Pi Status", className="text-center mb-3"),
+                            html.Div([
+                                html.P([
+                                    html.I(className="fas fa-thermometer-half me-2"),
+                                    "Temperature: ",
+                                    html.Span(
+                                        f"{system_info['temperature']}°C",
+                                        className=f"text-{temp_color}"
+                                    )
+                                ], className="mb-2"),
+                                html.P([
+                                    html.I(className="fas fa-clock me-2"),
+                                    f"Uptime: {system_info.get('uptime', 'N/A')}"
+                                ], className="mb-2"),
+                                html.P([
+                                    html.I(className="fas fa-tachometer-alt me-2"),
+                                    f"Load Average: {system_info.get('load_average', 'N/A'):.2f}"
+                                ], className="mb-2"),
+                                html.P([
+                                    html.I(className="fas fa-network-wired me-2"),
+                                    f"Connected to: {system_info.get('hostname', 'N/A')}"
+                                ], className="mb-2"),
+                            ], className="p-3 bg-light rounded")
+                        ], className="h-100")
+                    ], width=12)
+                ])
+            )
         
         return html.Div(system_info_display)
         
