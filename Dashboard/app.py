@@ -1139,18 +1139,19 @@ def create_comorbidity_analysis(df):
         return None
 
 # Define external_stylesheets before app initialization
-external_stylesheets = [dbc.themes.FLATLY]
+external_stylesheets = [
+    "https://fonts.googleapis.com/css2?family=MuseoModerno:wght@900&display=swap",
+    dbc.themes.FLATLY,
+    {
+        "href": "https://use.fontawesome.com/releases/v5.8.1/css/all.css",
+        "rel": "stylesheet",
+    }
+]
 
 app = dash.Dash(
     __name__,
     suppress_callback_exceptions=True,
-    external_stylesheets=external_stylesheets
-    + [
-        {
-            "href": "https://use.fontawesome.com/releases/v5.8.1/css/all.css",
-            "rel": "stylesheet",
-        }
-    ],
+    external_stylesheets=external_stylesheets,
 )
 server = app.server
 
@@ -1400,7 +1401,7 @@ def start_or_cancel(run_clicks, cancel_clicks, reset_clicks, execution_state,
         return True, False, {"display": "none"}, {"display": "none"}, {"running": False}
 
     if trigger_id == "reset-model-btn":
-        # Reset the UI state to allow running the model again
+        # Fully reset the UI state to allow running the model again
         return True, False, {"display": "none"}, {"display": "none"}, {"running": False}
 
     # Robust run logic: allow run if not currently running
@@ -2054,7 +2055,6 @@ app.layout = html.Div(
         dcc.Markdown(
             """
         <style>
-            @import url('https://fonts.googleapis.com/css2?family=MuseoModerno:ital,wght@0,100..900;1,100..900&display=swap');
             .stage-marker .stage-icon-container {
                 transition: all 0.3s ease;
             }
@@ -2075,14 +2075,13 @@ app.layout = html.Div(
             .vitai-logo {
                 font-family: 'MuseoModerno', cursive, sans-serif !important;
                 font-weight: 900 !important;
-                font-variation-settings: "wght" 900;
-                letter-spacing: 0.08em;
                 text-transform: uppercase !important;
                 color: #005EB8 !important;
                 font-size: 2.6rem !important;
                 line-height: 1.1;
                 margin-bottom: 0.2em;
                 display: inline-block;
+                letter-spacing: 0.08em;
             }
         </style>
     """,
@@ -4397,7 +4396,7 @@ def update_system_resources(n_intervals, execution_mode):
                 html.P("Try refreshing the page or check your system monitoring dependencies.", className="text-muted small")
             ])
         
-        # Create circular gauge for CPU (remove 'shape': 'semi')
+        # Create circular gauge for CPU (match Memory gauge layout)
         cpu_gauge = go.Figure(go.Indicator(
             mode="gauge+number",
             value=system_info["cpu_percent"],
@@ -4415,7 +4414,6 @@ def update_system_resources(n_intervals, execution_mode):
                     'thickness': 0.75,
                     'value': 90
                 }
-                # 'shape': 'angular' is default, so omit
             },
             number={
                 'font': {'size': 32, 'color': '#223A5E'},
